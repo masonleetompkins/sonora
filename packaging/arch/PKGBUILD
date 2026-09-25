@@ -1,0 +1,48 @@
+# Maintainer: Sonora Developers <https://github.com/anomalyco/opencode>
+# Tracks Sonora's development branch and rebuilds from source.
+#
+# To build right now (no remote repository exists yet), this package builds
+# from a local clone. Set _gitremote to your fork to build from the network:
+#   _gitremote="git+https://github.com/USER/sonora.git"
+_gitremote="git+file:///home/mason/Projects/sonora"
+
+pkgname=sonora-git
+pkgver=0.13.0
+pkgrel=1
+pkgdesc="Native Linux synthesizer and DAW: beats, arrangement, FX, recording, pitch correction"
+arch=('x86_64')
+url="https://github.com/anomalyco/opencode"
+license=('GPL-3.0-only')
+depends=('alsa-lib' 'freetype2' 'fontconfig' 'libx11' 'libxext' 'libxinerama'
+         'libxrandr' 'libxcursor' 'libgl' 'gtk3' 'webkit2gtk-4.1' 'libcurl'
+         'pipewire-jack')
+makedepends=('git' 'cmake' 'ninja' 'pkgconf' 'gcc')
+provides=('sonora')
+conflicts=('sonora')
+source=("${pkgname}::${_gitremote}")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "${srcdir}/${pkgname}"
+  # Produces 0.13.0.r<commits>.g<hash> when tags like v0.13.0 exist.
+  git describe --long --tags 2>/dev/null | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
+}
+
+build() {
+  cmake -S "${srcdir}/${pkgname}" -B build -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DBUILD_TESTING=OFF
+  cmake --build build --parallel "$(nproc)"
+}
+
+check() {
+  # Reconfigure the same tree with tests enabled and run the suite.
+  cmake -S "${srcdir}/${pkgname}" -B build -DBUILD_TESTING=ON
+  cmake --build build --parallel "$(nproc)" --target SonoraTests
+  ctest --test-dir build --output-on-failure
+}
+
+package() {
+  DESTDIR="${pkgdir}" cmake --install build
+}

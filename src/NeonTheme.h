@@ -1,0 +1,175 @@
+#pragma once
+#include <juce_gui_basics/juce_gui_basics.h>
+
+namespace sonora::ui
+{
+inline const juce::Colour background { 0xff080b12 }, panel { 0xff101622 }, raised { 0xff192231 };
+inline const juce::Colour border { 0xff263346 }, text { 0xffe7f0fc }, muted { 0xff8b9db7 };
+inline const juce::Colour cyan { 0xff57efd5 }, violet { 0xffb19aff }, blue { 0xff62aaff }, danger { 0xffff7c93 };
+
+inline juce::Font font(float size, bool bold = false, float tracking = 0.0f)
+{
+    return juce::Font(juce::FontOptions(size, bold ? juce::Font::bold : juce::Font::plain))
+        .withExtraKerningFactor(tracking);
+}
+
+inline void caption(juce::Graphics& g, const juce::String& value, juce::Rectangle<int> area,
+                    juce::Colour colour = muted, float size = 10.0f)
+{
+    g.setFont(font(size, true, 0.13f));
+    g.setColour(colour);
+    g.drawText(value, area, juce::Justification::centredLeft);
+}
+
+inline void surface(juce::Graphics& g, juce::Rectangle<float> bounds, float radius = 12.0f)
+{
+    g.setColour(juce::Colours::black.withAlpha(0.25f));
+    g.fillRoundedRectangle(bounds.translated(0, 3), radius);
+    g.setGradientFill(juce::ColourGradient(panel.brighter(0.045f), bounds.getTopLeft(),
+                                          panel.darker(0.13f), bounds.getBottomRight(), false));
+    g.fillRoundedRectangle(bounds, radius);
+    g.setColour(border.withAlpha(0.8f));
+    g.drawRoundedRectangle(bounds.reduced(0.5f), radius, 1.0f);
+}
+
+class NeonTheme final : public juce::LookAndFeel_V4
+{
+public:
+    NeonTheme()
+    {
+        setColour(juce::ResizableWindow::backgroundColourId, background);
+        setColour(juce::TextButton::buttonColourId, raised);
+        setColour(juce::TextButton::buttonOnColourId, cyan);
+        setColour(juce::TextButton::textColourOffId, text);
+        setColour(juce::TextButton::textColourOnId, cyan);
+        setColour(juce::Label::textColourId, text);
+        setColour(juce::Slider::thumbColourId, cyan);
+        setColour(juce::Slider::textBoxTextColourId, text);
+        setColour(juce::Slider::textBoxBackgroundColourId, background);
+        setColour(juce::Slider::textBoxOutlineColourId, border);
+        setColour(juce::TextEditor::backgroundColourId, background);
+        setColour(juce::TextEditor::textColourId, text);
+        setColour(juce::TextEditor::highlightColourId, cyan.withAlpha(0.25f));
+        setColour(juce::TextEditor::outlineColourId, border);
+        setColour(juce::TextEditor::focusedOutlineColourId, cyan);
+        setColour(juce::ComboBox::backgroundColourId, raised);
+        setColour(juce::ComboBox::textColourId, text);
+        setColour(juce::ComboBox::outlineColourId, border);
+        setColour(juce::PopupMenu::backgroundColourId, panel);
+        setColour(juce::PopupMenu::textColourId, text);
+        setColour(juce::PopupMenu::highlightedBackgroundColourId, cyan.withAlpha(0.15f));
+        setColour(juce::PopupMenu::highlightedTextColourId, cyan);
+        setColour(juce::TooltipWindow::backgroundColourId, raised);
+        setColour(juce::TooltipWindow::textColourId, text);
+        setColour(juce::TooltipWindow::outlineColourId, border);
+    }
+
+    juce::Font getTextButtonFont(juce::TextButton&, int height) override
+    {
+        return font(height < 28 ? 10.5f : 12.0f, true, 0.025f);
+    }
+
+    void drawButtonBackground(juce::Graphics& g, juce::Button& button, const juce::Colour&,
+                               bool hover, bool down) override
+    {
+        const auto role = button.getProperties()["role"].toString();
+        const auto accent = button.findColour(juce::TextButton::buttonOnColourId);
+        const bool active = button.getToggleState() || down;
+        const auto bounds = button.getLocalBounds().toFloat().reduced(1.5f);
+        const float alpha = button.isEnabled() ? 1.0f : 0.32f;
+        auto fill = active ? accent.withMultipliedBrightness(0.22f) : raised;
+        if (role == "primary") fill = accent;
+        if (hover) fill = fill.brighter(0.12f);
+        if (down) fill = fill.darker(0.1f);
+        if (active || (hover && role == "pad"))
+        {
+            g.setColour(accent.withAlpha(0.09f * alpha));
+            g.fillRoundedRectangle(bounds.expanded(1.5f), 10.0f);
+        }
+        g.setGradientFill(juce::ColourGradient(fill.withAlpha(alpha), bounds.getTopLeft(),
+            fill.darker(0.22f).withAlpha(alpha), bounds.getBottomLeft(), false));
+        g.fillRoundedRectangle(bounds, 8.0f);
+        g.setColour((active || hover || role == "primary" ? accent.withAlpha(0.65f) : border).withMultipliedAlpha(alpha));
+        g.drawRoundedRectangle(bounds, 8.0f, 1.0f);
+        if (button.hasKeyboardFocus(true))
+        {
+            g.setColour(accent);
+            g.drawRoundedRectangle(bounds.reduced(2), 6.0f, 1.0f);
+        }
+        if (role == "track")
+        {
+            g.setColour(accent.withAlpha(active ? 1.0f : 0.32f));
+            g.fillRoundedRectangle(bounds.getX() + 1, bounds.getY() + 13, 3.0f, bounds.getHeight() - 26, 1.5f);
+        }
+        if (role == "pad")
+        {
+            g.setColour(accent.withAlpha(down ? 1.0f : hover ? 0.7f : 0.3f));
+            g.fillRoundedRectangle(bounds.getX() + 13, bounds.getBottom() - 10, bounds.getWidth() - 26, 2, 1);
+        }
+    }
+
+    void drawButtonText(juce::Graphics& g, juce::TextButton& button, bool, bool down) override
+    {
+        const auto role = button.getProperties()["role"].toString();
+        const auto accent = button.findColour(juce::TextButton::buttonOnColourId);
+        const auto alpha = button.isEnabled() ? 1.0f : 0.35f;
+        const auto bounds = button.getLocalBounds();
+        const auto colour = role == "primary" ? background
+            : button.getToggleState() || down ? accent : text;
+        g.setColour(colour.withAlpha(alpha));
+        g.setFont(getTextButtonFont(button, button.getHeight()));
+        if (role == "track")
+        {
+            g.drawText(button.getButtonText(), bounds.reduced(18, 0).withTrimmedBottom(18), juce::Justification::centredLeft);
+            caption(g, button.getProperties()["detail"].toString(),
+                    { 18, 34, button.getWidth() - 32, 16 }, muted.withAlpha(alpha), 9.0f);
+        }
+        else if (role == "pad")
+        {
+            caption(g, button.getProperties()["shortcut"].toString(), { 14, 10, 30, 18 }, accent);
+            g.setColour(colour.withAlpha(alpha));
+            g.setFont(font(11.0f, true));
+            g.drawFittedText(button.getButtonText(), bounds.reduced(12, 0).withTrimmedTop(18).withTrimmedBottom(13),
+                             juce::Justification::centredLeft, 2);
+        }
+        else
+            g.drawFittedText(button.getButtonText(), bounds.reduced(8, 2), juce::Justification::centred, 1);
+    }
+
+    void drawRotarySlider(juce::Graphics& g, int x, int y, int width, int height, float value,
+                          float start, float end, juce::Slider& slider) override
+    {
+        const auto accent = slider.findColour(juce::Slider::thumbColourId);
+        auto bounds = juce::Rectangle<float>(static_cast<float>(x), static_cast<float>(y),
+            static_cast<float>(width), static_cast<float>(height)).reduced(12);
+        const auto radius = std::min(bounds.getWidth(), bounds.getHeight()) * 0.5f;
+        const auto centre = bounds.getCentre();
+        juce::Path arc, filled;
+        arc.addCentredArc(centre.x, centre.y, radius, radius, 0, start, end, true);
+        filled.addCentredArc(centre.x, centre.y, radius, radius, 0, start, start + value * (end - start), true);
+        g.setColour(border);
+        g.strokePath(arc, juce::PathStrokeType(3.0f));
+        g.setColour(accent.withAlpha(0.12f));
+        g.strokePath(filled, juce::PathStrokeType(9.0f));
+        g.setColour(accent);
+        g.strokePath(filled, juce::PathStrokeType(3.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+        auto knob = juce::Rectangle<float>(radius * 1.54f, radius * 1.54f).withCentre(centre);
+        g.setGradientFill(juce::ColourGradient(raised.brighter(0.08f), knob.getTopLeft(), background, knob.getBottomRight(), false));
+        g.fillEllipse(knob);
+        g.setColour(border.brighter(0.1f));
+        g.drawEllipse(knob, 1.0f);
+        const auto angle = start + value * (end - start) - juce::MathConstants<float>::halfPi;
+        const auto dx = std::cos(angle), dy = std::sin(angle);
+        g.setColour(accent);
+        g.drawLine(centre.x + dx * radius * 0.45f, centre.y + dy * radius * 0.45f,
+                   centre.x + dx * radius * 0.65f, centre.y + dy * radius * 0.65f, 3.0f);
+        for (int i = 0; i <= 10; ++i)
+        {
+            const auto a = start + static_cast<float>(i) * (end - start) / 10.0f - juce::MathConstants<float>::halfPi;
+            g.setColour(muted.withAlpha(0.4f));
+            g.drawLine(centre.x + std::cos(a) * (radius + 6), centre.y + std::sin(a) * (radius + 6),
+                       centre.x + std::cos(a) * (radius + 9), centre.y + std::sin(a) * (radius + 9), 1.0f);
+        }
+    }
+};
+}

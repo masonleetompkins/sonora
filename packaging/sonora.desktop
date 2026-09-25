@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Sonora
+GenericName=Music synthesizer and DAW
+Comment=Write beats, arrange songs, record vocals, and export mixes
+Exec=Sonora
+Icon=sonora
+Terminal=false
+Categories=AudioVideo;Audio;Music;Midi;Recorder;
+Keywords=DAW;synthesizer;drums;MIDI;recording;audio;
+StartupWMClass=Sonora

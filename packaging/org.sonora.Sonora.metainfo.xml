@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.sonora.Sonora</id>
+  <name>Sonora</name>
+  <summary>Native Linux synthesizer and DAW</summary>
+  <description>
+    <p>
+      Sonora is a native Linux music studio: a velocity-sensitive synthesizer,
+      a sampled drum kit with step sequencer, a four-slot pattern library with
+      song arrangement, per-track effects, vocal recording with pitch
+      correction, and offline WAV export.
+    </p>
+  </description>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <launchable type="desktop-id">sonora.desktop</launchable>
+  <provides>
+    <id>org.sonora.Sonora</id>
+  </provides>
+</component>
