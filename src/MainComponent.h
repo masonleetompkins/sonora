@@ -16,7 +16,8 @@ namespace sonora
 class MainComponent final : public juce::AudioAppComponent,
                               private juce::Timer,
                               private juce::AudioIODeviceCallback,
-                              private juce::MidiInputCallback
+                              private juce::MidiInputCallback,
+                              private juce::ChangeListener
 {
 public:
     MainComponent();
@@ -29,6 +30,9 @@ public:
                                           const juce::AudioIODeviceCallbackContext&) override;
     void audioDeviceAboutToStart(juce::AudioIODevice*) override {}
     void audioDeviceStopped() override {}
+    // A dead device must never take the transport or a take down with it:
+    // park everything and say so in the status bar.
+    void audioDeviceError(const juce::String& message) override;
     // MIDI router: everything musical flows to the engine collector, except
     // Mackie transport notes from MCU ports, which drive the transport.
     void handleIncomingMidiMessage(juce::MidiInput* source, const juce::MidiMessage& message) override;
@@ -36,6 +40,7 @@ public:
     void paint(juce::Graphics&) override;
     void resized() override;
     bool keyPressed(const juce::KeyPress&) override;
+    void changeListenerCallback(juce::ChangeBroadcaster*) override;
     void requestClose(std::function<void()> callback);
 
 private:
@@ -167,6 +172,9 @@ private:
     std::uint32_t selectedTake = 0, nextTakeId = 1;
     WaveCache waveCache;
     juce::String lastTakesSignature;
+    juce::File audioSettingsFile();
+    void saveAudioSettings();
+    juce::String audioErrorMessage;
     // MIDI hardware plug-and-play: auto-enabled input identifiers, MCU port
     // identifiers for transport routing, and a status-bar summary.
     juce::StringArray mcuDeviceIds;

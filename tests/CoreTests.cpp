@@ -1645,6 +1645,99 @@ void testInstances()
     require(sonora::sectionsSharingSlot(song, true, 3).empty(), "unused slot reports sharers");
 }
 
+void testAcceptance()
+{
+    // The reference song: demo-style melody A plus a sparser variation B,
+    // drums plus a busier variation, four alternating sections, mixed FX,
+    // and a sung take. Everything the app can do, rendered in one pass.
+    sonora::ProjectState song;
+    song.bpm = 120.0;
+    song.melodies[0].count = 3;
+    song.melodies[0].notes[0] = { 1, 0, 960, 48, 90 };
+    song.melodies[0].notes[1] = { 2, 0, 720, 60, 100 };
+    song.melodies[0].notes[2] = { 3, 960, 720, 64, 95 };
+    song.melodies[1].count = 2;
+    song.melodies[1].notes[0] = { 4, 0, 480, 55, 100 };
+    song.melodies[1].notes[1] = { 5, 960, 480, 67, 100 };
+    for (int step = 0; step < sonora::gridSteps; step += 4)
+        song.drumPatterns[0].steps[0][static_cast<std::size_t>(step)] = 110;
+    for (int step = 0; step < sonora::gridSteps; step += 2)
+        song.drumPatterns[1].steps[2][static_cast<std::size_t>(step)] = 80;
+    song.song.sections = 4;
+    song.song.melodyPattern = { 0, 1, 0, 1, 0, 0, 0, 0 };
+    song.song.drumPattern = { 0, 0, 1, 1, 0, 0, 0, 0 };
+    song.songMode = true;
+    song.melodyFx.eq.low = 3.0f;
+    song.melodyFx.delay.mix = 0.2f;
+    song.drumFx.comp.thresholdDb = -12.0f;
+    song.drumMix.volume = 0.9f;
+    song.master.ceilingDb = -1.0f;
+    // A two-second sung take starting at bar 2.
+    const auto media = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                           .getNonexistentChildFile("sonora-accept-media", "");
+    require(media.createDirectory().wasOk(), "acceptance media creation failed");
+    {
+        juce::WavAudioFormat format;
+        std::unique_ptr<juce::AudioFormatWriter> writer(format.createWriterFor(
+            new juce::FileOutputStream(media.getChildFile("vocal.wav")), 48000.0, 1, 16, {}, 0));
+        require(writer != nullptr, "vocal fixture write failed");
+        juce::AudioBuffer<float> vocal(1, 96000);
+        for (int i = 0; i < 96000; ++i)
+            vocal.setSample(0, i, 0.4f * std::sin(2.0 * juce::MathConstants<double>::pi * 220.0 * i / 48000.0));
+        require(writer->writeFromAudioSampleBuffer(vocal, 0, 96000), "vocal fixture samples failed");
+    }
+    song.takeCount = 1;
+    song.takes[0].id = 1;
+    song.takes[0].setFileName("vocal.wav");
+    song.takes[0].startTick = 3840;
+    song.takes[0].frames = 96000;
+    require(song.valid(), "reference song invalid");
+    // Save to disk and reload: the file round-trip is part of acceptance.
+    const auto projectFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                 .getNonexistentChildFile("acceptance", ".sonora.json");
+    require(sonora::ProjectIO::save(projectFile, song).wasOk(), "acceptance save failed");
+    sonora::ProjectState loaded;
+    require(sonora::ProjectIO::load(projectFile, loaded).wasOk() && loaded == song,
+            "acceptance reload changed the song");
+    // Bounce the loop and the full song, both carrying the vocal take.
+    sonora::ExportJob loopJob;
+    loopJob.project = loaded;
+    loopJob.mediaDir = media;
+    auto loop = sonora::OfflineExport::render(loopJob);
+    require(loop.ok(), "acceptance loop bounce failed");
+    sonora::ExportJob songJob = loopJob;
+    songJob.songRange = true;
+    songJob.tailSeconds = 0.5;
+    auto full = sonora::OfflineExport::render(songJob);
+    require(full.ok(), "acceptance song bounce failed");
+    require(full.audio.getNumSamples() > loop.audio.getNumSamples() * 3, "song bounce too short");
+    for (const auto* bounce : { &loop, &full })
+    {
+        require(bounce->audio.getMagnitude(0, bounce->audio.getNumSamples()) > 0.02f, "bounce silent");
+        require(bounce->peak <= 1.0f, "bounce clipped past the limiter");
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < bounce->audio.getNumSamples(); i += 97)
+                require(std::isfinite(bounce->audio.getSample(ch, i)), "bounce produced invalid audio");
+    }
+    // The vocal take is actually in the song bounce: it punches in at bar 2
+    // (tick 3840 = frame 96000 at 120 BPM) and runs 96000 frames.
+    float songVocal = 0.0f;
+    for (int i = 100000; i < 150000 && i < full.audio.getNumSamples(); ++i)
+        songVocal = std::max(songVocal, std::abs(full.audio.getSample(0, i)));
+    require(songVocal > 0.05f, "vocal take missing from song bounce");
+    // The persisted WAV plays back through a reader with sane headers.
+    const auto wavFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                             .getNonexistentChildFile("sonora-accept", ".wav");
+    require(sonora::OfflineExport::writeWav(wavFile, full, 16).wasOk(), "acceptance WAV write failed");
+    juce::WavAudioFormat wavFormat;
+    std::unique_ptr<juce::AudioFormatReader> reader(wavFormat.createReaderFor(
+        new juce::FileInputStream(wavFile), true));
+    require(reader != nullptr && reader->numChannels == 2
+        && reader->lengthInSamples == full.audio.getNumSamples(), "acceptance WAV header wrong");
+    require(projectFile.deleteFile() && wavFile.deleteFile() && media.deleteRecursively(),
+            "acceptance cleanup failed");
+}
+
 int main()
 {
     try
@@ -1657,6 +1750,7 @@ int main()
         testTakePlayback(); std::cout << "PASS song-mode take offset/level, mute, loop-mode silence\n";
         testVariations(); std::cout << "PASS pattern library round-trip, v5 migration, malformed slots\n";
         testInstances(); std::cout << "PASS make-unique detach, full-library refusal, sharing queries\n";
+        testAcceptance(); std::cout << "PASS reference song save/load, loop+s song bounce, vocal in mix\n";
         testKitPanelLogic(); std::cout << "PASS kit panel helpers\n";
         testKitSamples(); std::cout << "PASS sample import, resample, normalize, fallback, engine bank swap\n";
         testKitPersistence(); std::cout << "PASS v7 kit round-trip, v6 migration, malformed sample lists\n";

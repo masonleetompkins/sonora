@@ -1,6 +1,6 @@
 # Sonora
 
-A native Linux synthesizer and DAW in development. Version 0.14.0 uses C++20,
+A native Linux synthesizer and DAW in development. Version 0.15.0 uses C++20,
 JUCE 8.0.6, and CMake. Licensed GPL-3.0-only (see LICENSE); JUCE retains its
 own license. No third-party sound assets are bundled.
 
@@ -62,7 +62,11 @@ a fallback or for direct hardware access.
   and verify the input meter moves in **03 Audio** before pressing REC.
 - If you hear dropouts, raise the buffer size in Audio / MIDI; recording
   overruns are reported rather than silently dropped.
-- Audio settings are currently session-only (not persisted between launches).
+- Audio/MIDI setup (device, sample rate, buffer size, enabled MIDI inputs)
+  persists in `~/.config/sonora/audio.xml` and restores on launch.
+- The status bar reports CPU load, dropout (XRUN) count, and connected MIDI
+  controllers. If a device fails mid-session, the transport parks safely and
+  the status bar says how to recover.
 
 ## Current features
 

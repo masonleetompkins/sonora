@@ -1233,6 +1233,14 @@ MainComponent::MainComponent()
     setSize(1440, 900);
     projectChanged();
     selectChannel(0);
+    // Restore the previous audio/MIDI setup before opening channels; a
+    // missing or stale file falls back to fresh defaults silently.
+    std::unique_ptr<juce::XmlElement> savedAudio;
+    if (audioSettingsFile().existsAsFile())
+        savedAudio = juce::XmlDocument::parse(audioSettingsFile());
+    if (savedAudio != nullptr)
+        deviceManager.initialise(2, 2, savedAudio.get(), true);
+    deviceManager.addChangeListener(this);
     // Stereo inputs for vocal/instrument recording; devices without inputs
     // simply report zero input channels and disable recording.
     setAudioChannels(2, 2);
@@ -1258,6 +1266,8 @@ MainComponent::~MainComponent()
         finalizeTake();
     deviceManager.removeAudioCallback(this);
     deviceManager.removeMidiInputDeviceCallback({}, this);
+    deviceManager.removeChangeListener(this);
+    saveAudioSettings();
     shutdownAudio();
     engine.retireTakeSet(nullptr);
     takeStorage.reset();
@@ -1399,6 +1409,50 @@ void MainComponent::autoConnectMidi()
     {
         midiStatusText = summary;
         updateTrackControls(); // status bar picks the new text up this tick
+    }
+}
+
+void MainComponent::audioDeviceError(const juce::String& message)
+{
+    // Arrives on the audio thread: park the transport on the message thread.
+    juce::MessageManager::callAsync(
+        [safe = juce::Component::SafePointer<MainComponent>(this), message] {
+            if (safe == nullptr)
+                return;
+            if (safe->recording)
+                safe->finalizeTake();
+            safe->engine.stop();
+            safe->engine.keyboardState.allNotesOff(0);
+            safe->audioErrorMessage = message;
+        });
+}
+
+juce::File MainComponent::audioSettingsFile()
+{
+    auto root = juce::SystemStats::getEnvironmentVariable("XDG_CONFIG_HOME", {});
+    if (root.isEmpty() || !juce::File::isAbsolutePath(root))
+        root = juce::File::getSpecialLocation(juce::File::userHomeDirectory)
+                   .getChildFile(".config").getFullPathName();
+    return juce::File(root).getChildFile("sonora/audio.xml");
+}
+
+void MainComponent::saveAudioSettings()
+{
+    const auto file = audioSettingsFile();
+    file.getParentDirectory().createDirectory();
+    if (auto xml = deviceManager.createStateXml())
+        xml->writeTo(file);
+}
+
+void MainComponent::changeListenerCallback(juce::ChangeBroadcaster* source)
+{
+    if (source == &deviceManager)
+    {
+        // A fresh successful setup clears a previous device error; every
+        // setup change persists for the next launch.
+        if (deviceManager.getCurrentAudioDevice() != nullptr)
+            audioErrorMessage.clear();
+        saveAudioSettings();
     }
 }
 
@@ -2709,11 +2763,22 @@ void MainComponent::timerCallback()
     {
         if (timerTicks % 60 == 0)
             autoConnectMidi(); // hotplug scan: new controllers just work
-        if (auto* device = deviceManager.getCurrentAudioDevice())
+        const int xruns = deviceManager.getXRunCount();
+        const juce::String xrunText = xruns > 0 ? "   /   XRUN " + juce::String(xruns) : "";
+        if (!audioErrorMessage.isEmpty())
+        {
+            status.setText("AUDIO ERROR: " + audioErrorMessage + " — reopen Audio / MIDI to recover.",
+                           juce::dontSendNotification);
+            status.setColour(juce::Label::textColourId, ui::danger);
+        }
+        else if (auto* device = deviceManager.getCurrentAudioDevice())
+        {
             status.setText(device->getName() + "   /   " + juce::String(device->getCurrentSampleRate(), 0)
                 + " Hz   /   " + juce::String(device->getCurrentBufferSizeSamples()) + " samples   /   CPU "
-                + juce::String(deviceManager.getCpuUsage() * 100.0, 1) + "%   /   MIDI: " + midiStatusText,
+                + juce::String(deviceManager.getCpuUsage() * 100.0, 1) + "%" + xrunText + "   /   MIDI: " + midiStatusText,
                 juce::dontSendNotification);
+            status.setColour(juce::Label::textColourId, ui::muted);
+        }
         else
             status.setText("No audio device - choose an output in Audio / MIDI.   /   MIDI: " + midiStatusText,
                            juce::dontSendNotification);

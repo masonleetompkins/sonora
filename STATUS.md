@@ -1,44 +1,53 @@
-# Handoff status — 0.14.0
+# Handoff status — 0.15.0
 
 ## Completed this milestone
 
-- Added Arch packaging: `sonora-git` PKGBUILD (Release build, test stage,
-  explicit file installs), desktop entry, SVG icon, AppStream metainfo, and
-  the GPL-3.0-only license text.
-- CMake installs the binary, launcher, icon, metadata, and docs. The PKGBUILD
-  deliberately avoids `cmake --install` because JUCE offers no install toggle
-  and would stage all of its own headers into the package.
-- Initialized git version control for the project (v0.13.0 tagged) so the
-  `-git` package has a real source; build trees stay ignored.
-- README now documents packaged install, source builds, and a full PipeWire /
-  JACK / ALSA setup and troubleshooting section.
+- Persisted audio/MIDI setup (`~/.config/sonora/audio.xml`, XDG-aware):
+  device, sample rate, buffer size, and enabled MIDI inputs restore on launch,
+  save on every setup change, and save once more on clean exit.
+- XRUN counter in the status bar alongside CPU load and MIDI devices.
+- Device-error handling: a dead device parks the transport (finalizing any
+  take first), silences stuck notes, and turns the status bar into a red
+  recovery prompt; the next successful setup clears it.
+- Headless end-to-end acceptance test: builds a reference song (two melody
+  variations, two drum variations, four alternating sections, track FX, mixed
+  levels, limiter, and a sung take), saves/loads the project file, bounces
+  loop and song, and asserts durations, audibility, limiter ceiling, sample
+  validity, vocal presence in the mix, and WAV headers.
 
 ## Verified
 
-- `ctest` (Debug and Release): all suites pass, zero warnings (no code changed
-  this round beyond the version bump).
-- `cmake --install` to a test prefix: binary, desktop file, icon, metainfo,
-  license, and README land in the right FHS locations.
-- `desktop-file-validate`: clean.
-- `makepkg --printsrcinfo`: metadata parses (deps, license, provides).
-- `package()` file layout simulated against the real Release binary: exact
-  five install targets verified.
+- `ctest` (Debug and Release): all 27 suites pass, zero warnings.
+- Live on this machine: `audio.xml` written with the ALSA setup plus the
+  auto-enabled Minilab3 MIDI/MCU/ALV inputs (DIN THRU excluded); status bar
+  shows the MIDI summary; startup clean, no assertions.
+- Reference song: song bounce longer than 3x the loop, both audible and
+  unclipped, vocal energy confirmed in its punch-in window.
 
-## Known packaging gaps (need a full build host)
+## Debugging notes (do not regress)
 
-- A from-scratch `makepkg -si` was not run here: this machine lacks system
-  `cmake`/`ninja` (builds use an isolated venv) and sudo for makedeps.
-- No git remote exists yet; the PKGBUILD builds from a local clone path with
-  a one-line `_gitremote` switch documented at its top. Set a remote, push,
-  and point it at the network URL before AUR submission.
-- `namcap` and AppStream validation (`appstreamcli validate`) were not
-  available; run both before submitting anywhere.
+- `AudioAppComponent` is not an `AudioIODeviceCallback`; dead-device errors
+  arrive via the callback interface, so the extra device callback doubles as
+  the error sink. Errors arrive on the audio thread: always hop to the
+  message thread before touching transport, takes, or UI.
+- `AudioDeviceManager` is a ChangeBroadcaster: setup changes (including error
+  recovery) arrive as change callbacks on the message thread — ideal for
+  persisting settings and clearing error banners.
+- `getXRunCount()` is cheap and noexcept; polling it in the slow status tick
+  costs nothing.
 
-## Next implementation step
+## Still to verify interactively (needs hardware hands)
 
-The end-to-end acceptance pass from the original plan: build the reference
-song (drums, bass, melody, arrangement, vocal, pitch, mix, export) on Omarchy
-hardware, then remaining hardening (device-loss behavior, xrun reporting,
-persisted audio settings).
+- Unplug the audio device mid-playback: transport parks, banner shows,
+  replug + reselect recovers.
+- Under-load XRUN counter climbs; buffer-size raise settles it.
+- A restored setup across a real restart (device names stable on this machine).
+- The full human acceptance pass: make an actual song start to finish.
+
+## Next step
+
+Human acceptance on Omarchy hardware, then AUR submission (needs a git
+remote + a full `makepkg -si` host). The application itself is
+feature-complete per the original plan.
 
 Build/run instructions, interactions, and realtime limitations are in README.md.
