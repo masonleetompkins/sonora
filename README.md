@@ -4,6 +4,8 @@ A native Linux synthesizer and DAW in development. Version 0.17.0 uses C++20,
 JUCE 8.0.6, and CMake. Licensed GPL-3.0-only (see LICENSE); JUCE retains its
 own license. No third-party sound assets are bundled.
 
+Source and issue tracker: https://github.com/masonleetompkins/sonora
+
 ## Install on Arch / Omarchy
 
 The packaged route builds `sonora-git` from source:

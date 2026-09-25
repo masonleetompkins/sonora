@@ -1,17 +1,13 @@
-# Maintainer: Sonora Developers <https://github.com/anomalyco/opencode>
+# Maintainer: Mason Tompkins <https://github.com/masonleetompkins>
 # Tracks Sonora's development branch and rebuilds from source.
-#
-# To build right now (no remote repository exists yet), this package builds
-# from a local clone. Set _gitremote to your fork to build from the network:
-#   _gitremote="git+https://github.com/USER/sonora.git"
-_gitremote="git+file:///home/mason/Projects/sonora"
+_gitremote="git+https://github.com/masonleetompkins/sonora.git"
 
 pkgname=sonora-git
 pkgver=0.13.0
 pkgrel=1
 pkgdesc="Native Linux synthesizer and DAW: beats, arrangement, FX, recording, pitch correction"
 arch=('x86_64')
-url="https://github.com/anomalyco/opencode"
+url="https://github.com/masonleetompkins/sonora"
 license=('GPL-3.0-only')
 depends=('alsa-lib' 'freetype2' 'fontconfig' 'libx11' 'libxext' 'libxinerama'
          'libxrandr' 'libxcursor' 'libgl' 'gtk3' 'webkit2gtk-4.1' 'libcurl'
