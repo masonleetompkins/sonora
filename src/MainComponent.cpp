@@ -1218,19 +1218,14 @@ MainComponent::MainComponent()
     keyboard.setAvailableRange(lowestPitch, highestPitch + 12);
     keyboard.setLowestVisibleKey(lowestPitch);
     keyboard.setKeyWidth(34.0f);
-    keyboard.setColour(juce::MidiKeyboardComponent::whiteNoteColourId, juce::Colour(0xff263446));
-    keyboard.setColour(juce::MidiKeyboardComponent::blackNoteColourId, ui::background);
-    keyboard.setColour(juce::MidiKeyboardComponent::keySeparatorLineColourId, ui::background);
-    keyboard.setColour(juce::MidiKeyboardComponent::keyDownOverlayColourId, ui::cyan.withAlpha(0.65f));
-    keyboard.setColour(juce::MidiKeyboardComponent::mouseOverKeyOverlayColourId, ui::cyan.withAlpha(0.16f));
-    keyboard.setColour(juce::MidiKeyboardComponent::textLabelColourId, ui::muted);
-    keyboard.setColour(juce::MidiKeyboardComponent::shadowColourId, juce::Colours::transparentBlack);
+    refreshKeyboardColours();
     auto stateRoot = juce::SystemStats::getEnvironmentVariable("XDG_STATE_HOME", {});
     if (stateRoot.isEmpty() || !juce::File::isAbsolutePath(stateRoot))
         stateRoot = juce::File::getSpecialLocation(juce::File::userHomeDirectory)
                         .getChildFile(".local/state").getFullPathName();
     recoveryFile = juce::File(stateRoot).getChildFile("sonora/recovery.sonora.json");
     setSize(1440, 900);
+    applyOmarchyTheme(true); // theme first paint matches the desktop
     projectChanged();
     selectChannel(0);
     // Restore the previous audio/MIDI setup before opening channels; a
@@ -1456,7 +1451,7 @@ void MainComponent::changeListenerCallback(juce::ChangeBroadcaster* source)
     }
 }
 
-void MainComponent::releaseResources() { engine.release(); }
+
 
 void MainComponent::beginEdit()
 {
@@ -2422,6 +2417,43 @@ void MainComponent::finishTunedTake(const AudioTakeMeta& source, juce::AudioBuff
     refreshAudioView();
 }
 
+void MainComponent::refreshKeyboardColours()
+{
+    keyboard.setColour(juce::MidiKeyboardComponent::whiteNoteColourId, ui::raised.brighter(0.06f));
+    keyboard.setColour(juce::MidiKeyboardComponent::blackNoteColourId, ui::background);
+    keyboard.setColour(juce::MidiKeyboardComponent::keySeparatorLineColourId, ui::background);
+    keyboard.setColour(juce::MidiKeyboardComponent::keyDownOverlayColourId, ui::cyan.withAlpha(0.65f));
+    keyboard.setColour(juce::MidiKeyboardComponent::mouseOverKeyOverlayColourId, ui::cyan.withAlpha(0.16f));
+    keyboard.setColour(juce::MidiKeyboardComponent::textLabelColourId, ui::muted);
+    keyboard.setColour(juce::MidiKeyboardComponent::shadowColourId, juce::Colours::transparentBlack);
+}
+
+void MainComponent::applyOmarchyTheme(bool force)
+{
+    const auto fingerprint = omarchy::themeFingerprint();
+    if (!force && fingerprint == themeFingerprint)
+        return;
+    themeFingerprint = fingerprint;
+    const auto palette = omarchy::loadOmarchyPalette();
+    ui::applyPalette(palette);
+    theme.applyPalette();
+    refreshKeyboardColours();
+    repaint();
+    pianoRoll.repaint();
+    drumSequencer.repaint();
+    if (fxBar != nullptr)
+        fxBar->repaint();
+    if (audioView != nullptr)
+        audioView->repaint();
+    if (kitPanel != nullptr && kitPanel->isVisible())
+        kitPanel->repaint();
+    if (exportPanel != nullptr && exportPanel->isVisible())
+        exportPanel->repaint();
+    keyboard.repaint();
+}
+
+void MainComponent::releaseResources() { engine.release(); }
+
 void MainComponent::exportAudio()
 {
     if (exportPanel != nullptr)
@@ -2759,6 +2791,9 @@ void MainComponent::timerCallback()
     if (!recording)
         refreshTakes();
     refreshPadBank();
+    // Live theme reload: `omarchy theme set` repaints the whole studio.
+    if (timerTicks % 120 == 0)
+        applyOmarchyTheme();
     if (++timerTicks % 15 == 0)
     {
         if (timerTicks % 60 == 0)

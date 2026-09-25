@@ -175,6 +175,9 @@ private:
     juce::File audioSettingsFile();
     void saveAudioSettings();
     juce::String audioErrorMessage;
+    std::uint64_t themeFingerprint = 0;
+    void applyOmarchyTheme(bool force = false);
+    void refreshKeyboardColours();
     // MIDI hardware plug-and-play: auto-enabled input identifiers, MCU port
     // identifiers for transport routing, and a status-bar summary.
     juce::StringArray mcuDeviceIds;

@@ -1,6 +1,6 @@
 # Sonora
 
-A native Linux synthesizer and DAW in development. Version 0.15.0 uses C++20,
+A native Linux synthesizer and DAW in development. Version 0.16.0 uses C++20,
 JUCE 8.0.6, and CMake. Licensed GPL-3.0-only (see LICENSE); JUCE retains its
 own license. No third-party sound assets are bundled.
 
@@ -71,6 +71,10 @@ a fallback or for direct hardware access.
 ## Current features
 
 - Futuristic studio-console UI: transport strip, channel rack, matrix editor, and performance dock.
+- Follows your Omarchy theme: reads the active theme's `colors.toml` on
+  startup and repaints live within seconds when you run `omarchy theme set`.
+  Backgrounds, text, accents, and track hues all track the theme; without
+  Omarchy present it keeps the built-in neon look.
 - Cyan/violet track identity, custom buttons/rotary control, and animated transport/playhead/pad cues.
 - Resizable dark native UI; Ctrl+1/Ctrl+2 switch melody/drums.
 - 16-voice sine instrument with velocity and ADSR envelope.
@@ -254,6 +258,7 @@ system build tools, configure a fresh build directory or update
 - `MidiHardware.h`: Arturia pad map, Mackie transport notes, auto-connect logic.
 - `KitSamples.*`: sample-bank loading (decode/mono/resample/normalize),
   factory variants, and user preset files.
+- `OmarchyTheme.h`: active-theme discovery, colors.toml parsing, palette mapping.
 - `MainComponent.*`: workspace, transport controls, history, file dialogs, recovery.
 - `tests/CoreTests.cpp`: headless scheduler, persistence, concurrency, and actual DSP tests.
 

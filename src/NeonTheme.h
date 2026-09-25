@@ -1,11 +1,32 @@
 #pragma once
+#include "OmarchyTheme.h"
 #include <juce_gui_basics/juce_gui_basics.h>
 
 namespace sonora::ui
 {
-inline const juce::Colour background { 0xff080b12 }, panel { 0xff101622 }, raised { 0xff192231 };
-inline const juce::Colour border { 0xff263346 }, text { 0xffe7f0fc }, muted { 0xff8b9db7 };
-inline const juce::Colour cyan { 0xff57efd5 }, violet { 0xffb19aff }, blue { 0xff62aaff }, danger { 0xffff7c93 };
+// Mutable runtime palette: set once from the Omarchy theme (or the built-in
+// neon defaults) and re-applied live whenever the theme changes. Paint code
+// reads these at paint time, so a repaint is all a theme switch needs.
+inline juce::Colour background { 0xff080b12 }, panel { 0xff101622 }, raised { 0xff192231 };
+inline juce::Colour border { 0xff263346 }, text { 0xffe7f0fc }, muted { 0xff8b9db7 };
+inline juce::Colour cyan { 0xff57efd5 }, violet { 0xffb19aff }, blue { 0xff62aaff }, danger { 0xffff7c93 };
+inline juce::Colour warn { 0xffffb86b };
+
+inline void applyPalette(const omarchy::Palette& palette)
+{
+    background = juce::Colour(palette.background);
+    panel = juce::Colour(palette.panel);
+    raised = juce::Colour(palette.raised);
+    border = juce::Colour(palette.border);
+    text = juce::Colour(palette.text);
+    muted = juce::Colour(palette.muted);
+    cyan = juce::Colour(palette.accent);
+    violet = juce::Colour(palette.drums);
+    // Melody follows the accent; drums/audio/danger track their theme hues.
+    blue = juce::Colour(palette.audio);
+    danger = juce::Colour(palette.danger);
+    warn = juce::Colour(palette.warn);
+}
 
 inline juce::Font font(float size, bool bold = false, float tracking = 0.0f)
 {
@@ -35,8 +56,13 @@ inline void surface(juce::Graphics& g, juce::Rectangle<float> bounds, float radi
 class NeonTheme final : public juce::LookAndFeel_V4
 {
 public:
-    NeonTheme()
+    NeonTheme() { applyPalette(); }
+
+    // Re-syncs every LookAndFeel colour from the live ui:: palette. Call after
+    // ui::applyPalette() and repaint; no restart needed.
+    void applyPalette()
     {
+        setColour(juce::ResizableWindow::backgroundColourId, background);
         setColour(juce::ResizableWindow::backgroundColourId, background);
         setColour(juce::TextButton::buttonColourId, raised);
         setColour(juce::TextButton::buttonOnColourId, cyan);

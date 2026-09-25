@@ -1,53 +1,46 @@
-# Handoff status — 0.15.0
+# Handoff status — 0.16.0
 
 ## Completed this milestone
 
-- Persisted audio/MIDI setup (`~/.config/sonora/audio.xml`, XDG-aware):
-  device, sample rate, buffer size, and enabled MIDI inputs restore on launch,
-  save on every setup change, and save once more on clean exit.
-- XRUN counter in the status bar alongside CPU load and MIDI devices.
-- Device-error handling: a dead device parks the transport (finalizing any
-  take first), silences stuck notes, and turns the status bar into a red
-  recovery prompt; the next successful setup clears it.
-- Headless end-to-end acceptance test: builds a reference song (two melody
-  variations, two drum variations, four alternating sections, track FX, mixed
-  levels, limiter, and a sung take), saves/loads the project file, bounces
-  loop and song, and asserts durations, audibility, limiter ceiling, sample
-  validity, vocal presence in the mix, and WAV headers.
+- The UI now follows Omarchy themes: on startup and every few seconds it reads
+  the active theme (`theme.name` → `themes/<name>/colors.toml`, falling back to
+  the live `current/theme` copy) and repaints the whole studio when anything
+  changes. Try `omarchy theme set <other>` while Sonora runs.
+- Mapping: theme background/foreground become app bg/text; panel/raised/border
+  derive by mixing so dark and light themes both stay readable; melody, drums,
+  audio, danger, and warn follow the theme's cyan/magenta/blue/red/orange.
+  Missing keys or a missing Omarchy install fall back to the neon defaults.
+- Implementation: new juce_core-only `OmarchyTheme.h` (discovery, flat-TOML
+  parse, hex colors, mapping, fingerprint) plus a runtime palette in
+  `NeonTheme.h` with a LookAndFeel re-sync. No project-format change.
 
 ## Verified
 
-- `ctest` (Debug and Release): all 27 suites pass, zero warnings.
-- Live on this machine: `audio.xml` written with the ALSA setup plus the
-  auto-enabled Minilab3 MIDI/MCU/ALV inputs (DIN THRU excluded); status bar
-  shows the MIDI summary; startup clean, no assertions.
-- Reference song: song bounce longer than 3x the loop, both audible and
-  unclipped, vocal energy confirmed in its punch-in window.
+- `ctest` (Debug and Release): all 28 suites pass, zero warnings.
+- Hex parsing (6/3-digit, fallbacks), TOML edge cases (comments, sections,
+  quotes, bare values), mason-like mapping, per-key fallbacks, light-mode flag.
+- Live `loadOmarchyPalette()` runs against this machine's real mason theme.
 
 ## Debugging notes (do not regress)
 
-- `AudioAppComponent` is not an `AudioIODeviceCallback`; dead-device errors
-  arrive via the callback interface, so the extra device callback doubles as
-  the error sink. Errors arrive on the audio thread: always hop to the
-  message thread before touching transport, takes, or UI.
-- `AudioDeviceManager` is a ChangeBroadcaster: setup changes (including error
-  recovery) arrive as change callbacks on the message thread — ideal for
-  persisting settings and clearing error banners.
-- `getXRunCount()` is cheap and noexcept; polling it in the slow status tick
-  costs nothing.
+- TOML values starting with `#` are hex colors, not comments; only strip `#`
+  comments that follow other content.
+- Nested-component method bodies must sit below the nested struct definitions
+  in MainComponent.cpp, or the build fails on incomplete types.
+- Sonora is single-instance: a second launch exits 0 silently while one copy
+  runs. Headless smoke tests must check `pgrep` first (and never kill a live
+  user session to test).
 
-## Still to verify interactively (needs hardware hands)
+## Still to verify interactively
 
-- Unplug the audio device mid-playback: transport parks, banner shows,
-  replug + reselect recovers.
-- Under-load XRUN counter climbs; buffer-size raise settles it.
-- A restored setup across a real restart (device names stable on this machine).
-- The full human acceptance pass: make an actual song start to finish.
+- Relaunch the app and confirm the mason look (pure-black bg, theme cyan
+  accents, blue drums); then `omarchy theme set` something else and watch it
+  follow live within seconds.
+- Light-mode theme readability (no light Omarchy theme installed here).
 
 ## Next step
 
 Human acceptance on Omarchy hardware, then AUR submission (needs a git
-remote + a full `makepkg -si` host). The application itself is
-feature-complete per the original plan.
+remote + a full `makepkg -si` host).
 
 Build/run instructions, interactions, and realtime limitations are in README.md.

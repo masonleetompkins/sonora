@@ -3,6 +3,7 @@
 #include "Export.h"
 #include "Fx.h"
 #include "KitSamples.h"
+#include "OmarchyTheme.h"
 #include "PitchCorrect.h"
 #include "ProjectIO.h"
 #include <algorithm>
@@ -1738,6 +1739,48 @@ void testAcceptance()
             "acceptance cleanup failed");
 }
 
+void testOmarchyTheme()
+{
+    using namespace sonora::omarchy;
+    require(parseHexColor("#66ccff", 0) == 0xff66ccff, "hex parse wrong");
+    require(parseHexColor("abc", 0) == 0xffaabbcc, "short hex parse wrong");
+    require(parseHexColor("not-a-color", 0x12345678) == 0x12345678, "bad hex not falling back");
+    require(parseHexColor("#12345", 7) == 7, "short-length hex not falling back");
+    require(parseHexColor("#gggggg", 9) == 9, "non-hex digits not falling back");
+    const auto values = parseFlatToml("# comment\n[section]\nmode = \"dark\"\n"
+                                      "accent=#8d8d8d # trailing\nbare = 42\n  spaced  =  \"x y\"  \n");
+    require(values.at("mode") == "dark", "quoted value wrong");
+    require(values.at("accent") == "#8d8d8d", "trailing comment wrong");
+    require(values.at("bare") == "42", "bare value wrong");
+    require(values.at("spaced") == "x y", "spaced value wrong");
+    require(values.find("section") == values.end(), "section header leaked");
+    // Mason-like palette maps every role and stays dark.
+    std::map<juce::String, juce::String> mason { { "mode", "dark" },
+        { "background", "#000000" }, { "foreground", "#ffffff" }, { "muted", "#7a7a7a" },
+        { "cyan", "#66ccff" }, { "magenta", "#00cfff" }, { "blue", "#1e90ff" },
+        { "red", "#ff3366" }, { "orange", "#009acd" } };
+    const auto palette = paletteFromMap(mason, "mason");
+    require(palette.background == 0xff000000 && palette.text == 0xffffffff, "bg/fg mapping wrong");
+    require(palette.accent == 0xff66ccff && palette.melody == 0xff66ccff, "accent mapping wrong");
+    require(palette.drums == 0xff00cfff && palette.audio == 0xff1e90ff, "voice mapping wrong");
+    require(palette.danger == 0xffff3366 && palette.warn == 0xff009acd, "signal mapping wrong");
+    require(palette.dark && palette.themeName == "mason", "mode/name mapping wrong");
+    require(palette.panel != palette.background && palette.raised != palette.panel, "surfaces not derived");
+    // Missing keys fall back to the neon defaults, one by one.
+    const auto partial = paletteFromMap({ { "background", "#111111" } }, "partial");
+    require(partial.background == 0xff111111 && partial.text == 0xffe7f0fc, "fallback wrong");
+    require(partial.drums == 0xffb19aff, "drum fallback wrong");
+    Palette def;
+    require(partial.muted == def.muted && partial.warn == def.warn, "mute/warn fallback wrong");
+    // Light mode flag follows the mode key.
+    require(paletteFromMap({ { "mode", "light" } }, "x").dark == false, "light mode misread");
+    require(paletteFromMap({}, "x").dark == true, "missing mode should default dark");
+    // Live system: loading never fails, even without Omarchy installed.
+    const auto live = loadOmarchyPalette();
+    require(live.background >> 24 == 0xff && live.text >> 24 == 0xff, "live palette not opaque");
+    (void) themeFingerprint();
+}
+
 int main()
 {
     try
@@ -1750,6 +1793,7 @@ int main()
         testTakePlayback(); std::cout << "PASS song-mode take offset/level, mute, loop-mode silence\n";
         testVariations(); std::cout << "PASS pattern library round-trip, v5 migration, malformed slots\n";
         testInstances(); std::cout << "PASS make-unique detach, full-library refusal, sharing queries\n";
+        testOmarchyTheme(); std::cout << "PASS theme parse, palette map, fallbacks, live load\n";
         testAcceptance(); std::cout << "PASS reference song save/load, loop+s song bounce, vocal in mix\n";
         testKitPanelLogic(); std::cout << "PASS kit panel helpers\n";
         testKitSamples(); std::cout << "PASS sample import, resample, normalize, fallback, engine bank swap\n";
