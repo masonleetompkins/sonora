@@ -2,6 +2,24 @@
 
 namespace sonora
 {
+// Per-track hues keyed by track icon; the palette cycles every 8 icons.
+juce::Colour trackColour(int icon)
+{
+    static const juce::Colour palette[] {
+        ui::cyan, ui::violet, ui::blue, ui::warn, ui::danger,
+        juce::Colour(0xff9dff70), juce::Colour(0xff70e0ff), juce::Colour(0xffff8de0),
+    };
+    return palette[icon & 7];
+}
+
+const char* trackIconName(int icon)
+{
+    static constexpr const char* names[] {
+        "Keys", "Drums", "Bass", "Lead", "Pad", "Strings", "Vox", "FX",
+    };
+    return names[icon & 7];
+}
+
 struct MainComponent::FxBar final : public juce::Component
 {
     struct Slot
@@ -271,7 +289,7 @@ struct MainComponent::KitPanel final : public juce::Component
     juce::String getPresetName() const { return presetName.getText().trim(); }
     void setPresetName(const juce::String& name) { presetName.setText(name, juce::dontSendNotification); }
 
-    void refresh(const ProjectState& project, const juce::File& mediaDir,
+    void refresh(const ProjectState& project, int drumTrack, const juce::File& mediaDir,
                  const std::vector<juce::String>& userPresets, const juce::String& currentPreset)
     {
         presetBox.clear(juce::dontSendNotification);
@@ -297,7 +315,7 @@ struct MainComponent::KitPanel final : public juce::Component
         for (int pad = 0; pad < drumPads; ++pad)
         {
             auto& row = rows[static_cast<std::size_t>(pad)];
-            const auto file = padSampleName(project.padSamples[static_cast<std::size_t>(pad)]);
+            const auto file = padSampleName(project.tracks[static_cast<std::size_t>(drumTrack)].padSamples[static_cast<std::size_t>(pad)]);
             const bool custom = file.isNotEmpty();
             const bool missing = custom && !mediaDir.getChildFile(file).existsAsFile()
                 && !sessionDir().getChildFile(file).existsAsFile();
@@ -357,7 +375,7 @@ void MainComponent::refreshKitPanel()
     if (kitPanel == nullptr || !kitPanel->isVisible())
         return;
     const juce::File media = projectFile != juce::File() ? mediaDirFor(projectFile) : sessionDir();
-    kitPanel->refresh(project, media, listKitPresets(kitsDir()), lastPresetName);
+    kitPanel->refresh(project, drumEditTrack(), media, listKitPresets(kitsDir()), lastPresetName);
 }
 
 void MainComponent::loadPresetSelection(int id)
@@ -365,7 +383,7 @@ void MainComponent::loadPresetSelection(int id)
     if (id >= 1 && id <= numKitVariants)
     {
         beginEdit();
-        project.kitVariant = id - 1;
+        project.tracks[static_cast<std::size_t>(drumEditTrack())].kitVariant = id - 1;
         lastPresetName = kitVariantName(id - 1);
         projectChanged();
         endEdit();
@@ -386,21 +404,21 @@ void MainComponent::loadPresetSelection(int id)
             return;
         }
         beginEdit();
-        project.kitVariant = preset.variant;
+        project.tracks[static_cast<std::size_t>(drumEditTrack())].kitVariant = preset.variant;
         for (int pad = 0; pad < drumPads; ++pad)
         {
             // Stage preset samples locally; the next save collects them.
             const auto& file = preset.files[static_cast<std::size_t>(pad)];
             if (file.isEmpty())
             {
-                setPadSampleName(project.padSamples[static_cast<std::size_t>(pad)], {});
+                setPadSampleName(project.tracks[static_cast<std::size_t>(drumEditTrack())].padSamples[static_cast<std::size_t>(pad)], {});
                 continue;
             }
             const auto source = kitsDir().getChildFile(presets[index]).getChildFile(file);
             const auto stem = source.getFileNameWithoutExtension();
             auto target = sessionDir().getNonexistentChildFile("kit-" + stem, source.getFileExtension());
             if (source.copyFileTo(target))
-                setPadSampleName(project.padSamples[static_cast<std::size_t>(pad)], target.getFileName());
+                setPadSampleName(project.tracks[static_cast<std::size_t>(drumEditTrack())].padSamples[static_cast<std::size_t>(pad)], target.getFileName());
         }
         lastPresetName = preset.name;
         if (kitPanel != nullptr)
@@ -418,9 +436,9 @@ void MainComponent::saveKitAsPreset()
     const auto name = kitPanel->getPresetName();
     std::array<juce::String, drumPads> files {};
     for (int pad = 0; pad < drumPads; ++pad)
-        files[static_cast<std::size_t>(pad)] = padSampleName(project.padSamples[static_cast<std::size_t>(pad)]);
+        files[static_cast<std::size_t>(pad)] = padSampleName(project.tracks[static_cast<std::size_t>(drumEditTrack())].padSamples[static_cast<std::size_t>(pad)]);
     const juce::File media = projectFile != juce::File() ? mediaDirFor(projectFile) : sessionDir();
-    const auto result = saveKitPreset(kitsDir(), name, project.kitVariant, files,
+    const auto result = saveKitPreset(kitsDir(), name, project.tracks[static_cast<std::size_t>(drumEditTrack())].kitVariant, files,
         [&](const juce::String& file) {
             auto found = media.getChildFile(file);
             return found.existsAsFile() ? found : sessionDir().getChildFile(file);
@@ -484,7 +502,7 @@ void MainComponent::loadPadSample(int pad)
                 return;
             }
             safe->beginEdit();
-            setPadSampleName(safe->project.padSamples[static_cast<std::size_t>(pad)], target.getFileName());
+            setPadSampleName(safe->project.tracks[static_cast<std::size_t>(safe->drumEditTrack())].padSamples[static_cast<std::size_t>(pad)], target.getFileName());
             safe->lastPresetName.clear();
             safe->projectChanged();
             safe->endEdit();
@@ -497,7 +515,7 @@ void MainComponent::clearPadSample(int pad)
     if (pad < 0 || pad >= drumPads)
         return;
     beginEdit();
-    setPadSampleName(project.padSamples[static_cast<std::size_t>(pad)], {});
+    setPadSampleName(project.tracks[static_cast<std::size_t>(drumEditTrack())].padSamples[static_cast<std::size_t>(pad)], {});
     lastPresetName.clear();
     projectChanged();
     endEdit();
@@ -511,7 +529,7 @@ void MainComponent::collectSamples(const juce::File& destination)
     beginEdit();
     for (int pad = 0; pad < drumPads; ++pad)
     {
-        auto& slot = project.padSamples[static_cast<std::size_t>(pad)];
+        auto& slot = project.tracks[static_cast<std::size_t>(drumEditTrack())].padSamples[static_cast<std::size_t>(pad)];
         const auto name = padSampleName(slot);
         if (name.isEmpty() || media.getChildFile(name).existsAsFile())
             continue;
@@ -532,20 +550,20 @@ void MainComponent::refreshPadBank()
 {
     const double rate = currentRate();
     const juce::File media = projectFile != juce::File() ? mediaDirFor(projectFile) : sessionDir();
-    juce::String signature = juce::String(rate, 0) + "|" + juce::String(project.kitVariant) + "|";
+    juce::String signature = juce::String(rate, 0) + "|" + juce::String(project.tracks[static_cast<std::size_t>(drumEditTrack())].kitVariant) + "|";
     std::array<juce::String, drumPads> files {};
     for (int pad = 0; pad < drumPads; ++pad)
     {
-        files[static_cast<std::size_t>(pad)] = padSampleName(project.padSamples[static_cast<std::size_t>(pad)]);
+        files[static_cast<std::size_t>(pad)] = padSampleName(project.tracks[static_cast<std::size_t>(drumEditTrack())].padSamples[static_cast<std::size_t>(pad)]);
         signature += files[static_cast<std::size_t>(pad)] + ";";
     }
     if (signature == lastBankSignature)
         return;
     lastBankSignature = signature;
-    auto bank = loadSampleBank(files, media, rate, project.kitVariant);
+    auto bank = loadSampleBank(files, media, rate, project.tracks[static_cast<std::size_t>(drumEditTrack())].kitVariant);
     if (bank == nullptr)
         return;
-    auto* retired = engine.retirePadBank(bank.get());
+    auto* retired = engine.retirePadBank(drumEditTrack(), bank.get());
     bankStorage = std::move(bank);
     if (retired != nullptr)
         juce::Timer::callAfterDelay(600, [retired] { delete retired; });
@@ -918,14 +936,16 @@ MainComponent::MainComponent()
     for (auto* component : std::initializer_list<juce::Component*> {
              &title, &subtitle, &description, &status, &position, &audioSettings,
              &panic, &keyboard, &pianoRoll, &play, &stop, &record, &undo, &redo, &newProject,
-             &open, &save, &saveAs, &exportButton, &clear, &demo, &tempo, &drumSequencer, &melodyTab,
-             &drumsTab, &audioTab, &mute, &solo, &trackVolume, &repeatBar, &kitButton, &outputMeter,
+             &open, &save, &saveAs, &exportButton, &clear, &demo, &tempo, &drumSequencer,
+             &audioTab, &mute, &solo, &trackVolume, &repeatBar, &kitButton, &outputMeter,
              &songMode, &addSection, &removeSection, &duplicatePattern })
         addAndMakeVisible(component);
+    for (auto& button : trackButtons)
+        addAndMakeVisible(button);
+    addAndMakeVisible(addTrack);
     for (auto& tab : patternTabs)
         addAndMakeVisible(tab);
-    for (auto& button : melodySections) addAndMakeVisible(button);
-    for (auto& button : drumSections) addAndMakeVisible(button);
+    for (auto& button : sectionButtons) addAndMakeVisible(button);
     fxBar = std::make_unique<FxBar>(
         [this](int target) { fxTarget = target; fxEffect = target == 2 ? 0 : fxEffect; refreshFxBar(); },
         [this](int effect) { fxEffect = effect; refreshFxBar(); },
@@ -968,7 +988,7 @@ MainComponent::MainComponent()
     for (auto* button : std::initializer_list<juce::Button*> {
              &play, &stop, &record, &panic, &audioSettings, &undo, &redo,
              &newProject, &open, &save, &saveAs, &exportButton, &clear, &demo, &duplicatePattern,
-             &melodyTab, &drumsTab, &audioTab, &mute, &solo, &repeatBar, &kitButton,
+             &audioTab, &mute, &solo, &repeatBar, &kitButton,
              &songMode, &addSection, &removeSection })
         button->setWantsKeyboardFocus(false);
     for (int i = 0; i < numPatterns; ++i)
@@ -984,17 +1004,18 @@ MainComponent::MainComponent()
     duplicatePattern.setTooltip("Copy the selected pattern into the next slot and edit it (undoable).");
     duplicatePattern.onClick = [this] {
         beginEdit();
+        const auto sel = static_cast<std::size_t>(selectedTrack);
         if (drumsSelected)
         {
-            const int next = (drumPatternSel + 1) % numPatterns;
-            project.drumPatterns[static_cast<std::size_t>(next)] = project.drumPatterns[static_cast<std::size_t>(drumPatternSel)];
-            drumPatternSel = next;
+            const int next = (trackDrumSlot[sel] + 1) % numPatterns;
+            project.tracks[sel].drumPatterns[static_cast<std::size_t>(next)] = project.tracks[sel].drumPatterns[static_cast<std::size_t>(trackDrumSlot[sel])];
+            trackDrumSlot[sel] = next;
         }
         else
         {
-            const int next = (melodyPatternSel + 1) % numPatterns;
-            project.melodies[static_cast<std::size_t>(next)] = project.melodies[static_cast<std::size_t>(melodyPatternSel)];
-            melodyPatternSel = next;
+            const int next = (trackMelodySlot[sel] + 1) % numPatterns;
+            project.tracks[sel].melodies[static_cast<std::size_t>(next)] = project.tracks[sel].melodies[static_cast<std::size_t>(trackMelodySlot[sel])];
+            trackMelodySlot[sel] = next;
         }
         projectChanged();
         endEdit();
@@ -1013,8 +1034,8 @@ MainComponent::MainComponent()
         if (project.song.sections >= maxSections) return;
         beginEdit();
         ++project.song.sections;
-        project.song.melodyOn[static_cast<std::size_t>(project.song.sections - 1)] = true;
-        project.song.drumsOn[static_cast<std::size_t>(project.song.sections - 1)] = true;
+        project.song.trackOn[static_cast<std::size_t>(project.song.sections - 1)][0] = true;
+        project.song.trackOn[static_cast<std::size_t>(project.song.sections - 1)][1] = true;
         engine.stop(); projectChanged(); endEdit();
     };
     removeSection.onClick = [this] {
@@ -1025,58 +1046,46 @@ MainComponent::MainComponent()
     };
     for (int s = 0; s < maxSections; ++s)
     {
-        auto& melody = melodySections[static_cast<std::size_t>(s)];
-        auto& drums = drumSections[static_cast<std::size_t>(s)];
-        melody.setClickingTogglesState(true);
-        drums.setClickingTogglesState(true);
-        melody.setColour(juce::TextButton::buttonOnColourId, ui::cyan);
-        drums.setColour(juce::TextButton::buttonOnColourId, ui::violet);
-        melody.setWantsKeyboardFocus(false);
-        drums.setWantsKeyboardFocus(false);
-        melody.onClick = [this, s] {
+        auto& button = sectionButtons[static_cast<std::size_t>(s)];
+        button.setClickingTogglesState(true);
+        button.setWantsKeyboardFocus(false);
+        button.onClick = [this, s] {
+            const auto track = selectedTrack;
+            const auto t = static_cast<std::size_t>(track);
+            const bool drums = project.tracks[t].kind == TrackKind::Drums;
             beginEdit();
             const auto modifiers = juce::ModifierKeys::getCurrentModifiers();
             // Click toggles the section; Shift-click cycles its pattern slot;
             // Ctrl-click detaches it into its own library copy (make unique).
             if (modifiers.isCommandDown())
             {
-                if (!makeSectionUnique(project.song, project.melodies, s))
-                    showError("Nothing to detach: this section already stands alone, or every slot is in use.");
+                bool detached = false;
+                if (drums)
+                {
+                    detached = makeDrumSectionUnique(project.song, project.tracks[t].drumPatterns, s, track);
+                    if (detached)
+                        trackDrumSlot[t] = project.song.slots[static_cast<std::size_t>(s)][t];
+                }
                 else
-                    melodyPatternSel = project.song.melodyPattern[static_cast<std::size_t>(s)];
+                {
+                    detached = makeSectionUnique(project.song, project.tracks[t].melodies, s, track);
+                    if (detached)
+                        trackMelodySlot[t] = project.song.slots[static_cast<std::size_t>(s)][t];
+                }
+                if (!detached)
+                    showError("Nothing to detach: this section already stands alone, or every slot is in use.");
             }
             else if (modifiers.isShiftDown())
-                project.song.melodyPattern[static_cast<std::size_t>(s)] =
-                    static_cast<std::uint8_t>((project.song.melodyPattern[static_cast<std::size_t>(s)] + 1) % numPatterns);
+                project.song.slots[static_cast<std::size_t>(s)][t] =
+                    static_cast<std::uint8_t>((project.song.slots[static_cast<std::size_t>(s)][t] + 1) % numPatterns);
             else
             {
-                auto& flag = project.song.melodyOn[static_cast<std::size_t>(s)];
-                flag = melodySections[static_cast<std::size_t>(s)].getToggleState();
+                auto& flag = project.song.trackOn[static_cast<std::size_t>(s)][t];
+                flag = sectionButtons[static_cast<std::size_t>(s)].getToggleState();
             }
             projectChanged(); endEdit();
         };
-        drums.onClick = [this, s] {
-            beginEdit();
-            const auto modifiers = juce::ModifierKeys::getCurrentModifiers();
-            if (modifiers.isCommandDown())
-            {
-                if (!makeDrumSectionUnique(project.song, project.drumPatterns, s))
-                    showError("Nothing to detach: this section already stands alone, or every slot is in use.");
-                else
-                    drumPatternSel = project.song.drumPattern[static_cast<std::size_t>(s)];
-            }
-            else if (modifiers.isShiftDown())
-                project.song.drumPattern[static_cast<std::size_t>(s)] =
-                    static_cast<std::uint8_t>((project.song.drumPattern[static_cast<std::size_t>(s)] + 1) % numPatterns);
-            else
-            {
-                auto& flag = project.song.drumsOn[static_cast<std::size_t>(s)];
-                flag = drumSections[static_cast<std::size_t>(s)].getToggleState();
-            }
-            projectChanged(); endEdit();
-        };
-        melody.setTooltip("Click: section on/off. Shift-click: next pattern. Ctrl-click: make unique.");
-        drums.setTooltip("Click: section on/off. Shift-click: next pattern. Ctrl-click: make unique.");
+        button.setTooltip("Click: section on/off. Shift-click: next pattern. Ctrl-click: make unique.");
     }
 
     constexpr char padKeys[] = "QWERASDF";
@@ -1092,10 +1101,19 @@ MainComponent::MainComponent()
         button.onClick = [this, pad] { auditionPad(pad); };
         button.setColour(juce::TextButton::buttonOnColourId, pad < 2 ? ui::violet : ui::blue);
     }
-    melodyTab.getProperties().set("role", "track");
-    drumsTab.getProperties().set("role", "track");
-    melodyTab.getProperties().set("detail", "POLYPHONIC / 16 VOICES");
-    drumsTab.getProperties().set("detail", "SAMPLER / 8 PADS");
+    for (int track = 0; track < maxTracks; ++track)
+    {
+        auto& button = trackButtons[static_cast<std::size_t>(track)];
+        button.getProperties().set("role", "track");
+        button.setClickingTogglesState(true);
+        button.setWantsKeyboardFocus(false);
+        button.onClick = [this, track] { selectTrackIndex(track); };
+        button.addMouseListener(this, false);
+    }
+    addTrack.setButtonText("+ track");
+    addTrack.setTooltip("Add a synth or drum track (up to 8).");
+    addTrack.setWantsKeyboardFocus(false);
+    addTrack.onClick = [this] { showAddTrackMenu(); };
     audioTab.getProperties().set("role", "track");
     audioTab.getProperties().set("detail", "RECORDER / TAKES");
     audioTab.setColour(juce::TextButton::buttonOnColourId, ui::blue);
@@ -1107,8 +1125,6 @@ MainComponent::MainComponent()
     panic.setColour(juce::TextButton::buttonOnColourId, ui::danger);
     mute.setColour(juce::TextButton::buttonOnColourId, ui::danger);
     solo.setColour(juce::TextButton::buttonOnColourId, ui::violet);
-    melodyTab.onClick = [this] { selectTrack(false); };
-    drumsTab.onClick = [this] { selectTrack(true); };
     audioTab.onClick = [this] { selectChannel(2); };
     mute.setClickingTogglesState(true);
     solo.setClickingTogglesState(true);
@@ -1165,8 +1181,9 @@ MainComponent::MainComponent()
     saveAs.onClick = [this] { saveProject(true); };
     clear.onClick = [this] {
         beginEdit();
-        if (drumsSelected) project.drumPatterns[static_cast<std::size_t>(drumPatternSel)] = {};
-        else if (!audioSelected) project.melodies[static_cast<std::size_t>(melodyPatternSel)] = {};
+        const auto sel = static_cast<std::size_t>(selectedTrack);
+        if (drumsSelected) project.tracks[sel].drumPatterns[static_cast<std::size_t>(trackDrumSlot[sel])] = {};
+        else if (!audioSelected) project.tracks[sel].melodies[static_cast<std::size_t>(trackMelodySlot[sel])] = {};
         projectChanged();
         endEdit();
     };
@@ -1174,7 +1191,8 @@ MainComponent::MainComponent()
     demo.setTooltip("Replace the selected pattern slot with a four-bar starter (undoable).");
     repeatBar.onClick = [this] {
         beginEdit();
-        for (auto& row : project.drumPatterns[static_cast<std::size_t>(drumPatternSel)].steps)
+        const auto sel = static_cast<std::size_t>(selectedTrack);
+        for (auto& row : project.tracks[sel].drumPatterns[static_cast<std::size_t>(trackDrumSlot[sel])].steps)
             for (int step = 16; step < gridSteps; ++step)
                 row[static_cast<std::size_t>(step)] = row[static_cast<std::size_t>(step % 16)];
         projectChanged();
@@ -1185,13 +1203,13 @@ MainComponent::MainComponent()
     panic.setTooltip("Stop transport and silence all voices.");
     pianoRoll.onGestureBegin = [this] { beginEdit(); };
     pianoRoll.onPreview = [this](const Pattern& value) {
-        project.melodies[static_cast<std::size_t>(melodyPatternSel)] = value;
+        project.tracks[static_cast<std::size_t>(selectedTrack)].melodies[static_cast<std::size_t>(trackMelodySlot[static_cast<std::size_t>(selectedTrack)])] = value;
         projectChanged();
     };
     pianoRoll.onGestureEnd = [this] { endEdit(); };
     drumSequencer.onGestureBegin = [this] { beginEdit(); };
     drumSequencer.onPreview = [this](const DrumPattern& value) {
-        project.drumPatterns[static_cast<std::size_t>(drumPatternSel)] = value;
+        project.tracks[static_cast<std::size_t>(selectedTrack)].drumPatterns[static_cast<std::size_t>(trackDrumSlot[static_cast<std::size_t>(selectedTrack)])] = value;
         projectChanged();
     };
     drumSequencer.onGestureEnd = [this] { endEdit(); };
@@ -1290,7 +1308,8 @@ MainComponent::~MainComponent()
     shutdownAudio();
     engine.retireTakeSet(nullptr);
     takeStorage.reset();
-    engine.retirePadBank(nullptr);
+    for (int track = 0; track < maxTracks; ++track)
+        engine.retirePadBank(track, nullptr);
     bankStorage.reset();
     setLookAndFeel(nullptr);
 }
@@ -1507,7 +1526,7 @@ void MainComponent::refreshFxBar()
 
 float MainComponent::getFxParam(int slot) const
 {
-    const TrackFx& fx = fxTarget == 1 ? project.drumFx : project.melodyFx;
+    const TrackFx& fx = project.tracks[static_cast<std::size_t>(fxTrackFor(fxTarget == 1))].fx;
     if (fxTarget == 2)
         return slot == 0 ? project.master.ceilingDb : project.master.releaseMs;
     switch (fxEffect)
@@ -1547,7 +1566,7 @@ float MainComponent::getFxParam(int slot) const
 
 void MainComponent::setFxParam(int slot, float value)
 {
-    TrackFx& fx = fxTarget == 1 ? project.drumFx : project.melodyFx;
+    TrackFx& fx = project.tracks[static_cast<std::size_t>(fxTrackFor(fxTarget == 1))].fx;
     if (fxTarget == 2)
     {
         if (slot == 0) project.master.ceilingDb = value;
@@ -1585,7 +1604,7 @@ bool MainComponent::getFxEnabled() const
 {
     if (fxTarget == 2)
         return project.master.enabled;
-    const TrackFx& fx = fxTarget == 1 ? project.drumFx : project.melodyFx;
+    const TrackFx& fx = project.tracks[static_cast<std::size_t>(fxTrackFor(fxTarget == 1))].fx;
     switch (fxEffect)
     {
         case 0: return fx.eq.enabled;
@@ -1602,7 +1621,7 @@ void MainComponent::setFxEnabled(bool enabled)
         project.master.enabled = enabled;
         return;
     }
-    TrackFx& fx = fxTarget == 1 ? project.drumFx : project.melodyFx;
+    TrackFx& fx = project.tracks[static_cast<std::size_t>(fxTrackFor(fxTarget == 1))].fx;
     switch (fxEffect)
     {
         case 0: fx.eq.enabled = enabled; break;
@@ -1615,59 +1634,70 @@ void MainComponent::setFxEnabled(bool enabled)
 void MainComponent::projectChanged()
 {
     ++revision;
-    pianoRoll.setPattern(project.melodies[static_cast<std::size_t>(melodyPatternSel)]);
-    drumSequencer.setPattern(project.drumPatterns[static_cast<std::size_t>(drumPatternSel)]);
+    if (project.tracks[static_cast<std::size_t>(selectedTrack)].kind == TrackKind::None || audioSelected)
+        for (int track = 0; track < maxTracks; ++track)
+            if (project.tracks[static_cast<std::size_t>(track)].kind != TrackKind::None)
+            {
+                selectedTrack = track;
+                break;
+            }
+    const auto sel = static_cast<std::size_t>(selectedTrack);
+    const bool selDrums = project.tracks[sel].kind == TrackKind::Drums;
+    drumsSelected = selDrums && !audioSelected;
+    pianoRoll.setPattern(project.tracks[sel].kind == TrackKind::Synth
+                             ? project.tracks[sel].melodies[static_cast<std::size_t>(trackMelodySlot[sel])]
+                             : project.tracks[0].melodies[static_cast<std::size_t>(trackMelodySlot[0])]);
+    drumSequencer.setPattern(project.tracks[sel].kind == TrackKind::Drums
+                                 ? project.tracks[sel].drumPatterns[static_cast<std::size_t>(trackDrumSlot[sel])]
+                                 : project.tracks[1].drumPatterns[static_cast<std::size_t>(trackDrumSlot[1])]);
     updateTrackControls();
     refreshFxBar();
     for (int i = 0; i < numPatterns; ++i)
     {
-        const bool selected = drumsSelected ? i == drumPatternSel : i == melodyPatternSel;
-        patternTabs[static_cast<std::size_t>(i)].setToggleState(selected, juce::dontSendNotification);
+        const int slot = selDrums ? trackDrumSlot[sel] : trackMelodySlot[sel];
+        patternTabs[static_cast<std::size_t>(i)].setToggleState(i == slot, juce::dontSendNotification);
         patternTabs[static_cast<std::size_t>(i)].setVisible(!audioSelected);
     }
     duplicatePattern.setVisible(!audioSelected);
-    engine.setLoopPatterns(melodyPatternSel, drumPatternSel);
+    for (int track = 0; track < maxTracks; ++track)
+        engine.setLoopSelection(track, trackMelodySlot[static_cast<std::size_t>(track)],
+                                trackDrumSlot[static_cast<std::size_t>(track)]);
     tempo.setValue(project.bpm, juce::dontSendNotification);
     songMode.setToggleState(project.songMode, juce::dontSendNotification);
     songMode.setButtonText(project.songMode ? "SONG" : "LOOP");
     for (int s = 0; s < maxSections; ++s)
     {
-        const bool inSong = s < project.song.sections;
-        melodySections[static_cast<std::size_t>(s)].setVisible(inSong);
-        drumSections[static_cast<std::size_t>(s)].setVisible(inSong);
-        melodySections[static_cast<std::size_t>(s)].setToggleState(
-            project.song.melodyOn[static_cast<std::size_t>(s)], juce::dontSendNotification);
-        drumSections[static_cast<std::size_t>(s)].setToggleState(
-            project.song.drumsOn[static_cast<std::size_t>(s)], juce::dontSendNotification);
-        melodySections[static_cast<std::size_t>(s)].setButtonText(
+        const auto si = static_cast<std::size_t>(s);
+        const bool inSong = s < project.song.sections && !audioSelected;
+        auto& button = sectionButtons[si];
+        button.setVisible(inSong);
+        button.setToggleState(project.song.trackOn[si][sel], juce::dontSendNotification);
+        button.setButtonText(
             juce::String(s + 1) + juce::String::charToString(static_cast<char>(
-                'A' + project.song.melodyPattern[static_cast<std::size_t>(s)])));
-        drumSections[static_cast<std::size_t>(s)].setButtonText(
-            juce::String(s + 1) + juce::String::charToString(static_cast<char>(
-                'A' + project.song.drumPattern[static_cast<std::size_t>(s)])));
-        const auto sharedMelody = sectionsSharingSlot(project.song, false,
-            project.song.melodyPattern[static_cast<std::size_t>(s)]);
-        const auto sharedDrums = sectionsSharingSlot(project.song, true,
-            project.song.drumPattern[static_cast<std::size_t>(s)]);
+                'A' + project.song.slots[si][sel])));
+        button.setColour(juce::TextButton::buttonOnColourId, trackColour(project.tracks[sel].icon));
+        const auto sharers = sectionsSharingSlot(project.song, selectedTrack,
+            project.song.slots[si][sel]);
         auto sharedText = [](const std::vector<int>& sharers) {
             juce::String text;
             for (const auto section : sharers)
                 text += (text.isEmpty() ? "" : ", ") + juce::String(section);
             return sharers.size() > 1 ? "shared by sections " + text : "unique to this section";
         };
-        melodySections[static_cast<std::size_t>(s)].setTooltip(
-            "Section " + juce::String(s + 1) + " melody (" + sharedText(sharedMelody) + "). "
-            "Click: on/off. Shift-click: next pattern. Ctrl-click: make unique.");
-        drumSections[static_cast<std::size_t>(s)].setTooltip(
-            "Section " + juce::String(s + 1) + " drums (" + sharedText(sharedDrums) + "). "
+        button.setTooltip(
+            "Section " + juce::String(s + 1) + " " + project.tracks[sel].trackName()
+            + " (" + sharedText(sharers) + "). "
             "Click: on/off. Shift-click: next pattern. Ctrl-click: make unique.");
     }
     pendingPublish = !engine.submit(project);
     int totalNotes = 0, totalHits = 0;
-    for (const auto& pattern : project.melodies)
-        totalNotes += pattern.count;
-    for (const auto& drums : project.drumPatterns)
-        totalHits += drums.hitCount();
+    for (const auto& track : project.tracks)
+    {
+        for (const auto& pattern : track.melodies)
+            totalNotes += pattern.count;
+        for (const auto& drums : track.drumPatterns)
+            totalHits += drums.hitCount();
+    }
     subtitle.setText((projectFile == juce::File() ? "Untitled" : projectFile.getFileName())
                      + (dirty() ? " *" : "") + "   /   " + juce::String(totalNotes) + " notes + "
                      + juce::String(totalHits) + " hits + "
@@ -1699,12 +1729,13 @@ void MainComponent::redoEdit()
 void MainComponent::loadDemo()
 {
     beginEdit();
-    project.melodies[static_cast<std::size_t>(melodyPatternSel)] = {};
+    const auto sel = static_cast<std::size_t>(selectedTrack);
+    project.tracks[sel].melodies[static_cast<std::size_t>(trackMelodySlot[sel])] = {};
     constexpr int roots[] { 48, 53, 55, 48 };
     constexpr int melody[] { 60, 64, 67, 64, 65, 69, 67, 65, 67, 71, 69, 67, 64, 62, 60, 67 };
     for (int bar = 0; bar < 4; ++bar)
     {
-        auto& p = project.melodies[static_cast<std::size_t>(melodyPatternSel)];
+        auto& p = project.tracks[sel].melodies[static_cast<std::size_t>(trackMelodySlot[sel])];
         p.notes[static_cast<std::size_t>(p.count)] = { static_cast<std::uint32_t>(p.count + 1), bar * 3840, 3360, roots[bar], 85 };
         ++p.count;
         for (int beat = 0; beat < 4; ++beat)
@@ -1721,9 +1752,10 @@ void MainComponent::loadDemo()
 void MainComponent::loadDrumDemo()
 {
     beginEdit();
-    project.drumPatterns[static_cast<std::size_t>(drumPatternSel)] = {};
-    auto hit = [this](int pad, int step, int velocity) {
-        project.drumPatterns[static_cast<std::size_t>(drumPatternSel)].steps[static_cast<std::size_t>(pad)][static_cast<std::size_t>(step)]
+    const auto sel = static_cast<std::size_t>(selectedTrack);
+    project.tracks[sel].drumPatterns[static_cast<std::size_t>(trackDrumSlot[sel])] = {};
+    auto hit = [this, sel](int pad, int step, int velocity) {
+        project.tracks[sel].drumPatterns[static_cast<std::size_t>(trackDrumSlot[sel])].steps[static_cast<std::size_t>(pad)][static_cast<std::size_t>(step)]
             = static_cast<std::uint8_t>(velocity);
     };
     for (int bar = 0; bar < 4; ++bar)
@@ -1746,13 +1778,39 @@ void MainComponent::loadDrumDemo()
 
 void MainComponent::selectTrack(bool drums)
 {
-    selectChannel(drums ? 1 : 0);
+    // Legacy two-channel shortcut: first track of the requested kind.
+    for (int track = 0; track < maxTracks; ++track)
+        if (project.tracks[static_cast<std::size_t>(track)].kind
+            == (drums ? TrackKind::Drums : TrackKind::Synth))
+        {
+            selectTrackIndex(track);
+            return;
+        }
+}
+
+void MainComponent::selectTrackIndex(int track)
+{
+    if (track < 0 || track >= maxTracks)
+        return;
+    if (project.tracks[static_cast<std::size_t>(track)].kind == TrackKind::None)
+        return;
+    selectedTrack = track;
+    selectChannel(track);
 }
 
 void MainComponent::selectChannel(int channel)
 {
-    const bool drums = channel == 1;
     const bool audio = channel == 2;
+    if (!audio)
+    {
+        if (channel < 0 || channel >= maxTracks)
+            return;
+        if (project.tracks[static_cast<std::size_t>(channel)].kind == TrackKind::None)
+            return;
+        selectedTrack = channel;
+    }
+    const bool drums = !audio
+        && project.tracks[static_cast<std::size_t>(selectedTrack)].kind == TrackKind::Drums;
     drumsSelected = drums;
     audioSelected = audio;
     if (audio)
@@ -1777,10 +1835,11 @@ void MainComponent::selectChannel(int channel)
     {
         auto& tab = patternTabs[static_cast<std::size_t>(i)];
         tab.setVisible(!audio);
-        tab.setToggleState(drums ? i == drumPatternSel : i == melodyPatternSel, juce::dontSendNotification);
+        const int slot = drums ? trackDrumSlot[static_cast<std::size_t>(selectedTrack)]
+                               : trackMelodySlot[static_cast<std::size_t>(selectedTrack)];
+        tab.setToggleState(i == slot, juce::dontSendNotification);
     }
-    melodyTab.setToggleState(!drums && !audio, juce::dontSendNotification);
-    drumsTab.setToggleState(drums, juce::dontSendNotification);
+    refreshTrackList();
     audioTab.setToggleState(audio, juce::dontSendNotification);
     demo.setButtonText(drums ? "Demo beat" : "Demo melody");
     description.setText(audio ? "REC: record from song start (or punch in)  |  Takes play in SONG mode  |  Click a take to inspect  |  Delete key removes it"
@@ -1801,13 +1860,236 @@ void MainComponent::selectChannel(int channel)
 
 void MainComponent::selectPattern(int slot)
 {
-    if (slot < 0 || slot >= numPatterns)
+    if (slot < 0 || slot >= numPatterns || audioSelected)
         return;
     if (drumsSelected)
-        drumPatternSel = slot;
-    else if (!audioSelected)
-        melodyPatternSel = slot;
+        trackDrumSlot[static_cast<std::size_t>(selectedTrack)] = slot;
+    else
+        trackMelodySlot[static_cast<std::size_t>(selectedTrack)] = slot;
     projectChanged();
+}
+
+void MainComponent::refreshTrackList()
+{
+    for (int track = 0; track < maxTracks; ++track)
+    {
+        auto& button = trackButtons[static_cast<std::size_t>(track)];
+        const auto& state = project.tracks[static_cast<std::size_t>(track)];
+        const bool used = state.kind != TrackKind::None;
+        button.setVisible(used);
+        if (!used)
+            continue;
+        juce::String label = juce::String(track + 1).paddedLeft('0', 2) + "  " + state.trackName();
+        if (track == dragHover && dragTrack >= 0 && dragTrack != dragHover)
+            label = juce::String::charToString(0x00bb) + " " + label;
+        if (state.mix.mute)
+            label += " [M]";
+        else if (state.mix.solo)
+            label += " [S]";
+        button.setButtonText(label);
+        button.setToggleState(track == selectedTrack && !audioSelected, juce::dontSendNotification);
+        button.setColour(juce::TextButton::buttonOnColourId, trackColour(state.icon));
+    }
+}
+
+void MainComponent::showAddTrackMenu()
+{
+    juce::PopupMenu menu;
+    int usable = 0;
+    for (const auto& track : project.tracks)
+        usable += track.kind == TrackKind::None ? 0 : 1;
+    menu.addItem(1, "Add synth track", usable < maxTracks);
+    menu.addItem(2, "Add drum track", usable < maxTracks);
+    menu.addSeparator();
+    juce::PopupMenu icons;
+    const int currentIcon = !audioSelected
+        ? project.tracks[static_cast<std::size_t>(selectedTrack)].icon & 7 : -1;
+    for (int icon = 0; icon < 8; ++icon)
+        icons.addItem(10 + icon, trackIconName(icon), true, icon == currentIcon);
+    menu.addSubMenu("Icon / colour", icons);
+    menu.addItem(20, "Move selected up", !audioSelected && selectedTrack > 0);
+    menu.addItem(21, "Move selected down", !audioSelected && selectedTrack < maxTracks - 1
+                     && project.tracks[static_cast<std::size_t>(selectedTrack + 1)].kind != TrackKind::None);
+    menu.addItem(3, "Rename selected track", !audioSelected);
+    menu.addItem(4, "Delete selected track", !audioSelected && usable > 1);
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(addTrack),
+                       [this](int result) {
+                           if (result == 1)
+                               addTrackOfKind(TrackKind::Synth);
+                           else if (result == 2)
+                               addTrackOfKind(TrackKind::Drums);
+                           else if (result >= 10 && result < 18)
+                               setTrackIcon(selectedTrack, result - 10);
+                           else if (result == 20)
+                               moveTrack(selectedTrack, selectedTrack - 1);
+                           else if (result == 21)
+                               moveTrack(selectedTrack, selectedTrack + 1);
+                           else if (result == 3)
+                               renameTrack(selectedTrack);
+                           else if (result == 4)
+                               deleteTrack(selectedTrack);
+                       });
+}
+
+void MainComponent::showTrackMenu(int track)
+{
+    selectTrackIndex(track);
+    showAddTrackMenu();
+}
+
+void MainComponent::renameTrack(int track)
+{
+    if (track < 0 || track >= maxTracks
+        || project.tracks[static_cast<std::size_t>(track)].kind == TrackKind::None)
+        return;
+    auto* window = new juce::AlertWindow("Rename track", "Track name.", juce::MessageBoxIconType::QuestionIcon);
+    window->addTextEditor("name", project.tracks[static_cast<std::size_t>(track)].trackName());
+    window->addButton("Rename", 1, juce::KeyPress(juce::KeyPress::returnKey));
+    window->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+    window->enterModalState(true,
+                            juce::ModalCallbackFunction::create([this, track, window](int result) {
+                                std::unique_ptr<juce::AlertWindow> deleter(window);
+                                if (result != 1)
+                                    return;
+                                const auto name = window->getTextEditorContents("name").trim();
+                                if (name.isEmpty())
+                                    return;
+                                beginEdit();
+                                project.tracks[static_cast<std::size_t>(track)].setTrackName(name);
+                                projectChanged();
+                                endEdit();
+                            }),
+                            true);
+}
+
+void MainComponent::addTrackOfKind(TrackKind kind)
+{
+    int slot = -1;
+    for (int track = 0; track < maxTracks; ++track)
+        if (project.tracks[static_cast<std::size_t>(track)].kind == TrackKind::None)
+        {
+            slot = track;
+            break;
+        }
+    if (slot < 0)
+    {
+        showError("Track list is full (8 tracks).");
+        return;
+    }
+    beginEdit();
+    auto& state = project.tracks[static_cast<std::size_t>(slot)];
+    state = Track {};
+    state.id = nextTrackId(project);
+    state.kind = kind;
+    state.icon = static_cast<std::uint8_t>(kind == TrackKind::Drums ? 1 : 0);
+    state.setTrackName(kind == TrackKind::Drums ? "Drums " + juce::String(slot + 1)
+                                                : "Keys " + juce::String(slot + 1));
+    projectChanged();
+    endEdit();
+    selectTrackIndex(slot);
+}
+
+void MainComponent::deleteTrack(int track)
+{
+    if (track < 0 || track >= maxTracks)
+        return;
+    int usable = 0;
+    for (const auto& state : project.tracks)
+        usable += state.kind == TrackKind::None ? 0 : 1;
+    if (usable <= 1)
+    {
+        showError("A project needs at least one track.");
+        return;
+    }
+    beginEdit();
+    project.tracks[static_cast<std::size_t>(track)] = Track {};
+    for (int candidate = 0; candidate < maxTracks; ++candidate)
+        if (project.tracks[static_cast<std::size_t>(candidate)].kind != TrackKind::None)
+        {
+            selectedTrack = candidate;
+            break;
+        }
+    projectChanged();
+    endEdit();
+    selectChannel(selectedTrack);
+}
+
+void MainComponent::setTrackIcon(int track, int icon)
+{
+    if (track < 0 || track >= maxTracks
+        || project.tracks[static_cast<std::size_t>(track)].kind == TrackKind::None)
+        return;
+    beginEdit();
+    project.tracks[static_cast<std::size_t>(track)].icon = static_cast<std::uint8_t>(icon & 7);
+    projectChanged();
+    endEdit();
+}
+
+void MainComponent::moveTrack(int from, int to)
+{
+    from = std::clamp(from, 0, maxTracks - 1);
+    to = std::clamp(to, 0, maxTracks - 1);
+    if (!moveTrackState(project, from, to))
+        return;
+    const auto shiftUi = [&](int a, int b) {
+        std::swap(trackMelodySlot[static_cast<std::size_t>(a)],
+                  trackMelodySlot[static_cast<std::size_t>(b)]);
+        std::swap(trackDrumSlot[static_cast<std::size_t>(a)],
+                  trackDrumSlot[static_cast<std::size_t>(b)]);
+    };
+    if (from < to)
+        for (int i = from; i < to; ++i)
+            shiftUi(i, i + 1);
+    else
+        for (int i = from; i > to; --i)
+            shiftUi(i, i - 1);
+    selectedTrack = to;
+}
+
+void MainComponent::mouseDown(const juce::MouseEvent& event)
+{
+    dragTrack = dragHover = -1;
+    for (int track = 0; track < maxTracks; ++track)
+        if (event.eventComponent == &trackButtons[static_cast<std::size_t>(track)]
+            && project.tracks[static_cast<std::size_t>(track)].kind != TrackKind::None)
+        {
+            dragTrack = dragHover = track;
+            dragStartPos = event.getPosition();
+        }
+}
+
+void MainComponent::mouseDrag(const juce::MouseEvent& event)
+{
+    if (dragTrack < 0 || dragStartPos.getDistanceFrom(event.getPosition()) < 6)
+        return;
+    const auto pos = event.getEventRelativeTo(this).getPosition();
+    for (int track = 0; track < maxTracks; ++track)
+    {
+        const auto& button = trackButtons[static_cast<std::size_t>(track)];
+        if (button.isVisible() && button.getBounds().contains(pos))
+            dragHover = track;
+    }
+    refreshTrackList();
+}
+
+void MainComponent::mouseUp(const juce::MouseEvent& event)
+{
+    juce::ignoreUnused(event);
+    const int from = dragTrack, to = dragHover;
+    dragTrack = dragHover = -1;
+    refreshTrackList();
+    // Deferred past the button's own click so selection settles first.
+    if (from >= 0 && to >= 0 && from != to)
+        juce::MessageManager::callAsync(
+            [safe = juce::Component::SafePointer<MainComponent>(this), from, to] {
+                if (safe == nullptr)
+                    return;
+                safe->beginEdit();
+                safe->moveTrack(from, to);
+                safe->projectChanged();
+                safe->endEdit();
+                safe->selectChannel(to);
+            });
 }
 
 void MainComponent::refreshAudioView()
@@ -1831,16 +2113,22 @@ void MainComponent::updateTrackControls()
     solo.setToggleState(mix.solo, juce::dontSendNotification);
     trackVolume.setValue(static_cast<double>(mix.volume) * 100.0, juce::dontSendNotification);
     trackVolume.setColour(juce::Slider::thumbColourId, drumsSelected ? ui::violet : ui::cyan);
-    melodyTab.setButtonText("01  Sine keys" + juce::String(project.melodyMix.mute ? " [M]" : project.melodyMix.solo ? " [S]" : ""));
-    drumsTab.setButtonText("02  Starter drums" + juce::String(project.drumMix.mute ? " [M]" : project.drumMix.solo ? " [S]" : ""));
-    audioTab.setButtonText("03  Audio" + juce::String(project.takeCount > 0 ? " [" + juce::String(project.takeCount) + "]" : "")
+    refreshTrackList();
+    audioTab.setButtonText("Audio" + juce::String(project.takeCount > 0 ? " [" + juce::String(project.takeCount) + "]" : "")
         + juce::String(recording ? " REC" : ""));
     repaint(20, 208, 204, getHeight() - 266);
 }
 
 void MainComponent::auditionPad(int pad)
 {
-    if (engine.auditionDrum(pad))
+    int target = -1;
+    if (!audioSelected
+        && project.tracks[static_cast<std::size_t>(selectedTrack)].kind == TrackKind::Drums)
+        target = selectedTrack;
+    for (int track = 0; target < 0 && track < maxTracks; ++track)
+        if (project.tracks[static_cast<std::size_t>(track)].kind == TrackKind::Drums)
+            target = track;
+    if (target >= 0 && engine.auditionDrum(target, pad))
     {
         padFlashes[static_cast<std::size_t>(pad)] = 4;
         padButtons[static_cast<std::size_t>(pad)].setToggleState(true, juce::dontSendNotification);
@@ -2741,10 +3029,10 @@ void MainComponent::timerCallback()
         for (int s = 0; s < maxSections; ++s)
         {
             const bool active = running && project.songMode && s == currentSection && s < project.song.sections;
-            melodySections[static_cast<std::size_t>(s)].setColour(juce::TextButton::buttonColourId,
-                active ? ui::cyan.withMultipliedBrightness(0.35f) : ui::raised);
-            drumSections[static_cast<std::size_t>(s)].setColour(juce::TextButton::buttonColourId,
-                active ? ui::violet.withMultipliedBrightness(0.35f) : ui::raised);
+            sectionButtons[static_cast<std::size_t>(s)].setColour(juce::TextButton::buttonColourId,
+                active ? trackColour(project.tracks[static_cast<std::size_t>(selectedTrack)].icon)
+                               .withMultipliedBrightness(0.35f)
+                       : ui::raised);
         }
     }
     meterPeak = std::max(engine.getOutputPeak(), meterPeak * 0.94f);
@@ -2758,8 +3046,14 @@ void MainComponent::timerCallback()
     {
         auto& flash = padFlashes[static_cast<std::size_t>(pad)];
         if (flash > 0) --flash;
-        if (drumStep >= 0 && drumStep != previousDrumStep && project.drumMix.audible(project.melodyMix)
-            && project.drumPatterns[static_cast<std::size_t>(drumPatternSel)].steps[static_cast<std::size_t>(pad)][static_cast<std::size_t>(drumStep)] > 0)
+        const auto sel = static_cast<std::size_t>(selectedTrack);
+        const auto& drumMix = project.tracks[sel].mix;
+        bool anySolo = false;
+        for (const auto& track : project.tracks)
+            anySolo = anySolo || (track.kind != TrackKind::None && track.mix.solo);
+        if (drumStep >= 0 && drumStep != previousDrumStep && !drumMix.mute
+            && (drumMix.solo || !anySolo)
+            && project.tracks[sel].drumPatterns[static_cast<std::size_t>(trackDrumSlot[sel])].steps[static_cast<std::size_t>(pad)][static_cast<std::size_t>(drumStep)] > 0)
             flash = 4;
         padButtons[static_cast<std::size_t>(pad)].setToggleState(flash > 0, juce::dontSendNotification);
     }
@@ -2884,6 +3178,22 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
         deleteTake(selectedTake);
         return true;
     }
+    if (key.getModifiers().isAltDown()
+        && (key.getKeyCode() == juce::KeyPress::upKey || key.getKeyCode() == juce::KeyPress::downKey)
+        && !audioSelected)
+    {
+        const int to = selectedTrack + (key.getKeyCode() == juce::KeyPress::upKey ? -1 : 1);
+        if (to >= 0 && to < maxTracks
+            && project.tracks[static_cast<std::size_t>(to)].kind != TrackKind::None)
+        {
+            beginEdit();
+            moveTrack(selectedTrack, to);
+            projectChanged();
+            endEdit();
+            selectChannel(to);
+            return true;
+        }
+    }
     if (key.getModifiers().isCommandDown())
     {
         if (key.getKeyCode() == '1') { selectTrack(false); return true; }
@@ -2898,6 +3208,12 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
             if (key.getModifiers().isShiftDown()) redoEdit(); else undoEdit();
             return true;
         }
+    }
+    else if (!key.getModifiers().isAltDown() && !audioSelected
+             && key.getKeyCode() >= '1' && key.getKeyCode() <= '8')
+    {
+        selectTrackIndex(key.getKeyCode() - '1');
+        return true;
     }
     else if (drumsSelected && !key.getModifiers().isAltDown())
     {
@@ -2951,14 +3267,14 @@ void MainComponent::paint(juce::Graphics& g)
 
     ui::surface(g, { 20, 208, 204, h - 266 });
     ui::caption(g, "CHANNEL RACK", { 38, 222, 170, 20 });
-    ui::caption(g, "CHANNEL GAIN", { 38, 404, 170, 18 });
-    if (getHeight() > 820)
+    ui::caption(g, "CHANNEL GAIN", { 38, 550, 170, 16 });
+    if (getHeight() > 880)
     {
         ui::caption(g, audioSelected ? "TAKE ENGINE" : drumsSelected ? "ONE-SHOT ENGINE" : "SINE ENGINE",
-                    { 38, 620, 172, 20 }, accent);
+                    { 38, 690, 172, 20 }, accent);
         ui::caption(g, audioSelected ? juce::String(project.takeCount) + " TAKES / SONG ONLY"
                     : drumsSelected ? "8 PADS / 64 STEPS" : "16 VOICES / 2 OCTAVES",
-                    { 38, 645, 172, 18 }, ui::muted, 9.0f);
+                    { 38, 714, 172, 18 }, ui::muted, 9.0f);
     }
     ui::caption(g, "MASTER OUTPUT", { 38, getHeight() - 147, 170, 20 });
     const auto meter = juce::jlimit(0.0f, 1.0f, (juce::Decibels::gainToDecibels(meterPeak, -60.0f) + 60) / 60);
@@ -3006,12 +3322,13 @@ void MainComponent::resized()
     redo.setBounds(getWidth() - 346, 138, 62, 34);
     panic.setBounds(getWidth() - 266, 138, 76, 34);
     audioSettings.setBounds(getWidth() - 180, 138, 142, 34);
-    melodyTab.setBounds(34, 252, 176, 56);
-    drumsTab.setBounds(34, 316, 176, 56);
-    audioTab.setBounds(34, 380, 176, 56);
-    mute.setBounds(38, 567, 78, 32);
-    solo.setBounds(126, 567, 78, 32);
-    trackVolume.setBounds(44, 426, 156, 128);
+    for (int track = 0; track < maxTracks; ++track)
+        trackButtons[static_cast<std::size_t>(track)].setBounds(34, 246 + track * 29, 176, 26);
+    audioTab.setBounds(34, 482, 124, 28);
+    addTrack.setBounds(162, 482, 48, 28);
+    mute.setBounds(38, 516, 78, 30);
+    solo.setBounds(126, 516, 78, 30);
+    trackVolume.setBounds(44, 568, 156, 80);
     clear.setBounds(getWidth() - 242, 222, 66, 30);
     demo.setBounds(getWidth() - 168, 222, 130, 30);
     kitButton.setBounds(getWidth() - 330, 222, 80, 30);
@@ -3019,10 +3336,7 @@ void MainComponent::resized()
     repeatBar.setBounds(getWidth() - 470, 222, 132, 30);
     const int sectionWidth = 46;
     for (int s = 0; s < maxSections; ++s)
-    {
-        melodySections[static_cast<std::size_t>(s)].setBounds(624 + s * (sectionWidth + 4), 222, sectionWidth, 24);
-        drumSections[static_cast<std::size_t>(s)].setBounds(624 + s * (sectionWidth + 4), 248, sectionWidth, 24);
-    }
+        sectionButtons[static_cast<std::size_t>(s)].setBounds(624 + s * (sectionWidth + 4), 222, sectionWidth, 24);
     for (int i = 0; i < numPatterns; ++i)
         patternTabs[static_cast<std::size_t>(i)].setBounds(420 + i * 32, 222, 28, 24);
     duplicatePattern.setBounds(556, 222, 60, 24);

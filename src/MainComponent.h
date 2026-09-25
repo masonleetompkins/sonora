@@ -80,7 +80,12 @@ private:
     juce::File resolveTakeFile(const AudioTakeMeta& take) const;
     double currentRate() const;
     int currentInputLatency() const;
-    TrackMix& selectedMix() { return drumsSelected ? project.drumMix : project.melodyMix; }
+    TrackMix& selectedMix()
+    {
+        if (audioSelected)
+            return project.tracks[0].mix;
+        return project.tracks[static_cast<std::size_t>(std::clamp(selectedTrack, 0, maxTracks - 1))].mix;
+    }
     bool dirty() const { return recoveredUnsaved || !(project == savedProject); }
 
     AudioEngine engine;
@@ -95,12 +100,13 @@ private:
     juce::TextButton clear { "Clear" }, demo { "Demo melody" };
     juce::TextButton duplicatePattern { "Dup" };
     std::array<juce::TextButton, numPatterns> patternTabs;
-    juce::TextButton melodyTab { "01  Sine keys" }, drumsTab { "02  Starter drums" };
-    juce::TextButton audioTab { "03  Audio" };
+    std::array<juce::TextButton, maxTracks> trackButtons;
+    juce::TextButton addTrack { "+" };
+    juce::TextButton audioTab { "Audio" };
     juce::TextButton mute { "Mute" }, solo { "Solo" }, repeatBar { "Repeat bar 1" };
     juce::TextButton kitButton { "Kit" };
     juce::TextButton songMode { "Song" }, addSection { "+" }, removeSection { "-" };
-    std::array<juce::TextButton, maxSections> melodySections, drumSections;
+    std::array<juce::TextButton, maxSections> sectionButtons;
     std::array<juce::TextButton, drumPads> padButtons;
     juce::Slider tempo, trackVolume;
     ui::NeonTheme theme;
@@ -158,9 +164,45 @@ private:
     std::uint64_t revision = 0, recoveredRevision = 0;
     int timerTicks = 0;
     bool drumsSelected = false, audioSelected = false, lastRecordingShown = false;
-    // Editor-selected library patterns (UI-only, default slot A). Loop-mode
-    // playback previews these; song mode follows the arrangement instead.
-    int melodyPatternSel = 0, drumPatternSel = 0;
+    // Editor-selected instrument track, plus per-track loop-preview library
+    // slots (UI-only; song mode follows the arrangement instead).
+    int selectedTrack = 0;
+    std::array<int, maxTracks> trackMelodySlot {}, trackDrumSlot {};
+    void selectTrackIndex(int track);
+    void setTrackIcon(int track, int icon);
+    void moveTrack(int from, int to);
+    void mouseDown(const juce::MouseEvent& event) override;
+    void mouseDrag(const juce::MouseEvent& event) override;
+    void mouseUp(const juce::MouseEvent& event) override;
+    int dragTrack = -1, dragHover = -1;
+    juce::Point<int> dragStartPos;
+    // Drum-kit editors follow the selected drum track, else the first one.
+    int drumEditTrack() const
+    {
+        if (project.tracks[static_cast<std::size_t>(selectedTrack)].kind == TrackKind::Drums)
+            return selectedTrack;
+        for (int track = 0; track < maxTracks; ++track)
+            if (project.tracks[static_cast<std::size_t>(track)].kind == TrackKind::Drums)
+                return track;
+        return 1;
+    }
+    // MEL/DRM effect targets follow the first synth/drum track.
+    int fxTrackFor(bool drums) const
+    {
+        for (int track = 0; track < maxTracks; ++track)
+        {
+            const auto kind = project.tracks[static_cast<std::size_t>(track)].kind;
+            if (drums ? kind == TrackKind::Drums : kind == TrackKind::Synth)
+                return track;
+        }
+        return drums ? 1 : 0;
+    }
+    void refreshTrackList();
+    void showTrackMenu(int track);
+    void showAddTrackMenu();
+    void renameTrack(int track);
+    void addTrackOfKind(TrackKind kind);
+    void deleteTrack(int track);
     // Recording state (message thread owns transitions; audio thread only
     // pushes into the recorder FIFO and reads atomics).
     TakeRecorder recorder;

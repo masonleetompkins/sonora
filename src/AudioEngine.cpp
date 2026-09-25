@@ -4,32 +4,83 @@ namespace sonora
 {
 AudioEngine::AudioEngine()
 {
-    for (int i = 0; i < 16; ++i)
-        synth.addVoice(new Voice());
-    synth.addSound(new Sound());
-    synth.setNoteStealingEnabled(false);
-    // JUCE defaults to coalescing nearby MIDI events. Strict subdivision makes
-    // timeline event offsets exact, even when they fall one sample apart.
-    synth.setMinimumRenderingSubdivisionSize(1, true);
+    for (auto& unit : units)
+    {
+        for (int i = 0; i < 16; ++i)
+            unit.synth.addVoice(new Voice());
+        unit.synth.addSound(new Sound());
+        unit.synth.setNoteStealingEnabled(false);
+        // JUCE defaults to coalescing nearby MIDI events. Strict subdivision
+        // makes timeline event offsets exact, even when they fall one sample apart.
+        unit.synth.setMinimumRenderingSubdivisionSize(1, true);
+        unit.events.ensureSize(8192);
+    }
     midi.ensureSize(65536);
-    renderMidi.ensureSize(65536);
-    drumMidi.ensureSize(65536);
+}
+
+bool AudioEngine::audible(int track, const ProjectState& state) const
+{
+    const auto& mix = state.tracks[static_cast<std::size_t>(track)].mix;
+    if (mix.mute)
+        return false;
+    if (mix.solo)
+        return true;
+    for (const auto& other : state.tracks)
+        if (other.kind != TrackKind::None && other.mix.solo)
+            return false;
+    return true;
+}
+
+const SampleBank* AudioEngine::retirePadBank(int track, const SampleBank* next)
+{
+    if (track < 0 || track >= maxTracks)
+        return nullptr;
+    return units[static_cast<std::size_t>(track)].drums.requestBank(next);
+}
+
+bool AudioEngine::auditionDrum(int track, int pad, int velocity)
+{
+    if (track < 0 || track >= maxTracks || pad < 0 || pad >= drumPads || velocity <= 0 || velocity > 127)
+        return false;
+    if (latest.tracks[static_cast<std::size_t>(track)].kind != TrackKind::Drums)
+        return false;
+    return auditions.push({ track, pad, velocity });
+}
+
+void AudioEngine::setLoopSelection(int track, int melodySlot, int drumSlot)
+{
+    loopTrack.store(std::clamp(track, 0, maxTracks - 1));
+    loopMelodySlots[static_cast<std::size_t>(std::clamp(track, 0, maxTracks - 1))].store(
+        std::clamp(melodySlot, 0, numPatterns - 1));
+    loopDrumSlots[static_cast<std::size_t>(std::clamp(track, 0, maxTracks - 1))].store(
+        std::clamp(drumSlot, 0, numPatterns - 1));
 }
 
 void AudioEngine::prepare(double sampleRate)
 {
     rate = sampleRate;
-    synth.setCurrentPlaybackSampleRate(rate);
-    drums.prepare(rate);
-    melodyChain.prepare(rate);
-    drumChain.prepare(rate);
+    for (auto& unit : units)
+    {
+        unit.synth.setCurrentPlaybackSampleRate(rate);
+        unit.drums.prepare(rate);
+        unit.chain.prepare(rate);
+        unit.gain.reset(rate, 0.01);
+        unit.gain.setCurrentAndTargetValue(1.0f);
+    }
     master.prepare(rate);
-    melodyGain.reset(rate, 0.01);
-    melodyGain.setCurrentAndTargetValue(active.melodyMix.volume);
     midiCollector.reset(rate);
     scheduler.configure(rate, active.bpm);
     scheduler.rewind();
     wasPlaying = false;
+    // Re-apply effect parameters: prepare() resets DSP state to defaults.
+    for (int track = 0; track < maxTracks; ++track)
+    {
+        auto& unit = units[static_cast<std::size_t>(track)];
+        unit.chain.setParams(active.tracks[static_cast<std::size_t>(track)].fx);
+        unit.activeFx = active.tracks[static_cast<std::size_t>(track)].fx;
+    }
+    master.setParams(active.master);
+    activeMaster = active.master;
 }
 
 void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
@@ -45,12 +96,17 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
             break;
     }
     const bool tempoChanged = std::abs(incoming.bpm - active.bpm) > 1.0e-9;
-    const bool melodyAudible = incoming.melodyMix.audible(incoming.drumMix);
-    const bool drumsAudible = incoming.drumMix.audible(incoming.melodyMix);
-    const bool melodyChanged = !(incoming.melodies == active.melodies) || tempoChanged
-        || melodyAudible != active.melodyMix.audible(active.drumMix);
-    const bool drumChanged = !(incoming.drumPatterns == active.drumPatterns) || tempoChanged;
-    const bool drumAudibilityChanged = drumsAudible != active.drumMix.audible(active.melodyMix);
+    const bool tracksChanged = !(incoming.tracks == active.tracks);
+    const bool songToggled = incoming.songMode != active.songMode;
+    bool audibilityChanged = false;
+    for (int track = 0; track < maxTracks; ++track)
+    {
+        if (audible(track, incoming) != audible(track, active))
+        {
+            audibilityChanged = true;
+            break;
+        }
+    }
     active = incoming;
     if (tempoChanged)
         scheduler.configure(rate, active.bpm);
@@ -61,26 +117,27 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
     const bool panicNow = panicRequested.exchange(false);
     if (reset || (!wasPlaying && running))
         scheduler.rewind();
-    if (melodyChanged || reset || panicNow || running != wasPlaying)
-        synth.allNotesOff(0, false);
-    if (reset || panicNow || running != wasPlaying || drumAudibilityChanged)
-        drums.stop();
+    const bool voicesChanged = tracksChanged || tempoChanged || reset || panicNow || running != wasPlaying;
+    if (voicesChanged || songToggled)
+        for (auto& unit : units)
+            unit.synth.allNotesOff(0, false);
+    if (reset || panicNow || running != wasPlaying || audibilityChanged || songToggled)
+        for (auto& unit : units)
+            unit.drums.stop();
     // Effect tails belong to the notes that made them; clear them with voices.
-    if (melodyChanged || reset || panicNow || running != wasPlaying)
-        melodyChain.reset();
-    if (reset || panicNow || running != wasPlaying || drumAudibilityChanged)
-        drumChain.reset();
+    if (voicesChanged || songToggled)
+        for (auto& unit : units)
+            unit.chain.reset();
     if (reset || panicNow)
         master.reset();
-    if (!(incoming.melodyFx == activeMelodyFx))
+    for (int track = 0; track < maxTracks; ++track)
     {
-        melodyChain.setParams(incoming.melodyFx);
-        activeMelodyFx = incoming.melodyFx;
-    }
-    if (!(incoming.drumFx == activeDrumFx))
-    {
-        drumChain.setParams(incoming.drumFx);
-        activeDrumFx = incoming.drumFx;
+        auto& unit = units[static_cast<std::size_t>(track)];
+        if (!(incoming.tracks[static_cast<std::size_t>(track)].fx == unit.activeFx))
+        {
+            unit.chain.setParams(incoming.tracks[static_cast<std::size_t>(track)].fx);
+            unit.activeFx = incoming.tracks[static_cast<std::size_t>(track)].fx;
+        }
     }
     if (!(incoming.master == activeMaster))
     {
@@ -94,13 +151,48 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
     if (panicNow || reset)
         midi.clear();
 
-    renderMidi.clear();
-    drumMidi.clear();
+    for (auto& unit : units)
+        unit.events.clear();
     DrumHit hit {};
     for (int i = 0; i < 63 && auditions.pop(hit); ++i)
-        if (!panicNow && !reset && drumsAudible)
-            drumMidi.addEvent(juce::MidiMessage::noteOn(10, drumBaseNote + hit.pad,
-                              static_cast<juce::uint8>(hit.velocity)), block.startSample);
+    {
+        if (panicNow || reset)
+            continue;
+        int target = hit.track;
+        if (target == wildcardTrack)
+        {
+            target = -1;
+            const int selected = std::clamp(loopTrack.load(), 0, maxTracks - 1);
+            if (active.tracks[static_cast<std::size_t>(selected)].kind == TrackKind::Drums)
+                target = selected;
+            for (int track = 0; target < 0 && track < maxTracks; ++track)
+                if (active.tracks[static_cast<std::size_t>(track)].kind == TrackKind::Drums)
+                    target = track;
+        }
+        if (target < 0 || target >= maxTracks
+            || active.tracks[static_cast<std::size_t>(target)].kind != TrackKind::Drums
+            || !audible(target, active))
+            continue;
+        units[static_cast<std::size_t>(target)].events.addEvent(
+            juce::MidiMessage::noteOn(10, drumBaseNote + hit.pad, static_cast<juce::uint8>(hit.velocity)),
+            block.startSample);
+    }
+    // Live input routing: channel 10 plays the selected-or-first drum track,
+    // everything else plays the selected-or-first synth track.
+    const int liveTrack = std::clamp(loopTrack.load(), 0, maxTracks - 1);
+    int drumTarget = -1, synthTarget = -1;
+    if (active.tracks[static_cast<std::size_t>(liveTrack)].kind == TrackKind::Drums)
+        drumTarget = liveTrack;
+    if (active.tracks[static_cast<std::size_t>(liveTrack)].kind == TrackKind::Synth)
+        synthTarget = liveTrack;
+    for (int track = 0; track < maxTracks; ++track)
+    {
+        const auto kind = active.tracks[static_cast<std::size_t>(track)].kind;
+        if (kind == TrackKind::Drums && drumTarget < 0)
+            drumTarget = track;
+        if (kind == TrackKind::Synth && synthTarget < 0)
+            synthTarget = track;
+    }
     for (const auto metadata : midi)
     {
         if (metadata.numBytes > 3)
@@ -108,7 +200,7 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
         auto message = metadata.getMessage();
         if (message.getChannel() == 10)
         {
-            if (message.isNoteOn() && drumsAudible)
+            if (message.isNoteOn() && drumTarget >= 0 && audible(drumTarget, active))
             {
                 int pad = -1;
                 if (arturiaPads.load())
@@ -118,65 +210,116 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
                         if (message.getNoteNumber() == drumMidiNotes[static_cast<std::size_t>(candidate)])
                             pad = candidate;
                 if (pad >= 0)
-                    drumMidi.addEvent(juce::MidiMessage::noteOn(10, drumBaseNote + pad, message.getVelocity()),
-                                      metadata.samplePosition + block.startSample);
+                    units[static_cast<std::size_t>(drumTarget)].events.addEvent(
+                        juce::MidiMessage::noteOn(10, drumBaseNote + pad, message.getVelocity()),
+                        metadata.samplePosition + block.startSample);
             }
         }
-        else if (message.getChannel() > 0 && melodyAudible)
+        else if (message.getChannel() > 0 && synthTarget >= 0 && audible(synthTarget, active))
         {
+            // Channel 1 isolates live keys from sequenced voices (2 + track).
             message.setChannel(1);
-            renderMidi.addEvent(message, metadata.samplePosition + block.startSample);
+            units[static_cast<std::size_t>(synthTarget)].events.addEvent(
+                message, metadata.samplePosition + block.startSample);
         }
     }
 
     std::int64_t blockStartPosition = scheduler.samplePosition();
-    // Loop mode previews the editor-selected library patterns; song mode
-    // follows the arrangement. Indices arrive on atomics outside snapshots.
-    const int loopMelody = std::clamp(loopMelodyPattern.load(), 0, numPatterns - 1);
-    const int loopDrums = std::clamp(loopDrumPattern.load(), 0, numPatterns - 1);
     if (running && !panicNow)
     {
         const bool songMode = active.songMode;
         // blockStartPosition was captured above, before processSong() advances it.
-        if (drumsAudible)
+        if (songMode)
         {
-            auto scheduleDrumEvents = [this, start = block.startSample](int pad, std::uint8_t velocity, int offset) {
-                drumMidi.addEvent(juce::MidiMessage::noteOn(10, drumBaseNote + pad, velocity), start + offset);
-            };
-            if (songMode)
-                scheduler.scheduleDrumsSong(active.drumPatterns, active.song, block.numSamples, scheduleDrumEvents);
-            else
-                scheduler.scheduleDrums(active.drumPatterns[static_cast<std::size_t>(loopDrums)],
-                                        block.numSamples, scheduleDrumEvents);
+            for (int track = 0; track < maxTracks; ++track)
+            {
+                if (active.tracks[static_cast<std::size_t>(track)].kind != TrackKind::Drums
+                    || !audible(track, active))
+                    continue;
+                scheduler.scheduleDrumsSong(active.tracks[static_cast<std::size_t>(track)].drumPatterns,
+                                            active.song, track, block.numSamples,
+                    [this, track, start = block.startSample](int pad, std::uint8_t velocity, int offset) {
+                        units[static_cast<std::size_t>(track)].events.addEvent(
+                            juce::MidiMessage::noteOn(10, drumBaseNote + pad, velocity), start + offset);
+                    });
+            }
         }
-        auto emitNote = [this, start = block.startSample, melodyAudible](const Note& note, bool on, int offset) {
-            // Channel 2 isolates sequenced voices from live keyboard notes.
-            if (melodyAudible)
-                renderMidi.addEvent(on ? juce::MidiMessage::noteOn(2, note.pitch, static_cast<juce::uint8>(note.velocity))
-                                       : juce::MidiMessage::noteOff(2, note.pitch), start + offset);
+        auto emitNote = [this, start = block.startSample](int track, const Note& note, bool on, int offset) {
+            // Channel 2 + track isolates sequenced voices from live keys.
+            if (audible(track, active))
+                units[static_cast<std::size_t>(track)].events.addEvent(
+                    on ? juce::MidiMessage::noteOn(2 + track, note.pitch, static_cast<juce::uint8>(note.velocity))
+                       : juce::MidiMessage::noteOff(2 + track, note.pitch),
+                    start + offset);
         };
         bool finished = false;
         if (songMode)
-            finished = scheduler.processSong(active.melodies, active.song, block.numSamples,
-                                             melodyChanged || drumChanged, emitNote);
+            finished = scheduler.processSong(active.tracks, active.song, block.numSamples,
+                                             tracksChanged || tempoChanged, emitNote);
         else
-            scheduler.processLoop(active.melodies[static_cast<std::size_t>(loopMelody)],
-                                  block.numSamples, melodyChanged || drumChanged, emitNote);
+        {
+            for (int track = 0; track < maxTracks; ++track)
+            {
+                const auto kind = active.tracks[static_cast<std::size_t>(track)].kind;
+                if (kind == TrackKind::None || !audible(track, active))
+                    continue;
+                const auto trackIndex = static_cast<std::size_t>(track);
+                const int loopMelody = std::clamp(
+                    loopMelodySlots[trackIndex].load(), 0, numPatterns - 1);
+                const int loopDrums = std::clamp(
+                    loopDrumSlots[trackIndex].load(), 0, numPatterns - 1);
+                if (kind == TrackKind::Synth)
+                    scheduler.processLoopAt(active.tracks[static_cast<std::size_t>(track)].melodies[
+                                                static_cast<std::size_t>(loopMelody)],
+                                            block.numSamples, tracksChanged || tempoChanged,
+                                            blockStartPosition,
+                                            [this, track, &emitNote](const Note& note, bool on, int offset) {
+                                                emitNote(track, note, on, offset);
+                                            });
+                else
+                {
+                    scheduler.scheduleDrumsAt(active.tracks[static_cast<std::size_t>(track)].drumPatterns[
+                                                  static_cast<std::size_t>(loopDrums)],
+                                              block.numSamples, blockStartPosition,
+                        [this, track, start = block.startSample](int pad, std::uint8_t velocity, int offset) {
+                            units[static_cast<std::size_t>(track)].events.addEvent(
+                                juce::MidiMessage::noteOn(10, drumBaseNote + pad, velocity), start + offset);
+                        });
+                }
+            }
+            scheduler.advance(block.numSamples);
+        }
         if (finished)
             playing.store(false);
     }
-    synth.renderNextBlock(*block.buffer, renderMidi, block.startSample, block.numSamples);
-    melodyChain.process(*block.buffer, block.startSample, block.numSamples);
-    melodyGain.setTargetValue(melodyAudible ? active.melodyMix.volume : 0.0f);
-    for (int frame = block.startSample; frame < block.startSample + block.numSamples; ++frame)
+    // Render every track through its own voices, chain, and fader.
+    for (int track = 0; track < maxTracks; ++track)
     {
-        const auto gain = melodyGain.getNextValue();
-        for (int channel = 0; channel < block.buffer->getNumChannels(); ++channel)
-            block.buffer->getWritePointer(channel)[frame] *= gain;
+        auto& unit = units[static_cast<std::size_t>(track)];
+        const auto kind = active.tracks[static_cast<std::size_t>(track)].kind;
+        if (kind == TrackKind::None)
+            continue;
+        if (kind == TrackKind::Synth)
+            unit.synth.renderNextBlock(*block.buffer, unit.events, block.startSample, block.numSamples);
+        else
+            unit.drums.render(*block.buffer, block.startSample, block.numSamples, unit.events,
+                              audible(track, active)
+                                  ? active.tracks[static_cast<std::size_t>(track)].mix.volume
+                                  : 0.0f);
+        unit.chain.process(*block.buffer, block.startSample, block.numSamples);
+        // The drum sampler applies its own track volume; the synth fader is
+        // smoothed here. Muted tracks were already gated at event time, but
+        // the fader still silences tails on mute toggles.
+        const float target = kind == TrackKind::Synth && audible(track, active)
+            ? active.tracks[static_cast<std::size_t>(track)].mix.volume : 0.0f;
+        unit.gain.setTargetValue(kind == TrackKind::Drums ? 1.0f : target);
+        for (int frame = block.startSample; frame < block.startSample + block.numSamples; ++frame)
+        {
+            const auto gain = unit.gain.getNextValue();
+            for (int channel = 0; channel < block.buffer->getNumChannels(); ++channel)
+                block.buffer->getWritePointer(channel)[frame] *= gain;
+        }
     }
-    drums.render(*block.buffer, block.startSample, block.numSamples, drumMidi,
-                 drumsAudible ? active.drumMix.volume : 0.0f);
-    drumChain.process(*block.buffer, block.startSample, block.numSamples);
     // Recorded takes play in song mode from their punch-in position. Takes are
     // preloaded PCM owned by the RCU set; this loop only reads, never allocates.
     // blockStartPosition was captured before the schedulers advanced above.
@@ -217,10 +360,12 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
 
 void AudioEngine::release()
 {
-    synth.allNotesOff(0, false);
-    drums.stop();
-    melodyChain.reset();
-    drumChain.reset();
+    for (auto& unit : units)
+    {
+        unit.synth.allNotesOff(0, false);
+        unit.drums.stop();
+        unit.chain.reset();
+    }
     master.reset();
     outputPeak.store(0.0f);
     masterReductionDb.store(0.0f);

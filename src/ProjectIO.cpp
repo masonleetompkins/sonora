@@ -52,17 +52,6 @@ juce::Result decodeNotes(const juce::var& value, Pattern& pattern)
     return juce::Result::ok();
 }
 
-std::unique_ptr<juce::DynamicObject> encodeTrack(std::uint32_t id, const char* instrument, const TrackMix& mix)
-{
-    auto track = std::make_unique<juce::DynamicObject>();
-    track->setProperty("id", static_cast<juce::int64>(id));
-    track->setProperty("instrument", instrument);
-    track->setProperty("volume", static_cast<double>(mix.volume));
-    track->setProperty("mute", mix.mute);
-    track->setProperty("solo", mix.solo);
-    return track;
-}
-
 juce::Result decodeMix(const juce::DynamicObject& track, TrackMix& mix)
 {
     const auto volume = track.getProperty("volume");
@@ -228,43 +217,25 @@ juce::Result decodeSlotList(const juce::var& value, std::array<std::uint8_t, max
     }
     return juce::Result::ok();
 }
-}
 
-juce::String ProjectIO::encode(const ProjectState& state)
+std::unique_ptr<juce::DynamicObject> encodeTrackState(const Track& track)
 {
-    auto root = std::make_unique<juce::DynamicObject>();
-    root->setProperty("format", "sonora-project");
-    root->setProperty("version", 8);
-    root->setProperty("bpm", state.bpm);
-    root->setProperty("songMode", state.songMode);
-    juce::DynamicObject* song = new juce::DynamicObject();
-    song->setProperty("sections", state.song.sections);
-    juce::Array<juce::var> melodySections, drumSections, melodySlots, drumSlots;
-    for (int i = 0; i < maxSections; ++i)
-    {
-        melodySections.add(state.song.melodyOn[static_cast<std::size_t>(i)]);
-        drumSections.add(state.song.drumsOn[static_cast<std::size_t>(i)]);
-        melodySlots.add(static_cast<int>(state.song.melodyPattern[static_cast<std::size_t>(i)]));
-        drumSlots.add(static_cast<int>(state.song.drumPattern[static_cast<std::size_t>(i)]));
-    }
-    song->setProperty("melody", melodySections);
-    song->setProperty("drums", drumSections);
-    song->setProperty("melodyPatterns", melodySlots);
-    song->setProperty("drumPatterns", drumSlots);
-    root->setProperty("song", juce::var(song));
-    root->setProperty("ticksPerQuarter", ticksPerQuarter);
-    root->setProperty("lengthTicks", patternTicks);
-    juce::Array<juce::var> tracks;
-    auto melody = encodeTrack(melodyTrackId, "sonora.sine-keys.v1", state.melodyMix);
-    juce::Array<juce::var> melodyPatterns;
-    for (const auto& pattern : state.melodies)
-        melodyPatterns.add(encodeNotes(pattern));
-    melody->setProperty("patterns", melodyPatterns);
-    melody->setProperty("fx", encodeFx(state.melodyFx));
-    tracks.add(juce::var(melody.release()));
-    auto drums = encodeTrack(drumTrackId, "sonora.starter-kit.v1", state.drumMix);
-    juce::Array<juce::var> drumGrids;
-    for (const auto& grid : state.drumPatterns)
+    auto object = std::make_unique<juce::DynamicObject>();
+    object->setProperty("id", static_cast<juce::int64>(track.id));
+    object->setProperty("name", track.trackName());
+    object->setProperty("instrument", track.kind == TrackKind::Synth ? "sonora.sine-keys.v1"
+                                : track.kind == TrackKind::Drums ? "sonora.starter-kit.v1"
+                                                                 : "sonora.empty.v1");
+    object->setProperty("icon", static_cast<int>(track.icon));
+    object->setProperty("volume", static_cast<double>(track.mix.volume));
+    object->setProperty("mute", track.mix.mute);
+    object->setProperty("solo", track.mix.solo);
+    juce::Array<juce::var> melodies;
+    for (const auto& pattern : track.melodies)
+        melodies.add(encodeNotes(pattern));
+    object->setProperty("patterns", melodies);
+    juce::Array<juce::var> grids;
+    for (const auto& grid : track.drumPatterns)
     {
         juce::Array<juce::var> rows;
         for (const auto& row : grid.steps)
@@ -274,16 +245,128 @@ juce::String ProjectIO::encode(const ProjectState& state)
                 steps.add(static_cast<int>(velocity));
             rows.add(steps);
         }
-        drumGrids.add(rows);
+        grids.add(rows);
     }
-    drums->setProperty("grids", drumGrids);
-    drums->setProperty("fx", encodeFx(state.drumFx));
+    object->setProperty("grids", grids);
+    object->setProperty("fx", encodeFx(track.fx));
     juce::Array<juce::var> samples;
-    for (const auto& slot : state.padSamples)
+    for (const auto& slot : track.padSamples)
         samples.add(padSampleName(slot));
-    drums->setProperty("samples", samples);
-    drums->setProperty("kitVariant", state.kitVariant);
-    tracks.add(juce::var(drums.release()));
+    object->setProperty("samples", samples);
+    object->setProperty("kitVariant", track.kitVariant);
+    return object;
+}
+
+juce::Result decodeTrackState(const juce::var& value, Track& track)
+{
+    const auto* object = value.getDynamicObject();
+    if (object == nullptr)
+        return juce::Result::fail("Invalid track object.");
+    Track candidate;
+    const auto id = object->getProperty("id");
+    const auto name = object->getProperty("name").toString();
+    const auto instrument = object->getProperty("instrument").toString();
+    const bool empty = instrument == "sonora.empty.v1";
+    if (!integer(id) || static_cast<juce::int64>(id) < 0
+        || static_cast<juce::int64>(id) > 2147483647
+        || (!empty && (static_cast<juce::int64>(id) == 0 || name.isEmpty()))
+        || name.length() > trackNameCapacity - 1)
+        return juce::Result::fail("Invalid track identity.");
+    candidate.id = static_cast<std::uint32_t>(static_cast<juce::int64>(id));
+    candidate.setTrackName(name);
+    if (instrument == "sonora.sine-keys.v1")
+        candidate.kind = TrackKind::Synth;
+    else if (instrument == "sonora.starter-kit.v1")
+        candidate.kind = TrackKind::Drums;
+    else if (empty)
+        candidate.kind = TrackKind::None;
+    else
+        return juce::Result::fail("Unknown track instrument.");
+    const auto icon = object->getProperty("icon");
+    if (!integer(icon) || static_cast<juce::int64>(icon) < 0 || static_cast<juce::int64>(icon) > 255)
+        return juce::Result::fail("Invalid track icon.");
+    candidate.icon = static_cast<std::uint8_t>(static_cast<int>(icon));
+    TrackMix mix;
+    const auto volume = object->getProperty("volume");
+    const auto mute = object->getProperty("mute"), solo = object->getProperty("solo");
+    if (!number(volume) || !mute.isBool() || !solo.isBool())
+        return juce::Result::fail("Invalid track volume/mute/solo fields.");
+    mix = { static_cast<float>(volume), static_cast<bool>(mute), static_cast<bool>(solo) };
+    if (!mix.valid())
+        return juce::Result::fail("Track volume is out of range.");
+    candidate.mix = mix;
+    const auto* patterns = object->getProperty("patterns").getArray();
+    if (patterns == nullptr || patterns->size() != numPatterns)
+        return juce::Result::fail("Invalid track pattern library.");
+    for (int slot = 0; slot < numPatterns; ++slot)
+    {
+        auto result = decodeNotes((*patterns)[slot], candidate.melodies[static_cast<std::size_t>(slot)]);
+        if (result.failed())
+            return result;
+    }
+    const auto* grids = object->getProperty("grids").getArray();
+    if (grids == nullptr || grids->size() != numPatterns)
+        return juce::Result::fail("Invalid track drum library.");
+    for (int slot = 0; slot < numPatterns; ++slot)
+    {
+        auto result = decodeDrumGrid((*grids)[slot], candidate.drumPatterns[static_cast<std::size_t>(slot)]);
+        if (result.failed())
+            return result;
+    }
+    auto result = decodeFx(object->getProperty("fx"), candidate.fx);
+    if (result.failed())
+        return result;
+    const auto* samples = object->getProperty("samples").getArray();
+    if (samples == nullptr || samples->size() != drumPads)
+        return juce::Result::fail("Invalid kit sample list.");
+    for (int pad = 0; pad < drumPads; ++pad)
+    {
+        const auto sample = (*samples)[pad].toString();
+        if (sample.length() > sampleFileCapacity - 1)
+            return juce::Result::fail("Kit sample name too long.");
+        setPadSampleName(candidate.padSamples[static_cast<std::size_t>(pad)], sample);
+    }
+    const auto variant = object->getProperty("kitVariant");
+    if (!integer(variant) || static_cast<juce::int64>(variant) < 0
+        || static_cast<juce::int64>(variant) >= numKitVariants)
+        return juce::Result::fail("Unknown kit variant.");
+    candidate.kitVariant = static_cast<int>(variant);
+    if (!candidate.valid())
+        return juce::Result::fail("Track content out of range.");
+    track = candidate;
+    return juce::Result::ok();
+}
+}
+
+juce::String ProjectIO::encode(const ProjectState& state)
+{
+    auto root = std::make_unique<juce::DynamicObject>();
+    root->setProperty("format", "sonora-project");
+    root->setProperty("version", 9);
+    root->setProperty("bpm", state.bpm);
+    root->setProperty("songMode", state.songMode);
+    juce::DynamicObject* song = new juce::DynamicObject();
+    song->setProperty("sections", state.song.sections);
+    juce::Array<juce::var> slots, cells;
+    for (int s = 0; s < maxSections; ++s)
+    {
+        juce::Array<juce::var> slotRow, cellRow;
+        for (int track = 0; track < maxTracks; ++track)
+        {
+            slotRow.add(static_cast<int>(state.song.slots[static_cast<std::size_t>(s)][static_cast<std::size_t>(track)]));
+            cellRow.add(state.song.trackOn[static_cast<std::size_t>(s)][static_cast<std::size_t>(track)]);
+        }
+        slots.add(slotRow);
+        cells.add(cellRow);
+    }
+    song->setProperty("slots", slots);
+    song->setProperty("cells", cells);
+    root->setProperty("song", juce::var(song));
+    root->setProperty("ticksPerQuarter", ticksPerQuarter);
+    root->setProperty("lengthTicks", patternTicks);
+    juce::Array<juce::var> tracks;
+    for (const auto& track : state.tracks)
+        tracks.add(juce::var(encodeTrackState(track).release()));
     root->setProperty("tracks", tracks);
     root->setProperty("master", encodeMaster(state.master));
     juce::Array<juce::var> takes;
@@ -304,6 +387,202 @@ juce::String ProjectIO::encode(const ProjectState& state)
     return juce::JSON::toString(juce::var(root.release()));
 }
 
+// Versions 2-8 predate per-track projects: the two legacy tracks migrate
+// into slots 0 (melody) and 1 (drums); remaining slots stay empty.
+juce::Result decodeLegacyV2ToV8(const juce::DynamicObject* root, juce::int64 versionNumber,
+                                ProjectState& candidate)
+{
+    juce::Result result = juce::Result::ok();
+    // Legacy documents predate named tracks: slots 0 and 1 always mean the
+    // melody and drum instruments.
+    candidate.tracks[0].id = melodyTrackId;
+    candidate.tracks[0].setTrackName("Sine Keys");
+    candidate.tracks[0].kind = TrackKind::Synth;
+    candidate.tracks[0].icon = 0;
+    candidate.tracks[1].id = drumTrackId;
+    candidate.tracks[1].setTrackName("Starter Drums");
+    candidate.tracks[1].kind = TrackKind::Drums;
+    candidate.tracks[1].icon = 1;
+    const auto songMode = root->getProperty("songMode");
+    if (versionNumber >= 3)
+    {
+        if (!songMode.isBool())
+            return juce::Result::fail("Invalid transport mode.");
+        candidate.songMode = static_cast<bool>(songMode);
+        const auto* songObject = root->getProperty("song").getDynamicObject();
+        const auto* melodyFlags = songObject != nullptr ? songObject->getProperty("melody").getArray() : nullptr;
+        const auto* drumFlags = songObject != nullptr ? songObject->getProperty("drums").getArray() : nullptr;
+        const auto sections = songObject != nullptr ? songObject->getProperty("sections") : juce::var();
+        if (melodyFlags == nullptr || drumFlags == nullptr || !integer(sections)
+            || melodyFlags->size() != maxSections || drumFlags->size() != maxSections)
+            return juce::Result::fail("Invalid song arrangement.");
+        candidate.song.sections = static_cast<int>(sections);
+        for (int i = 0; i < maxSections; ++i)
+        {
+            if (!(*melodyFlags)[i].isBool() || !(*drumFlags)[i].isBool())
+                return juce::Result::fail("Invalid section switch.");
+            candidate.song.trackOn[static_cast<std::size_t>(i)][0] = static_cast<bool>((*melodyFlags)[i]);
+            candidate.song.trackOn[static_cast<std::size_t>(i)][1] = static_cast<bool>((*drumFlags)[i]);
+        }
+        // Versions before v6 play slot A everywhere.
+        if (versionNumber >= 6)
+        {
+            std::array<std::uint8_t, maxSections> melodySlots {}, drumSlots {};
+            result = decodeSlotList(songObject->getProperty("melodyPatterns"), melodySlots);
+            if (result.wasOk())
+                result = decodeSlotList(songObject->getProperty("drumPatterns"), drumSlots);
+            if (result.failed())
+                return result;
+            for (int i = 0; i < maxSections; ++i)
+            {
+                candidate.song.slots[static_cast<std::size_t>(i)][0] = melodySlots[static_cast<std::size_t>(i)];
+                candidate.song.slots[static_cast<std::size_t>(i)][1] = drumSlots[static_cast<std::size_t>(i)];
+            }
+        }
+    }
+    const auto* tracks = root->getProperty("tracks").getArray();
+    if (tracks == nullptr || tracks->size() != 2)
+        return juce::Result::fail("This version requires a melody track and a drum track.");
+    bool melodySeen = false, drumsSeen = false;
+    for (const auto& item : *tracks)
+    {
+        const auto* track = item.getDynamicObject();
+        if (track == nullptr || !integer(track->getProperty("id")))
+            return juce::Result::fail("Invalid track identity.");
+        const auto id = static_cast<juce::int64>(track->getProperty("id"));
+        if (id == melodyTrackId && !melodySeen)
+        {
+            melodySeen = true;
+            if (track->getProperty("instrument").toString() != "sonora.sine-keys.v1")
+                return juce::Result::fail("Unsupported melody instrument.");
+            result = decodeMix(*track, candidate.tracks[0].mix);
+            if (result.failed())
+                return result;
+            if (versionNumber >= 6)
+            {
+                const auto* patterns = track->getProperty("patterns").getArray();
+                if (patterns == nullptr || patterns->size() != numPatterns)
+                    return juce::Result::fail("Invalid melody pattern library.");
+                for (int slot = 0; slot < numPatterns; ++slot)
+                {
+                    result = decodeNotes((*patterns)[slot],
+                                         candidate.tracks[0].melodies[static_cast<std::size_t>(slot)]);
+                    if (result.failed())
+                        return result;
+                }
+            }
+            else
+                result = decodeNotes(track->getProperty("notes"), candidate.tracks[0].melodies[0]);
+            if (result.wasOk() && versionNumber >= 4)
+                result = decodeFx(track->getProperty("fx"), candidate.tracks[0].fx);
+        }
+        else if (id == drumTrackId && !drumsSeen)
+        {
+            drumsSeen = true;
+            if (track->getProperty("instrument").toString() != "sonora.starter-kit.v1")
+                return juce::Result::fail("Unsupported drum kit.");
+            result = decodeMix(*track, candidate.tracks[1].mix);
+            if (result.failed())
+                return result;
+            if (versionNumber >= 6)
+            {
+                const auto* grids = track->getProperty("grids").getArray();
+                if (grids == nullptr || grids->size() != numPatterns)
+                    return juce::Result::fail("Invalid drum pattern library.");
+                for (int slot = 0; slot < numPatterns; ++slot)
+                {
+                    result = decodeDrumGrid((*grids)[slot],
+                                            candidate.tracks[1].drumPatterns[static_cast<std::size_t>(slot)]);
+                    if (result.failed())
+                        return result;
+                }
+            }
+            else
+            {
+                result = decodeDrumGrid(track->getProperty("steps"), candidate.tracks[1].drumPatterns[0]);
+                if (result.failed())
+                    return result;
+            }
+            if (versionNumber >= 4)
+            {
+                result = decodeFx(track->getProperty("fx"), candidate.tracks[1].fx);
+                if (result.failed())
+                    return result;
+            }
+            // Versions before v7 use the built-in starter kit throughout.
+            if (versionNumber >= 7)
+            {
+                const auto* samples = track->getProperty("samples").getArray();
+                if (samples == nullptr || samples->size() != drumPads)
+                    return juce::Result::fail("Invalid kit sample list.");
+                for (int pad = 0; pad < drumPads; ++pad)
+                {
+                    const auto name = (*samples)[pad].toString();
+                    if (name.length() > sampleFileCapacity - 1)
+                        return juce::Result::fail("Kit sample name too long.");
+                    setPadSampleName(candidate.tracks[1].padSamples[static_cast<std::size_t>(pad)], name);
+                }
+            }
+            // Versions before v8 voice built-ins with the Starter variant.
+            if (versionNumber >= 8)
+            {
+                const auto variant = track->getProperty("kitVariant");
+                if (!integer(variant) || static_cast<juce::int64>(variant) < 0
+                    || static_cast<juce::int64>(variant) >= numKitVariants)
+                    return juce::Result::fail("Unknown kit variant.");
+                candidate.tracks[1].kitVariant = static_cast<int>(variant);
+            }
+        }
+        else
+            return juce::Result::fail("Unknown or duplicate track ID.");
+        if (result.failed())
+            return result;
+    }
+    // Versions before v4 have no effects; defaults are transparent by design.
+    if (versionNumber >= 4)
+    {
+        result = decodeMaster(root->getProperty("master"), candidate.master);
+        if (result.failed())
+            return result;
+    }
+    // Versions before v5 have no audio takes.
+    if (versionNumber >= 5)
+    {
+        const auto* takes = root->getProperty("takes").getArray();
+        if (takes == nullptr || takes->size() > maxTakes)
+            return juce::Result::fail("Invalid take list.");
+        for (const auto& item : *takes)
+        {
+            const auto* object = item.getDynamicObject();
+            if (object == nullptr)
+                return juce::Result::fail("Invalid take object.");
+            AudioTakeMeta take;
+            const auto id = object->getProperty("id");
+            const auto file = object->getProperty("file").toString();
+            const auto startTick = object->getProperty("startTick");
+            const auto frames = object->getProperty("frames");
+            const auto gain = object->getProperty("gain");
+            const auto mute = object->getProperty("mute");
+            const auto channels = object->getProperty("channels");
+            if (!integer(id) || file.isEmpty() || file.length() > takeFileCapacity - 1
+                || !integer(startTick) || !integer(frames) || !number(gain)
+                || !mute.isBool() || !integer(channels))
+                return juce::Result::fail("Invalid take field.");
+            take.id = static_cast<std::uint32_t>(static_cast<juce::int64>(id));
+            take.setFileName(file);
+            take.startTick = static_cast<int>(startTick);
+            take.frames = static_cast<int>(frames);
+            take.gain = static_cast<float>(gain);
+            take.mute = static_cast<bool>(mute);
+            take.channels = static_cast<int>(channels);
+            if (!take.valid())
+                return juce::Result::fail("Take parameters out of range.");
+            candidate.takes[static_cast<std::size_t>(candidate.takeCount++)] = take;
+        }
+    }
+    return juce::Result::ok();
+}
+
 juce::Result ProjectIO::decode(const juce::String& json, ProjectState& destination)
 {
     juce::var parsed;
@@ -317,7 +596,7 @@ juce::Result ProjectIO::decode(const juce::String& json, ProjectState& destinati
     if (!integer(version))
         return juce::Result::fail("Unsupported project version.");
     const auto versionNumber = static_cast<juce::int64>(version);
-    if (versionNumber < 1 || versionNumber > 8)
+    if (versionNumber < 1 || versionNumber > 9)
         return juce::Result::fail("Unsupported project version.");
     if (!integer(root->getProperty("ticksPerQuarter")) || !integer(root->getProperty("lengthTicks"))
         || static_cast<juce::int64>(root->getProperty("ticksPerQuarter")) != ticksPerQuarter
@@ -330,186 +609,106 @@ juce::Result ProjectIO::decode(const juce::String& json, ProjectState& destinati
     candidate.bpm = static_cast<double>(tempo);
     if (versionNumber == 1)
     {
-        // Version 1 is the original melody-only document. Add an empty drum
-        // track and unity melody gain before the new shared master headroom.
-        candidate.melodyMix.volume = 1.0f;
-        result = decodeNotes(root->getProperty("notes"), candidate.melodies[0]);
+        // Version 1 is the original melody-only document. Start from the
+        // default two-track project with unity melody gain.
+        candidate = defaultProject();
+        candidate.bpm = static_cast<double>(tempo);
+        candidate.tracks[0].mix.volume = 1.0f;
+        result = decodeNotes(root->getProperty("notes"), candidate.tracks[0].melodies[0]);
         if (result.failed())
             return result;
     }
-    else
+    else if (versionNumber >= 9)
     {
         const auto songMode = root->getProperty("songMode");
-        if (versionNumber >= 3)
+        if (!songMode.isBool())
+            return juce::Result::fail("Invalid transport mode.");
+        candidate.songMode = static_cast<bool>(songMode);
+        const auto* songObject = root->getProperty("song").getDynamicObject();
+        const auto* slots = songObject != nullptr ? songObject->getProperty("slots").getArray() : nullptr;
+        const auto* cells = songObject != nullptr ? songObject->getProperty("cells").getArray() : nullptr;
+        const auto sections = songObject != nullptr ? songObject->getProperty("sections") : juce::var();
+        if (slots == nullptr || cells == nullptr || !integer(sections)
+            || slots->size() != maxSections || cells->size() != maxSections)
+            return juce::Result::fail("Invalid song arrangement.");
+        candidate.song.sections = static_cast<int>(sections);
+        if (candidate.song.sections < 1 || candidate.song.sections > maxSections)
+            return juce::Result::fail("Invalid section count.");
+        for (int s = 0; s < maxSections; ++s)
         {
-            if (!songMode.isBool())
-                return juce::Result::fail("Invalid transport mode.");
-            candidate.songMode = static_cast<bool>(songMode);
-            const auto* songObject = root->getProperty("song").getDynamicObject();
-            const auto* melodyFlags = songObject != nullptr ? songObject->getProperty("melody").getArray() : nullptr;
-            const auto* drumFlags = songObject != nullptr ? songObject->getProperty("drums").getArray() : nullptr;
-            const auto sections = songObject != nullptr ? songObject->getProperty("sections") : juce::var();
-            if (melodyFlags == nullptr || drumFlags == nullptr || !integer(sections)
-                || melodyFlags->size() != maxSections || drumFlags->size() != maxSections)
-                return juce::Result::fail("Invalid song arrangement.");
-            candidate.song.sections = static_cast<int>(sections);
-            for (int i = 0; i < maxSections; ++i)
+            const auto* slotRow = (*slots)[s].getArray();
+            const auto* cellRow = (*cells)[s].getArray();
+            if (slotRow == nullptr || cellRow == nullptr
+                || slotRow->size() != maxTracks || cellRow->size() != maxTracks)
+                return juce::Result::fail("Invalid arrangement row.");
+            for (int track = 0; track < maxTracks; ++track)
             {
-                if (!(*melodyFlags)[i].isBool() || !(*drumFlags)[i].isBool())
-                    return juce::Result::fail("Invalid section switch.");
-                candidate.song.melodyOn[static_cast<std::size_t>(i)] = static_cast<bool>((*melodyFlags)[i]);
-                candidate.song.drumsOn[static_cast<std::size_t>(i)] = static_cast<bool>((*drumFlags)[i]);
-            }
-            // Versions before v6 play slot A everywhere.
-            if (versionNumber >= 6)
-            {
-                result = decodeSlotList(songObject->getProperty("melodyPatterns"), candidate.song.melodyPattern);
-                if (result.wasOk())
-                    result = decodeSlotList(songObject->getProperty("drumPatterns"), candidate.song.drumPattern);
-                if (result.failed())
-                    return result;
+                const auto slot = (*slotRow)[track];
+                const auto cell = (*cellRow)[track];
+                if (!integer(slot) || static_cast<juce::int64>(slot) < 0
+                    || static_cast<juce::int64>(slot) >= numPatterns || !cell.isBool())
+                    return juce::Result::fail("Invalid arrangement cell.");
+                candidate.song.slots[static_cast<std::size_t>(s)][static_cast<std::size_t>(track)]
+                    = static_cast<std::uint8_t>(static_cast<int>(slot));
+                candidate.song.trackOn[static_cast<std::size_t>(s)][static_cast<std::size_t>(track)]
+                    = static_cast<bool>(cell);
             }
         }
         const auto* tracks = root->getProperty("tracks").getArray();
-        if (tracks == nullptr || tracks->size() != 2)
-            return juce::Result::fail("This version requires a melody track and a drum track.");
-        bool melodySeen = false, drumsSeen = false;
-        for (const auto& item : *tracks)
+        if (tracks == nullptr || tracks->size() != maxTracks)
+            return juce::Result::fail("This version requires a full track list.");
+        for (int track = 0; track < maxTracks; ++track)
         {
-            const auto* track = item.getDynamicObject();
-            if (track == nullptr || !integer(track->getProperty("id")))
-                return juce::Result::fail("Invalid track identity.");
-            const auto id = static_cast<juce::int64>(track->getProperty("id"));
-            if (id == melodyTrackId && !melodySeen)
-            {
-                melodySeen = true;
-                if (track->getProperty("instrument").toString() != "sonora.sine-keys.v1")
-                    return juce::Result::fail("Unsupported melody instrument.");
-                result = decodeMix(*track, candidate.melodyMix);
-                if (result.failed())
-                    return result;
-                if (versionNumber >= 6)
-                {
-                    const auto* patterns = track->getProperty("patterns").getArray();
-                    if (patterns == nullptr || patterns->size() != numPatterns)
-                        return juce::Result::fail("Invalid melody pattern library.");
-                    for (int slot = 0; slot < numPatterns; ++slot)
-                    {
-                        result = decodeNotes((*patterns)[slot],
-                                             candidate.melodies[static_cast<std::size_t>(slot)]);
-                        if (result.failed())
-                            return result;
-                    }
-                }
-                else
-                    result = decodeNotes(track->getProperty("notes"), candidate.melodies[0]);
-                if (result.wasOk() && versionNumber >= 4)
-                    result = decodeFx(track->getProperty("fx"), candidate.melodyFx);
-            }
-            else if (id == drumTrackId && !drumsSeen)
-            {
-                drumsSeen = true;
-                if (track->getProperty("instrument").toString() != "sonora.starter-kit.v1")
-                    return juce::Result::fail("Unsupported drum kit.");
-                result = decodeMix(*track, candidate.drumMix);
-                if (result.failed())
-                    return result;
-                if (versionNumber >= 6)
-                {
-                    const auto* grids = track->getProperty("grids").getArray();
-                    if (grids == nullptr || grids->size() != numPatterns)
-                        return juce::Result::fail("Invalid drum pattern library.");
-                    for (int slot = 0; slot < numPatterns; ++slot)
-                    {
-                        result = decodeDrumGrid((*grids)[slot],
-                                                candidate.drumPatterns[static_cast<std::size_t>(slot)]);
-                        if (result.failed())
-                            return result;
-                    }
-                }
-                else
-                {
-                    result = decodeDrumGrid(track->getProperty("steps"), candidate.drumPatterns[0]);
-                    if (result.failed())
-                        return result;
-                }
-                if (versionNumber >= 4)
-                {
-                    result = decodeFx(track->getProperty("fx"), candidate.drumFx);
-                    if (result.failed())
-                        return result;
-                }
-                // Versions before v7 use the built-in starter kit throughout.
-                if (versionNumber >= 7)
-                {
-                    const auto* samples = track->getProperty("samples").getArray();
-                    if (samples == nullptr || samples->size() != drumPads)
-                        return juce::Result::fail("Invalid kit sample list.");
-                    for (int pad = 0; pad < drumPads; ++pad)
-                    {
-                        const auto name = (*samples)[pad].toString();
-                        if (name.length() > sampleFileCapacity - 1)
-                            return juce::Result::fail("Kit sample name too long.");
-                        setPadSampleName(candidate.padSamples[static_cast<std::size_t>(pad)], name);
-                    }
-                }
-                // Versions before v8 voice built-ins with the Starter variant.
-                if (versionNumber >= 8)
-                {
-                    const auto variant = track->getProperty("kitVariant");
-                    if (!integer(variant) || static_cast<juce::int64>(variant) < 0
-                        || static_cast<juce::int64>(variant) >= numKitVariants)
-                        return juce::Result::fail("Unknown kit variant.");
-                    candidate.kitVariant = static_cast<int>(variant);
-                }
-            }
-            else
-                return juce::Result::fail("Unknown or duplicate track ID.");
+            result = decodeTrackState((*tracks)[track], candidate.tracks[static_cast<std::size_t>(track)]);
             if (result.failed())
                 return result;
         }
-        // Versions before v4 have no effects; defaults are transparent by design.
-        if (versionNumber >= 4)
+        for (int i = 0; i < maxTracks; ++i)
+            for (int j = 0; j < i; ++j)
+                if (candidate.tracks[static_cast<std::size_t>(i)].id != 0
+                    && candidate.tracks[static_cast<std::size_t>(i)].id
+                           == candidate.tracks[static_cast<std::size_t>(j)].id)
+                    return juce::Result::fail("Duplicate track ID.");
+        result = decodeMaster(root->getProperty("master"), candidate.master);
+        if (result.failed())
+            return result;
+        const auto* takes = root->getProperty("takes").getArray();
+        if (takes == nullptr || takes->size() > maxTakes)
+            return juce::Result::fail("Invalid take list.");
+        for (const auto& item : *takes)
         {
-            result = decodeMaster(root->getProperty("master"), candidate.master);
-            if (result.failed())
-                return result;
+            const auto* object = item.getDynamicObject();
+            if (object == nullptr)
+                return juce::Result::fail("Invalid take object.");
+            AudioTakeMeta take;
+            const auto id = object->getProperty("id");
+            const auto file = object->getProperty("file").toString();
+            const auto startTick = object->getProperty("startTick");
+            const auto frames = object->getProperty("frames");
+            const auto gain = object->getProperty("gain");
+            const auto mute = object->getProperty("mute");
+            const auto channels = object->getProperty("channels");
+            if (!integer(id) || file.isEmpty() || file.length() > takeFileCapacity - 1
+                || !integer(startTick) || !integer(frames) || !number(gain)
+                || !mute.isBool() || !integer(channels))
+                return juce::Result::fail("Invalid take field.");
+            take.id = static_cast<std::uint32_t>(static_cast<juce::int64>(id));
+            take.setFileName(file);
+            take.startTick = static_cast<int>(startTick);
+            take.frames = static_cast<int>(frames);
+            take.gain = static_cast<float>(gain);
+            take.mute = static_cast<bool>(mute);
+            take.channels = static_cast<int>(channels);
+            if (!take.valid())
+                return juce::Result::fail("Take parameters out of range.");
+            candidate.takes[static_cast<std::size_t>(candidate.takeCount++)] = take;
         }
-        // Versions before v5 have no audio takes.
-        if (versionNumber >= 5)
-        {
-            const auto* takes = root->getProperty("takes").getArray();
-            if (takes == nullptr || takes->size() > maxTakes)
-                return juce::Result::fail("Invalid take list.");
-            for (const auto& item : *takes)
-            {
-                const auto* object = item.getDynamicObject();
-                if (object == nullptr)
-                    return juce::Result::fail("Invalid take object.");
-                AudioTakeMeta take;
-                const auto id = object->getProperty("id");
-                const auto file = object->getProperty("file").toString();
-                const auto startTick = object->getProperty("startTick");
-                const auto frames = object->getProperty("frames");
-                const auto gain = object->getProperty("gain");
-                const auto mute = object->getProperty("mute");
-                const auto channels = object->getProperty("channels");
-                if (!integer(id) || file.isEmpty() || file.length() > takeFileCapacity - 1
-                    || !integer(startTick) || !integer(frames) || !number(gain)
-                    || !mute.isBool() || !integer(channels))
-                    return juce::Result::fail("Invalid take field.");
-                take.id = static_cast<std::uint32_t>(static_cast<juce::int64>(id));
-                take.setFileName(file);
-                take.startTick = static_cast<int>(startTick);
-                take.frames = static_cast<int>(frames);
-                take.gain = static_cast<float>(gain);
-                take.mute = static_cast<bool>(mute);
-                take.channels = static_cast<int>(channels);
-                if (!take.valid())
-                    return juce::Result::fail("Take parameters out of range.");
-                candidate.takes[static_cast<std::size_t>(candidate.takeCount++)] = take;
-            }
-        }
+    }
+    else
+    {
+        result = decodeLegacyV2ToV8(root, versionNumber, candidate);
+        if (result.failed())
+            return result;
     }
     if (!candidate.valid())
         return juce::Result::fail("Invalid tempo or notes: check ranges, IDs, and overlapping pitches.");

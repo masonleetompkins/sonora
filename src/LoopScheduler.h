@@ -25,19 +25,19 @@ public:
     std::int64_t samplePosition() const { return position; }
     std::int64_t framesForTick(int tick) const { return frameAt(tick); }
 
-    // Section gating for song mode: each section plays its own library
-    // pattern, sounding only where the section flag is on. Song position
-    // advances linearly and reports completion instead of wrapping.
+    // Section gating for song mode: each active section plays its track's own
+    // library pattern, sounding only where the section cell is on. Song
+    // position advances linearly and reports completion instead of wrapping.
     template <typename Emit>
     void scheduleDrumsSong(const std::array<DrumPattern, numPatterns>& patterns, const Arrangement& song,
-                           int samples, Emit&& emit) const
+                           int track, int samples, Emit&& emit) const
     {
         const auto songFrames = std::llround(static_cast<double>(song.songTicks()) * framesPerTick);
         for (int s = 0; s < song.sections; ++s)
         {
-            if (!song.drumsOn[static_cast<std::size_t>(s)])
+            if (!song.trackOn[static_cast<std::size_t>(s)][static_cast<std::size_t>(track)])
                 continue;
-            const auto& pattern = patterns[song.drumPattern[static_cast<std::size_t>(s)]];
+            const auto& pattern = patterns[song.slots[static_cast<std::size_t>(s)][static_cast<std::size_t>(track)]];
             for (int pad = 0; pad < drumPads; ++pad)
                 for (int step = 0; step < gridSteps; ++step)
                 {
@@ -57,6 +57,16 @@ public:
     template <typename Emit>
     void scheduleDrums(const DrumPattern& pattern, int samples, Emit&& emit) const
     {
+        scheduleDrumsAt(pattern, samples, position, std::forward<Emit>(emit));
+    }
+
+    // Block-relative drum scheduling: every track in a multi-track loop block
+    // schedules against the same block start so one track's cursor never
+    // starves the others. The caller advances once via advance().
+    template <typename Emit>
+    void scheduleDrumsAt(const DrumPattern& pattern, int samples, std::int64_t blockPosition,
+                         Emit&& emit) const
+    {
         for (int pad = 0; pad < drumPads; ++pad)
             for (int step = 0; step < gridSteps; ++step)
             {
@@ -64,7 +74,7 @@ public:
                 if (velocity == 0)
                     continue;
                 const auto frame = frameAt(step * stepTicks) % loopFrames;
-                auto offset = (frame - position + loopFrames) % loopFrames;
+                auto offset = (frame - blockPosition + loopFrames) % loopFrames;
                 for (; offset < samples; offset += loopFrames)
                     emit(pad, velocity, static_cast<int>(offset));
             }
@@ -73,6 +83,15 @@ public:
     template <typename Emit>
     void processLoop(const Pattern& pattern, int samples, bool chase, Emit&& emit)
     {
+        processLoopAt(pattern, samples, chase, position, std::forward<Emit>(emit));
+        advance(samples);
+    }
+
+    // Block-relative melody scheduling without consuming the shared cursor.
+    template <typename Emit>
+    void processLoopAt(const Pattern& pattern, int samples, bool chase, std::int64_t blockPosition,
+                       Emit&& emit) const
+    {
         if (samples <= 0)
             return;
         // Reconstruct sustained notes after a pattern or tempo change.
@@ -80,7 +99,7 @@ public:
             for (int i = 0; i < pattern.count; ++i)
             {
                 const auto& n = pattern.notes[static_cast<std::size_t>(i)];
-                if (frameAt(n.start) < position && frameAt(n.start + n.duration) > position)
+                if (frameAt(n.start) < blockPosition && frameAt(n.start + n.duration) > blockPosition)
                     emit(n, true, 0);
             }
         // Offs precede ons at shared boundaries, including the loop seam.
@@ -89,11 +108,16 @@ public:
             {
                 const auto& n = pattern.notes[static_cast<std::size_t>(i)];
                 const auto frame = frameAt(on ? n.start : n.start + n.duration) % loopFrames;
-                auto offset = (frame - position + loopFrames) % loopFrames;
+                auto offset = (frame - blockPosition + loopFrames) % loopFrames;
                 for (; offset < samples; offset += loopFrames)
                     emit(n, on, static_cast<int>(offset));
             }
-        position = (position + samples) % loopFrames;
+    }
+
+    void advance(int samples)
+    {
+        if (samples > 0)
+            position = (position + samples) % loopFrames;
     }
 
     template <typename Emit>
@@ -105,8 +129,9 @@ public:
     // Song mode tiles the per-section library patterns with per-section
     // gating and linear transport that returns true when the song end is
     // reached during this block. Loop mode is handled by processLoop().
+    // The emit callback gains the track index: emit(track, note, on, offset).
     template <typename Emit>
-    bool processSong(const std::array<Pattern, numPatterns>& patterns, const Arrangement& song,
+    bool processSong(const std::array<Track, maxTracks>& tracks, const Arrangement& song,
                      int samples, bool chase, Emit&& emit)
     {
         if (samples <= 0)
@@ -115,34 +140,45 @@ public:
         const auto currentSection = std::clamp(static_cast<int>(tickPosition()) / patternTicks,
                                                0, song.sections - 1);
         if (chase)
-        {
-            const auto& pattern = patterns[song.melodyPattern[static_cast<std::size_t>(currentSection)]];
-            for (int i = 0; i < pattern.count; ++i)
+            for (int track = 0; track < maxTracks; ++track)
             {
-                const auto& n = pattern.notes[static_cast<std::size_t>(i)];
-                if (song.melodyOn[static_cast<std::size_t>(currentSection)]
-                    && frameAt(n.start) % loopFrames < position % loopFrames
-                    && frameAt(n.start + n.duration) % loopFrames > position % loopFrames)
-                    emit(n, true, 0);
-            }
-        }
-        // Offs precede ons at shared boundaries.
-        for (bool on : { false, true })
-            for (int s = 0; s < song.sections; ++s)
-            {
-                if (!song.melodyOn[static_cast<std::size_t>(s)])
+                if (tracks[static_cast<std::size_t>(track)].kind != TrackKind::Synth)
                     continue;
-                const auto& pattern = patterns[song.melodyPattern[static_cast<std::size_t>(s)]];
+                if (!song.trackOn[static_cast<std::size_t>(currentSection)][static_cast<std::size_t>(track)])
+                    continue;
+                const auto& pattern = tracks[static_cast<std::size_t>(track)]
+                                          .melodies[song.slots[static_cast<std::size_t>(currentSection)]
+                                                                 [static_cast<std::size_t>(track)]];
                 for (int i = 0; i < pattern.count; ++i)
                 {
                     const auto& n = pattern.notes[static_cast<std::size_t>(i)];
-                    const auto frame = static_cast<std::int64_t>(s) * loopFrames
-                        + frameAt(on ? n.start : n.start + n.duration);
-                    if (frame < position || frame >= position + samples || frame >= songFrames)
-                        continue;
-                    emit(n, on, static_cast<int>(frame - position));
+                    if (frameAt(n.start) % loopFrames < position % loopFrames
+                        && frameAt(n.start + n.duration) % loopFrames > position % loopFrames)
+                        emit(track, n, true, 0);
                 }
             }
+        // Offs precede ons at shared boundaries.
+        for (bool on : { false, true })
+            for (int s = 0; s < song.sections; ++s)
+                for (int track = 0; track < maxTracks; ++track)
+                {
+                    if (tracks[static_cast<std::size_t>(track)].kind != TrackKind::Synth)
+                        continue;
+                    if (!song.trackOn[static_cast<std::size_t>(s)][static_cast<std::size_t>(track)])
+                        continue;
+                    const auto& pattern = tracks[static_cast<std::size_t>(track)]
+                                              .melodies[song.slots[static_cast<std::size_t>(s)]
+                                                                     [static_cast<std::size_t>(track)]];
+                    for (int i = 0; i < pattern.count; ++i)
+                    {
+                        const auto& n = pattern.notes[static_cast<std::size_t>(i)];
+                        const auto frame = static_cast<std::int64_t>(s) * loopFrames
+                            + frameAt(on ? n.start : n.start + n.duration);
+                        if (frame < position || frame >= position + samples || frame >= songFrames)
+                            continue;
+                        emit(track, n, on, static_cast<int>(frame - position));
+                    }
+                }
         position += samples;
         if (position >= songFrames)
         {

@@ -22,55 +22,103 @@ void require(bool value, const char* message)
 }
 
 // Rewrites a current-version document into an older version's shape so
-// migration paths decode realistic legacy files (not just relabeled v6).
+// migration paths decode realistic legacy files (not just relabeled v9).
 inline juce::var downshapeToVersion(juce::var document, int version)
 {
     auto* root = document.getDynamicObject();
     auto* tracks = root->getProperty("tracks").getArray();
-    auto* melody = tracks->getReference(0).getDynamicObject();
-    auto* drums = tracks->getReference(1).getDynamicObject();
-    if (version <= 5)
-    {
-        melody->setProperty("notes", melody->getProperty("patterns").getArray()->getReference(0));
-        melody->removeProperty("patterns");
-        drums->setProperty("steps", drums->getProperty("grids").getArray()->getReference(0));
-        drums->removeProperty("grids");
-        root->getProperty("song").getDynamicObject()->removeProperty("melodyPatterns");
-        root->getProperty("song").getDynamicObject()->removeProperty("drumPatterns");
-    }
-    if (version <= 4)
-        root->removeProperty("takes");
-    if (version <= 3)
-    {
-        root->removeProperty("master");
-        melody->removeProperty("fx");
-        drums->removeProperty("fx");
-    }
+    auto* melody9 = tracks->getReference(0).getDynamicObject();
+    auto* drums9 = tracks->getReference(1).getDynamicObject();
+    auto* song9 = root->getProperty("song").getDynamicObject();
     if (version <= 2)
     {
         root->removeProperty("song");
         root->removeProperty("songMode");
     }
+    else
+    {
+        juce::Array<juce::var> melodyFlags, drumFlags;
+        for (int s = 0; s < sonora::maxSections; ++s)
+        {
+            melodyFlags.add(song9->getProperty("cells").getArray()->getReference(s)
+                                .getArray()->getReference(0));
+            drumFlags.add(song9->getProperty("cells").getArray()->getReference(s)
+                              .getArray()->getReference(1));
+        }
+        song9->setProperty("melody", melodyFlags);
+        song9->setProperty("drums", drumFlags);
+        if (version >= 6)
+        {
+            juce::Array<juce::var> melodySlots, drumSlots;
+            for (int s = 0; s < sonora::maxSections; ++s)
+            {
+                melodySlots.add(song9->getProperty("slots").getArray()->getReference(s)
+                                    .getArray()->getReference(0));
+                drumSlots.add(song9->getProperty("slots").getArray()->getReference(s)
+                                  .getArray()->getReference(1));
+            }
+            song9->setProperty("melodyPatterns", melodySlots);
+            song9->setProperty("drumPatterns", drumSlots);
+        }
+        song9->removeProperty("slots");
+        song9->removeProperty("cells");
+    }
+    // Legacy two-track list rebuilt from slots 0 and 1.
+    auto legacyMelody = std::make_unique<juce::DynamicObject>();
+    legacyMelody->setProperty("id", 1);
+    legacyMelody->setProperty("instrument", "sonora.sine-keys.v1");
+    legacyMelody->setProperty("volume", melody9->getProperty("volume"));
+    legacyMelody->setProperty("mute", melody9->getProperty("mute"));
+    legacyMelody->setProperty("solo", melody9->getProperty("solo"));
+    if (version <= 5)
+        legacyMelody->setProperty("notes", melody9->getProperty("patterns").getArray()->getReference(0));
+    else
+        legacyMelody->setProperty("patterns", melody9->getProperty("patterns"));
+    if (version >= 4)
+        legacyMelody->setProperty("fx", melody9->getProperty("fx"));
+    auto legacyDrums = std::make_unique<juce::DynamicObject>();
+    legacyDrums->setProperty("id", 2);
+    legacyDrums->setProperty("instrument", "sonora.starter-kit.v1");
+    legacyDrums->setProperty("volume", drums9->getProperty("volume"));
+    legacyDrums->setProperty("mute", drums9->getProperty("mute"));
+    legacyDrums->setProperty("solo", drums9->getProperty("solo"));
+    if (version <= 5)
+        legacyDrums->setProperty("steps", drums9->getProperty("grids").getArray()->getReference(0));
+    else
+        legacyDrums->setProperty("grids", drums9->getProperty("grids"));
+    if (version >= 4)
+        legacyDrums->setProperty("fx", drums9->getProperty("fx"));
+    if (version >= 7)
+        legacyDrums->setProperty("samples", drums9->getProperty("samples"));
+    if (version >= 8)
+        legacyDrums->setProperty("kitVariant", drums9->getProperty("kitVariant"));
+    juce::Array<juce::var> legacyTracks;
+    legacyTracks.add(juce::var(legacyMelody.release()));
+    legacyTracks.add(juce::var(legacyDrums.release()));
+    root->setProperty("tracks", legacyTracks);
+    if (version <= 4)
+        root->removeProperty("takes");
+    if (version <= 3)
+        root->removeProperty("master");
     root->setProperty("version", version);
     return document;
 }
 
 sonora::ProjectState fixture()
 {
-
-    sonora::ProjectState project;
+    sonora::ProjectState project = sonora::defaultProject();
     project.bpm = 123.0;
-    project.melodies[0].count = 4;
-    project.melodies[0].notes[0] = { 1, 0, 960, 60, 100 };
-    project.melodies[0].notes[1] = { 2, 960, 240, 60, 90 };
-    project.melodies[0].notes[2] = { 3, 240, 4320, 67, 110 };
-    project.melodies[0].notes[3] = { 4, sonora::patternTicks - 240, 240, 60, 100 };
+    project.tracks[0].melodies[0].count = 4;
+    project.tracks[0].melodies[0].notes[0] = { 1, 0, 960, 60, 100 };
+    project.tracks[0].melodies[0].notes[1] = { 2, 960, 240, 60, 90 };
+    project.tracks[0].melodies[0].notes[2] = { 3, 240, 4320, 67, 110 };
+    project.tracks[0].melodies[0].notes[3] = { 4, sonora::patternTicks - 240, 240, 60, 100 };
     for (int step = 0; step < sonora::gridSteps; step += 2)
-        project.drumPatterns[0].steps[2][static_cast<std::size_t>(step)] = step % 4 == 0 ? 100 : 70;
+        project.tracks[1].drumPatterns[0].steps[2][static_cast<std::size_t>(step)] = step % 4 == 0 ? 100 : 70;
     for (int step : { 0, 16, 32, 48 })
-        project.drumPatterns[0].steps[0][static_cast<std::size_t>(step)] = 110;
+        project.tracks[1].drumPatterns[0].steps[0][static_cast<std::size_t>(step)] = 110;
     for (int step : { 4, 12, 20, 28, 36, 44, 52, 60 })
-        project.drumPatterns[0].steps[1][static_cast<std::size_t>(step)] = 100;
+        project.tracks[1].drumPatterns[0].steps[1][static_cast<std::size_t>(step)] = 100;
     return project;
 }
 
@@ -91,11 +139,11 @@ std::vector<Event> schedule(int blockSize, double sampleRate, double bpm, std::i
     for (std::int64_t start = 0; start < total;)
     {
         const auto count = static_cast<int>(std::min<std::int64_t>(blockSize, total - start));
-        scheduler.scheduleDrums(project.drumPatterns[0], count, [&](int pad, std::uint8_t, int offset) {
+        scheduler.scheduleDrums(project.tracks[1].drumPatterns[0], count, [&](int pad, std::uint8_t, int offset) {
             require(offset >= 0 && offset < count, "drum event outside callback");
             events.push_back({ start + offset, sonora::drumBaseNote + pad, true });
         });
-        scheduler.process(project.melodies[0], count, false, [&](const sonora::Note& note, bool on, int offset) {
+        scheduler.process(project.tracks[0].melodies[0], count, false, [&](const sonora::Note& note, bool on, int offset) {
             require(offset >= 0 && offset < count, "event outside callback");
             events.push_back({ start + offset, note.pitch, on });
         });
@@ -135,9 +183,9 @@ void testTiming()
     sonora::LoopScheduler scheduler;
     scheduler.configure(48000, 120);
     const auto project = fixture();
-    scheduler.process(project.melodies[0], 1000, false, [](const auto&, bool, int) {});
+    scheduler.process(project.tracks[0].melodies[0], 1000, false, [](const auto&, bool, int) {});
     int chased = 0;
-    scheduler.process(project.melodies[0], 1, true, [&](const auto& note, bool on, int offset) {
+    scheduler.process(project.tracks[0].melodies[0], 1, true, [&](const auto& note, bool on, int offset) {
         if (note.id == 1 && on && offset == 0)
             ++chased;
     });
@@ -159,23 +207,23 @@ void testPersistence()
     require(sonora::ProjectIO::decode("{broken json", loaded).failed(), "malformed JSON accepted");
     require(loaded == good, "failed load mutated the project");
     auto json = sonora::ProjectIO::encode(original);
-    require(sonora::ProjectIO::decode(json.replace("\"version\": 8", "\"version\": 9"), loaded).failed(),
+    require(sonora::ProjectIO::decode(json.replace("\"version\": 9", "\"version\": 10"), loaded).failed(),
             "unknown version accepted");
-    require(sonora::ProjectIO::decode(json.replace("\"version\": 8", "\"version\": 4294967297"), loaded).failed(),
+    require(sonora::ProjectIO::decode(json.replace("\"version\": 9", "\"version\": 4294967297"), loaded).failed(),
             "overflowed version accepted");
     require(sonora::ProjectIO::decode(json.replace("\"velocity\": 100", "\"velocity\": 0"), loaded).failed(),
             "zero velocity accepted");
     require(sonora::ProjectIO::decode(json.replace("\"pitch\": 60", "\"pitch\": 4294967356"), loaded).failed(),
             "overflowed pitch accepted");
     auto invalid = original;
-    invalid.melodies[0].notes[1].start = 480;
+    invalid.tracks[0].melodies[0].notes[1].start = 480;
     require(!invalid.valid(), "same-pitch overlap accepted");
     require(sonora::ProjectIO::decode(sonora::ProjectIO::encode(invalid), loaded).failed(), "overlap decoded");
     invalid = original;
-    invalid.melodies[0].notes[1].id = 1;
+    invalid.tracks[0].melodies[0].notes[1].id = 1;
     require(!invalid.valid(), "duplicate ID accepted");
     invalid = original;
-    invalid.melodies[0].notes[3].duration += 1;
+    invalid.tracks[0].melodies[0].notes[3].duration += 1;
     require(!invalid.valid(), "note extends past loop");
 
     const auto file = juce::File::getSpecialLocation(juce::File::tempDirectory)
@@ -194,8 +242,8 @@ void testPersistence()
 void testDrumPersistence()
 {
     auto original = fixture();
-    original.melodyMix = { 0.47f, false, true };
-    original.drumMix = { 1.12f, true, false };
+    original.tracks[0].mix = { 0.47f, false, true };
+    original.tracks[1].mix = { 1.12f, true, false };
     const auto json = sonora::ProjectIO::encode(original);
     sonora::ProjectState loaded;
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
@@ -210,9 +258,9 @@ void testDrumPersistence()
     object->setProperty("version", 1);
     object->removeProperty("tracks");
     require(sonora::ProjectIO::decode(juce::JSON::toString(legacy), loaded).wasOk(), "legacy project migration failed");
-    require(loaded.melodies[0] == original.melodies[0] && loaded.bpm == original.bpm && loaded.drumPatterns[0].hitCount() == 0,
+    require(loaded.tracks[0].melodies[0] == original.tracks[0].melodies[0] && loaded.bpm == original.bpm && loaded.tracks[1].drumPatterns[0].hitCount() == 0,
             "migration changed melody or added drum hits");
-    require(loaded.melodyMix.volume == 1.0f && !loaded.melodyMix.mute && !loaded.drumMix.solo,
+    require(loaded.tracks[0].mix.volume == 1.0f && !loaded.tracks[0].mix.mute && !loaded.tracks[1].mix.solo,
             "legacy mixer defaults wrong");
     const auto migrated = loaded;
     require(sonora::ProjectIO::decode(sonora::ProjectIO::encode(migrated), loaded).wasOk() && loaded == migrated,
@@ -261,7 +309,7 @@ void testQueue()
         for (int i = 1; i <= iterations; ++i)
         {
             auto state = fixture();
-            state.melodies[0].notes[0].id = static_cast<std::uint32_t>(i);
+            state.tracks[0].melodies[0].notes[0].id = static_cast<std::uint32_t>(i);
             while (!states.push(state))
                 std::this_thread::yield();
         }
@@ -272,8 +320,8 @@ void testQueue()
         sonora::ProjectState state;
         while (!states.pop(state))
             std::this_thread::yield();
-        coherent = coherent && state.melodies[0].notes[0].id == static_cast<std::uint32_t>(i)
-            && state.melodies[0].notes[3] == fixture().melodies[0].notes[3];
+        coherent = coherent && state.tracks[0].melodies[0].notes[0].id == static_cast<std::uint32_t>(i)
+            && state.tracks[0].melodies[0].notes[3] == fixture().tracks[0].melodies[0].notes[3];
     }
     producer.join();
     require(coherent, "concurrent snapshot transfer was torn or reordered");
@@ -329,9 +377,10 @@ void testAudio()
 
     sonora::AudioEngine engine;
     engine.prepare(48000);
-    sonora::ProjectState shortNote;
-    shortNote.melodies[0].count = 1;
-    shortNote.melodies[0].notes[0] = { 1, 0, 240, 60, 100 };
+    sonora::ProjectState shortNote = sonora::defaultProject();
+    shortNote.bpm = 120.0;
+    shortNote.tracks[0].melodies[0].count = 1;
+    shortNote.tracks[0].melodies[0].notes[0] = { 1, 0, 240, 60, 100 };
     require(engine.submit(shortNote), "short note rejected");
     engine.setPlaying(true);
     juce::AudioBuffer<float> buffer(2, 256);
@@ -343,7 +392,7 @@ void testAudio()
     engine.setPlaying(true);
     engine.process({ &buffer, 0, 256 });
     require(buffer.getMagnitude(0, 256) > 0.001f, "restart did not play first note");
-    shortNote.melodies[0] = {};
+    shortNote.tracks[0].melodies[0] = {};
     require(engine.submit(shortNote), "empty pattern rejected");
     engine.process({ &buffer, 0, 256 });
     require(buffer.getMagnitude(0, 256) == 0.0f, "deleting a playing note left a stuck voice");
@@ -351,6 +400,47 @@ void testAudio()
 
 void testDrumAudio()
 {
+    // Loop preview follows per-track slots: two drum tracks with hits in
+    // different slots must both sound at once.
+    {
+        sonora::AudioEngine engine;
+        engine.prepare(48000.0);
+        auto project = fixture();
+        project.tracks[0].melodies[0] = {};
+        project.tracks[1].drumPatterns[0] = {};
+        project.tracks[2].id = 3;
+        project.tracks[2].setTrackName("Extra drums");
+        project.tracks[2].kind = sonora::TrackKind::Drums;
+        project.tracks[2].icon = 1;
+        for (int step : { 8, 24, 40, 56 })
+            project.tracks[2].drumPatterns[1].steps[0][static_cast<std::size_t>(step)] = 110;
+        for (int step : { 0, 16, 32, 48 })
+            project.tracks[1].drumPatterns[0].steps[0][static_cast<std::size_t>(step)] = 110;
+        require(engine.submit(project), "two-drum project rejected");
+        engine.setLoopSelection(1, 0, 0);
+        engine.setLoopSelection(2, 0, 1);
+        engine.setPlaying(true);
+        juce::AudioBuffer<float> buffer(2, 512);
+        auto loudest = [&](int blocks) {
+            float peak = 0.0f;
+            for (int i = 0; i < blocks; ++i)
+            {
+                buffer.clear();
+                engine.process({ &buffer, 0, 512 });
+                peak = std::max(peak, buffer.getMagnitude(0, 512));
+            }
+            return peak;
+        };
+        require(loudest(200) > 0.05f, "per-track loop slots silent");
+        // Each track's slot must sound on its own: mute one, the other stays.
+        project.tracks[1].mix.mute = true;
+        require(engine.submit(project), "muted project rejected");
+        require(loudest(200) > 0.05f, "second drum track lost under mute");
+        project.tracks[1].mix.mute = false;
+        project.tracks[2].mix.mute = true;
+        require(engine.submit(project), "muted project rejected");
+        require(loudest(200) > 0.05f, "first drum track lost under mute");
+    }
     // Every generated pad must be finite, audible, bounded, and repeatable.
     sonora::DrumSampler sampler, duplicate;
     for (int pad = 0; pad < sonora::drumPads; ++pad)
@@ -382,7 +472,7 @@ void testDrumAudio()
     require(buffer.getMagnitude(12000, 12000) == 0.0f, "closed hat did not choke open hat");
 
     auto drumsOnly = fixture();
-    drumsOnly.melodies[0] = {};
+    drumsOnly.tracks[0].melodies[0] = {};
     for (const auto rate : { 44100.0, 48000.0, 96000.0 })
     {
         const auto small = render(127, drumsOnly, rate);
@@ -393,31 +483,33 @@ void testDrumAudio()
             require(std::abs(small[i] - large[i]) < 1.0e-6f, "resampled drums depend on callback size");
     }
     auto muted = fixture();
-    muted.melodyMix.mute = muted.drumMix.mute = true;
+    muted.tracks[0].mix.mute = muted.tracks[1].mix.mute = true;
     const auto silence = render(256, muted);
     require(std::all_of(silence.begin(), silence.end(), [](float x) { return x == 0.0f; }), "muted tracks make sound");
     auto soloDrums = fixture();
-    soloDrums.drumMix.solo = true;
+    soloDrums.tracks[1].mix.solo = true;
     require(render(256, soloDrums) == render(256, drumsOnly), "drum solo leaks melody");
     auto melodyOnly = fixture();
-    melodyOnly.drumPatterns[0] = {};
+    melodyOnly.tracks[1].drumPatterns[0] = {};
     auto soloMelody = fixture();
-    soloMelody.melodyMix.solo = true;
+    soloMelody.tracks[0].mix.solo = true;
     require(render(256, soloMelody) == render(256, melodyOnly), "melody solo leaks drums");
     auto bothSolo = fixture();
-    bothSolo.melodyMix.solo = bothSolo.drumMix.solo = true;
+    bothSolo.tracks[0].mix.solo = bothSolo.tracks[1].mix.solo = true;
     require(render(256, bothSolo) == render(256), "two soloed tracks should play together");
 
     sonora::AudioEngine engine;
     engine.prepare(48000);
-    require(engine.auditionDrum(0), "pad audition rejected");
+    require(engine.submit(fixture()), "audition project rejected");
+    require(engine.auditionDrum(1, 0), "pad audition rejected");
     buffer.clear();
     engine.process({ &buffer, 0, 256 });
     require(buffer.getMagnitude(0, 256) > 0.01f, "pad audition needs running transport");
     engine.panic();
     engine.process({ &buffer, 0, 256 });
     require(buffer.getMagnitude(0, 256) == 0.0f, "panic left a drum ringing");
-    require(!engine.auditionDrum(-1) && !engine.auditionDrum(8) && !engine.auditionDrum(0, 128),
+    require(!engine.auditionDrum(-1, 0) && !engine.auditionDrum(1, 8) && !engine.auditionDrum(1, 0, 128)
+            && !engine.auditionDrum(0, 0) && !engine.auditionDrum(2, 0),
             "invalid audition accepted");
 }
 void testArrangement()
@@ -427,19 +519,22 @@ void testArrangement()
     scheduler.configure(48000, 120);
     auto project = fixture();
     project.song.sections = 3;
-    project.song.melodyOn = { true, false, true, true, true, true, true, true };
-    project.song.drumsOn = { true, true, false, true, true, true, true, true };
+    for (int s = 0; s < 3; ++s)
+    {
+        project.song.trackOn[static_cast<std::size_t>(s)][0] = (s != 1);
+        project.song.trackOn[static_cast<std::size_t>(s)][1] = (s != 2);
+    }
     std::vector<Event> events;
     const auto loopFrames = std::llround(48000.0 * 60.0 / 120.0 * sonora::patternTicks / sonora::ticksPerQuarter);
     bool finished = false;
     std::int64_t position = 0;
     while (!finished)
     {
-        finished = scheduler.processSong(project.melodies, project.song, 512, false,
-            [&](const sonora::Note& note, bool on, int offset) {
+        finished = scheduler.processSong(project.tracks, project.song, 512, false,
+            [&](int, const sonora::Note& note, bool on, int offset) {
                 events.push_back({ position + offset, note.pitch, on });
             });
-        scheduler.scheduleDrumsSong(project.drumPatterns, project.song, 512,
+        scheduler.scheduleDrumsSong(project.tracks[1].drumPatterns, project.song, 1, 512,
             [&](int pad, std::uint8_t, int offset) {
                 events.push_back({ position + offset, sonora::drumBaseNote + pad, true });
             });
@@ -462,12 +557,12 @@ void testArrangement()
         require(section >= 0 && section < 3, "event outside song");
         if (isDrumHit(event))
         {
-            require(project.song.drumsOn[static_cast<std::size_t>(section)], "muted section plays drums");
+            require(project.song.trackOn[static_cast<std::size_t>(section)][1], "muted section plays drums");
             drumsInSection1 = drumsInSection1 || section == 1;
         }
         else
         {
-            require(project.song.melodyOn[static_cast<std::size_t>(section)], "muted section plays melody");
+            require(project.song.trackOn[static_cast<std::size_t>(section)][0], "muted section plays melody");
             melodyInSection0 = melodyInSection0 || section == 0;
             melodyInSection2 = melodyInSection2 || section == 2;
         }
@@ -489,21 +584,21 @@ void testArrangement()
         sonora::LoopScheduler variation;
         variation.configure(48000, 120);
         sonora::ProjectState song = fixture();
-        song.melodies[0] = {};
-        song.melodies[0].count = 1;
-        song.melodies[0].notes[0] = { 1, 0, 240, 60, 100 };
-        song.melodies[1] = {};
-        song.melodies[1].count = 1;
-        song.melodies[1].notes[0] = { 2, 0, 240, 72, 100 };
+        song.tracks[0].melodies[0] = {};
+        song.tracks[0].melodies[0].count = 1;
+        song.tracks[0].melodies[0].notes[0] = { 1, 0, 240, 60, 100 };
+        song.tracks[0].melodies[1] = {};
+        song.tracks[0].melodies[1].count = 1;
+        song.tracks[0].melodies[1].notes[0] = { 2, 0, 240, 72, 100 };
         song.song.sections = 2;
-        song.song.melodyPattern = { 0, 1, 0, 0, 0, 0, 0, 0 };
+        song.song.slots[1][0] = 1;
         std::vector<Event> sectioned;
         std::int64_t position = 0;
         bool finished = false;
         while (!finished)
         {
-            finished = variation.processSong(song.melodies, song.song, 512, false,
-                [&](const sonora::Note& note, bool on, int offset) {
+            finished = variation.processSong(song.tracks, song.song, 512, false,
+                [&](int, const sonora::Note& note, bool on, int offset) {
                     if (on && (note.pitch == 60 || note.pitch == 72))
                         sectioned.push_back({ position + offset, note.pitch, on });
                 });
@@ -516,23 +611,23 @@ void testArrangement()
     }
     // Loop mode still wraps via processLoop (processSong is song-only now).
     scheduler.rewind();
-    scheduler.processLoop(project.melodies[0], 512, false, [](const auto&, bool, int) {});
+    scheduler.processLoop(project.tracks[0].melodies[0], 512, false, [](const auto&, bool, int) {});
     // Engine loop preview follows the selected library slot.
     {
         sonora::AudioEngine preview;
         preview.prepare(48000);
         sonora::ProjectState song = fixture();
-        song.melodies[0] = {};
-        song.melodies[1].count = 1;
-        song.melodies[1].notes[0] = { 5, 0, 240, 71, 100 };
-        song.drumPatterns[0] = {};
+        song.tracks[0].melodies[0] = {};
+        song.tracks[0].melodies[1].count = 1;
+        song.tracks[0].melodies[1].notes[0] = { 5, 0, 240, 71, 100 };
+        song.tracks[1].drumPatterns[0] = {};
         require(preview.submit(song), "variation project rejected");
         juce::AudioBuffer<float> buffer(2, 512);
         preview.setPlaying(true);
         preview.process({ &buffer, 0, 512 });
         preview.process({ &buffer, 0, 512 });
         require(buffer.getMagnitude(0, 512) < 1.0e-5f, "unselected slot leaks into loop preview");
-        preview.setLoopPatterns(1, 0);
+        preview.setLoopSelection(0, 1, 0);
         preview.stop();
         preview.process({ &buffer, 0, 512 });
         preview.setPlaying(true);
@@ -545,7 +640,7 @@ void testArrangement()
     sonora::ProjectState songProject = fixture();
     songProject.songMode = true;
     songProject.song.sections = 3;
-    songProject.song.melodyOn[1] = false;
+    songProject.song.trackOn[1][0] = false;
     sonora::ProjectState loaded;
     require(sonora::ProjectIO::decode(sonora::ProjectIO::encode(songProject), loaded).wasOk()
         && loaded == songProject, "song arrangement round-trip failed");
@@ -560,7 +655,7 @@ void testArrangement()
     // Engine: song mode stops at the end; loop mode keeps playing.
     sonora::AudioEngine engine;
     engine.prepare(48000);
-    songProject.melodies[0] = {};
+    songProject.tracks[0].melodies[0] = {};
     songProject.song.sections = 1;
     require(engine.submit(songProject), "song submit rejected");
     engine.setPlaying(true);
@@ -612,8 +707,8 @@ void testExport()
 
     // Normalization brings the peak to 0.99 without clipping.
     sonora::ExportJob loud = loop;
-    loud.project.melodyMix.volume = 1.5f;
-    loud.project.drumMix.volume = 1.5f;
+    loud.project.tracks[0].mix.volume = 1.5f;
+    loud.project.tracks[1].mix.volume = 1.5f;
     loud.normalize = true;
     auto loudResult = sonora::OfflineExport::render(loud);
     require(loudResult.ok() && loudResult.normalized, "normalize export failed");
@@ -661,8 +756,8 @@ void testExport()
     }
     sonora::ExportJob withTake;
     withTake.project = fixture();
-    withTake.project.melodies[0] = {};
-    withTake.project.drumPatterns[0] = {};
+    withTake.project.tracks[0].melodies[0] = {};
+    withTake.project.tracks[1].drumPatterns[0] = {};
     withTake.project.song.sections = 1;
     withTake.project.takeCount = 1;
     withTake.project.takes[0].id = 3;
@@ -822,21 +917,21 @@ void testFx()
 void testFxPersistence()
 {
     auto original = fixture();
-    original.melodyFx.eq.low = 4.5f;
-    original.melodyFx.eq.midFreq = 800.0f;
-    original.melodyFx.comp.thresholdDb = -12.0f;
-    original.melodyFx.comp.ratio = 4.0f;
-    original.melodyFx.delay.mix = 0.25f;
-    original.melodyFx.delay.feedback = 0.4f;
-    original.melodyFx.reverb.mix = 0.2f;
-    original.melodyFx.reverb.enabled = false;
-    original.drumFx.eq.high = -3.0f;
-    original.drumFx.comp.enabled = false;
+    original.tracks[0].fx.eq.low = 4.5f;
+    original.tracks[0].fx.eq.midFreq = 800.0f;
+    original.tracks[0].fx.comp.thresholdDb = -12.0f;
+    original.tracks[0].fx.comp.ratio = 4.0f;
+    original.tracks[0].fx.delay.mix = 0.25f;
+    original.tracks[0].fx.delay.feedback = 0.4f;
+    original.tracks[0].fx.reverb.mix = 0.2f;
+    original.tracks[0].fx.reverb.enabled = false;
+    original.tracks[1].fx.eq.high = -3.0f;
+    original.tracks[1].fx.comp.enabled = false;
     original.master.ceilingDb = -1.0f;
     original.master.releaseMs = 120.0f;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 8"), "projects must save as v8");
+    require(json.contains("\"version\": 9"), "projects must save as v9");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "fx round-trip changed parameters");
 
@@ -911,7 +1006,7 @@ void testTakePersistence()
     original.takes[1].mute = true;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 8"), "take projects must save as v8");
+    require(json.contains("\"version\": 9"), "take projects must save as v9");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "take round-trip changed metadata");
 
@@ -1012,8 +1107,8 @@ void testTakePlayback()
 {
     // A preloaded take renders at its punch-in offset in song mode.
     auto project = fixture();
-    project.melodies[0] = {};
-    project.drumPatterns[0] = {};
+    project.tracks[0].melodies[0] = {};
+    project.tracks[1].drumPatterns[0] = {};
     project.song.sections = 1;
     project.songMode = true;
     sonora::AudioEngine engine;
@@ -1239,6 +1334,15 @@ void addMessageToQueueAt(juce::MidiMessageCollector& collector, const juce::Midi
 void testExpression()
 {
     constexpr double rate = 48000.0;
+    // Live keys need a synth track; clear the loops so only the live note sounds.
+    auto liveProject = [&]() {
+        auto project = fixture();
+        for (auto& melody : project.tracks[0].melodies)
+            melody = {};
+        for (auto& pattern : project.tracks[1].drumPatterns)
+            pattern = {};
+        return project;
+    };
     auto medianF0 = [](const std::vector<float>& audio) {
         sonora::YinDetector detector(rate);
         sonora::PitchContour contour = detector.analyze(audio.data(), static_cast<int>(audio.size()));
@@ -1266,7 +1370,7 @@ void testExpression()
     {
         sonora::AudioEngine engine;
         engine.prepare(rate);
-        require(engine.submit(sonora::ProjectState()), "empty project rejected");
+        require(engine.submit(liveProject()), "live project rejected");
         addMessageToQueueAt(engine.midiCollector, juce::MidiMessage::noteOn(1, 69, (juce::uint8) 100));
         addMessageToQueueAt(engine.midiCollector, juce::MidiMessage::pitchWheel(1, bend));
         auto output = renderLive(engine, 19200);
@@ -1278,7 +1382,7 @@ void testExpression()
     {
         sonora::AudioEngine engine;
         engine.prepare(rate);
-        require(engine.submit(sonora::ProjectState()), "empty project rejected");
+        require(engine.submit(liveProject()), "live project rejected");
         addMessageToQueueAt(engine.midiCollector, juce::MidiMessage::noteOn(1, 69, (juce::uint8) 100));
         addMessageToQueueAt(engine.midiCollector, juce::MidiMessage::controllerEvent(1, 1, 127));
         auto output = renderLive(engine, 19200);
@@ -1291,7 +1395,7 @@ void testExpression()
     {
         sonora::AudioEngine engine;
         engine.prepare(rate);
-        require(engine.submit(sonora::ProjectState()), "empty project rejected");
+        require(engine.submit(liveProject()), "live project rejected");
         auto& collector = engine.midiCollector;
         addMessageToQueueAt(collector, juce::MidiMessage::noteOn(1, 60, (juce::uint8) 100));
         addMessageToQueueAt(collector, juce::MidiMessage::controllerEvent(1, 64, 127));
@@ -1313,32 +1417,35 @@ void testExpression()
 void testVariations()
 {
     auto original = fixture();
-    original.melodies[1].count = 2;
-    original.melodies[1].notes[0] = { 11, 0, 480, 64, 100 };
-    original.melodies[1].notes[1] = { 12, 960, 480, 67, 90 };
-    original.melodies[3].count = 1;
-    original.melodies[3].notes[0] = { 13, 0, 240, 71, 110 };
-    original.drumPatterns[2].steps[0][0] = 120;
-    original.drumPatterns[2].steps[4][16] = 100;
-    original.song.melodyPattern = { 3, 2, 1, 0, 0, 1, 2, 3 };
-    original.song.drumPattern = { 0, 0, 2, 0, 2, 0, 0, 0 };
+    original.tracks[0].melodies[1].count = 2;
+    original.tracks[0].melodies[1].notes[0] = { 11, 0, 480, 64, 100 };
+    original.tracks[0].melodies[1].notes[1] = { 12, 960, 480, 67, 90 };
+    original.tracks[0].melodies[3].count = 1;
+    original.tracks[0].melodies[3].notes[0] = { 13, 0, 240, 71, 110 };
+    original.tracks[1].drumPatterns[2].steps[0][0] = 120;
+    original.tracks[1].drumPatterns[2].steps[4][16] = 100;
+    for (int s = 0; s < 8; ++s)
+    {
+        original.song.slots[static_cast<std::size_t>(s)][0] = static_cast<std::uint8_t>(((int[]) { 3, 2, 1, 0, 0, 1, 2, 3 })[s]);
+        original.song.slots[static_cast<std::size_t>(s)][1] = static_cast<std::uint8_t>(((int[]) { 0, 0, 2, 0, 2, 0, 0, 0 })[s]);
+    }
     original.song.sections = 4;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 8"), "variation projects must save as v8");
+    require(json.contains("\"version\": 9"), "variation projects must save as v9");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "variation round-trip changed slots or indices");
 
     // Version 5 documents migrate with slot A content and slot-A sections.
     auto legacy = downshapeToVersion(juce::JSON::parse(json), 5);
     require(sonora::ProjectIO::decode(juce::JSON::toString(legacy), loaded).wasOk(), "v5 migration failed");
-    require(loaded.melodies[0] == original.melodies[0] && loaded.drumPatterns[0] == original.drumPatterns[0],
+    require(loaded.tracks[0].melodies[0] == original.tracks[0].melodies[0] && loaded.tracks[1].drumPatterns[0] == original.tracks[1].drumPatterns[0],
             "v5 migration changed slot A");
-    require(loaded.melodies[1].count == 0 && loaded.drumPatterns[2].hitCount() == 0,
+    require(loaded.tracks[0].melodies[1].count == 0 && loaded.tracks[1].drumPatterns[2].hitCount() == 0,
             "v5 migration invented slot content");
     for (int i = 0; i < sonora::maxSections; ++i)
-        require(loaded.song.melodyPattern[static_cast<std::size_t>(i)] == 0
-                && loaded.song.drumPattern[static_cast<std::size_t>(i)] == 0,
+        require(loaded.song.slots[static_cast<std::size_t>(i)][0] == 0
+                && loaded.song.slots[static_cast<std::size_t>(i)][1] == 0,
                 "v5 migration invented section slots");
     require(sonora::ProjectIO::decode(sonora::ProjectIO::encode(loaded), loaded).wasOk(),
             "migrated v5 re-save failed");
@@ -1352,7 +1459,7 @@ void testVariations()
     };
     reject([](auto& document) {
         document.getDynamicObject()->getProperty("song").getDynamicObject()
-            ->getProperty("melodyPatterns").getArray()->set(3, 9);
+            ->getProperty("slots").getArray()->getReference(3).getArray()->set(0, 9);
     }, "out-of-range slot index accepted");
     reject([](auto& document) {
         document.getDynamicObject()->getProperty("tracks").getArray()->getReference(0)
@@ -1370,6 +1477,22 @@ void testVariations()
         document.getDynamicObject()->getProperty("tracks").getArray()->getReference(1)
             .getDynamicObject()->setProperty("kitVariant", 9);
     }, "unknown kit variant accepted");
+
+    // Track reorder carries each track's arrangement column with it.
+    auto moved = original;
+    moved.song.trackOn[0][0] = false;
+    moved.song.trackOn[0][1] = true;
+    require(sonora::moveTrackState(moved, 0, 1), "adjacent reorder rejected");
+    require(moved.tracks[0].kind == sonora::TrackKind::Drums
+            && moved.tracks[1].kind == sonora::TrackKind::Synth, "reorder did not swap tracks");
+    require(moved.song.slots[0][0] == 0 && moved.song.slots[0][1] == 3, "reorder scrambled slots");
+    require(moved.song.trackOn[0][0] && !moved.song.trackOn[0][1], "reorder did not carry gates");
+    require(moved.valid(), "reordered project invalid");
+    require(!sonora::moveTrackState(moved, 0, 0), "no-op reorder accepted");
+    require(!sonora::moveTrackState(moved, 1, 7), "reorder onto empty track accepted");
+    const auto roundTripped = sonora::ProjectIO::encode(moved);
+    require(sonora::ProjectIO::decode(roundTripped, loaded).wasOk() && loaded == moved,
+            "reordered project does not persist");
 }
 
 void testKitVariants()
@@ -1411,11 +1534,11 @@ void testKitVariants()
     require(zeroCrossings(deep) < zeroCrossings(starter), "Deep kit not lower than Starter");
     // Variant persistence round-trips through the drum track field.
     auto project = fixture();
-    project.kitVariant = 2;
+    project.tracks[1].kitVariant = 2;
     sonora::ProjectState loaded;
     require(sonora::ProjectIO::decode(sonora::ProjectIO::encode(project), loaded).wasOk()
-            && loaded.kitVariant == 2, "kit variant round-trip failed");
-    project.kitVariant = 7;
+            && loaded.tracks[1].kitVariant == 2, "kit variant round-trip failed");
+    project.tracks[1].kitVariant = 7;
     require(!project.valid(), "wild variant accepted by validation");
 }
 
@@ -1481,10 +1604,10 @@ void testKitPanelLogic()
     // KitPanel is a MainComponent nested type; exercise row text/bounds logic
     // through the same helpers the panel uses.
     sonora::ProjectState project;
-    sonora::setPadSampleName(project.padSamples[2], "hat.wav");
+    sonora::setPadSampleName(project.tracks[1].padSamples[2], "hat.wav");
     for (int pad = 0; pad < sonora::drumPads; ++pad)
     {
-        const auto file = sonora::padSampleName(project.padSamples[static_cast<std::size_t>(pad)]);
+        const auto file = sonora::padSampleName(project.tracks[1].padSamples[static_cast<std::size_t>(pad)]);
         if (pad == 2)
             require(file == "hat.wav", "pad filename helper broken");
         else
@@ -1543,45 +1666,46 @@ void testKitSamples()
     sonora::AudioEngine engine;
     engine.prepare(48000.0);
     auto project = fixture();
-    project.melodies[0] = {};
+    project.tracks[0].melodies[0] = {};
     require(engine.submit(project), "kit project rejected");
     auto custom = std::make_unique<sonora::SampleBank>();
     custom->sampleRate = 48000.0;
     custom->data[0].assign(4800, 0.0f);
     for (int i = 0; i < 4800; ++i)
         custom->data[0][static_cast<std::size_t>(i)] = 0.5f;
-    engine.retirePadBank(custom.get());
+    engine.retirePadBank(1, custom.get());
     engine.setPlaying(true);
     juce::AudioBuffer<float> buffer(2, 512);
     float loudest = 0.0f;
     for (int i = 0; i < 6; ++i)
     {
+        buffer.clear();
         engine.process({ &buffer, 0, 512 });
         loudest = std::max(loudest, buffer.getMagnitude(0, 512));
     }
     // The fixture's bar-0 kick (step 0, velocity 110) must carry the DC block.
     require(loudest > 0.05f, "custom bank silent in engine");
-    engine.retirePadBank(nullptr);
+    engine.retirePadBank(1, nullptr);
     engine.process({ &buffer, 0, 512 });
 }
 
 void testKitPersistence()
 {
     auto original = fixture();
-    sonora::setPadSampleName(original.padSamples[0], "my-kick.wav");
-    sonora::setPadSampleName(original.padSamples[7], "shaker-loop.flac");
-    original.kitVariant = 1;
+    sonora::setPadSampleName(original.tracks[1].padSamples[0], "my-kick.wav");
+    sonora::setPadSampleName(original.tracks[1].padSamples[7], "shaker-loop.flac");
+    original.tracks[1].kitVariant = 1;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 8"), "kit projects must save as v8");
+    require(json.contains("\"version\": 9"), "kit projects must save as v9");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "kit round-trip changed pad samples");
     // Version 6 documents migrate to the built-in kit.
     auto legacy = downshapeToVersion(juce::JSON::parse(json), 6);
     require(sonora::ProjectIO::decode(juce::JSON::toString(legacy), loaded).wasOk(), "v6 migration failed");
-    for (const auto& slot : loaded.padSamples)
+    for (const auto& slot : loaded.tracks[1].padSamples)
         require(sonora::padSampleName(slot).isEmpty(), "v6 migration invented custom samples");
-    require(loaded.kitVariant == 0, "v6 migration invented a variant");
+    require(loaded.tracks[1].kitVariant == 0, "v6 migration invented a variant");
     require(sonora::ProjectIO::decode(sonora::ProjectIO::encode(loaded), loaded).wasOk(),
             "migrated v6 re-save failed");
     auto reject = [&](auto change, const char* what) {
@@ -1612,38 +1736,46 @@ void testInstances()
     std::array<sonora::Pattern, sonora::numPatterns> library {};
     library[0].count = 1;
     library[0].notes[0] = { 1, 0, 240, 60, 100 };
-    require(sonora::makeSectionUnique(song, library, 2), "shared section not detached");
-    require(song.melodyPattern[2] == 1, "detached section points at wrong slot");
+    require(sonora::makeSectionUnique(song, library, 2, 0), "shared section not detached");
+    require(song.slots[2][0] == 1, "detached section points at wrong slot");
     require(library[1] == library[0], "detached content differs from source");
-    require(!sonora::makeSectionUnique(song, library, 2), "unique section detached again");
-    require(!sonora::makeSectionUnique(song, library, 9), "out-of-range section detached");
+    require(!sonora::makeSectionUnique(song, library, 2, 0), "unique section detached again");
+    require(!sonora::makeSectionUnique(song, library, 9, 0), "out-of-range section detached");
     // Detached content is independent: editing the copy spares the source.
     library[1].notes[0].pitch = 64;
     require(library[0].notes[0].pitch == 60, "detach shares storage with source");
     // Full library: every slot in use somewhere refuses the detach.
-    song.melodyPattern = { 0, 1, 2, 3, 0, 1, 2, 3 };
+    for (int s = 0; s < 8; ++s)
+    {
+        song.slots[static_cast<std::size_t>(s)][0] = static_cast<std::uint8_t>(s % 4);
+        song.slots[static_cast<std::size_t>(s)][1] = static_cast<std::uint8_t>(s % 3);
+    }
     song.sections = 5;
-    song.melodyPattern[4] = 0; // section 0 shared, yet no free slot anywhere
+    song.slots[4][0] = 0; // section 0 shared, yet no free slot anywhere
     const auto before = library;
-    require(!sonora::makeSectionUnique(song, library, 0), "detach succeeded with full library");
+    require(!sonora::makeSectionUnique(song, library, 0, 0), "detach succeeded with full library");
     require(library == before, "refused detach mutated the library");
     std::array<sonora::DrumPattern, sonora::numPatterns> grids {};
     grids[0].steps[0][0] = 100;
     sonora::Arrangement drums;
     drums.sections = 2;
-    require(sonora::makeDrumSectionUnique(drums, grids, 1), "shared drum section not detached");
-    require(drums.drumPattern[1] == 1 && grids[1].steps[0][0] == 100, "drum detach wrong");
-    require(!sonora::makeDrumSectionUnique(drums, grids, 1), "unique drum section detached again");
+    require(sonora::makeDrumSectionUnique(drums, grids, 1, 1), "shared drum section not detached");
+    require(drums.slots[1][1] == 1 && grids[1].steps[0][0] == 100, "drum detach wrong");
+    require(!sonora::makeDrumSectionUnique(drums, grids, 1, 1), "unique drum section detached again");
     drums.sections = 5;
-    drums.drumPattern = { 0, 1, 2, 3, 0, 0, 0, 0 };
+    for (int s = 0; s < 8; ++s)
+    {
+        drums.slots[static_cast<std::size_t>(s)][1] = static_cast<std::uint8_t>(((int[]) { 0, 1, 2, 3, 0, 0, 0, 0 })[s]);
+        drums.slots[static_cast<std::size_t>(s)][0] = 0;
+    }
     const auto gridsBefore = grids;
-    require(!sonora::makeDrumSectionUnique(drums, grids, 0), "drum detach succeeded with full library");
+    require(!sonora::makeDrumSectionUnique(drums, grids, 0, 1), "drum detach succeeded with full library");
     require(grids == gridsBefore, "refused drum detach mutated the library");
     // Sharing queries drive the "shared by N" indicators.
     song.sections = 8;
-    const auto shared = sonora::sectionsSharingSlot(song, false, 0);
+    const auto shared = sonora::sectionsSharingSlot(song, 0, 0);
     require(shared.size() == 2 && shared[0] == 1 && shared[1] == 5, "sharing query wrong");
-    require(sonora::sectionsSharingSlot(song, true, 3).empty(), "unused slot reports sharers");
+    require(sonora::sectionsSharingSlot(song, 1, 3).empty(), "unused slot reports sharers");
 }
 
 void testAcceptance()
@@ -1651,27 +1783,30 @@ void testAcceptance()
     // The reference song: demo-style melody A plus a sparser variation B,
     // drums plus a busier variation, four alternating sections, mixed FX,
     // and a sung take. Everything the app can do, rendered in one pass.
-    sonora::ProjectState song;
+    sonora::ProjectState song = sonora::defaultProject();
     song.bpm = 120.0;
-    song.melodies[0].count = 3;
-    song.melodies[0].notes[0] = { 1, 0, 960, 48, 90 };
-    song.melodies[0].notes[1] = { 2, 0, 720, 60, 100 };
-    song.melodies[0].notes[2] = { 3, 960, 720, 64, 95 };
-    song.melodies[1].count = 2;
-    song.melodies[1].notes[0] = { 4, 0, 480, 55, 100 };
-    song.melodies[1].notes[1] = { 5, 960, 480, 67, 100 };
+    song.tracks[0].melodies[0].count = 3;
+    song.tracks[0].melodies[0].notes[0] = { 1, 0, 960, 48, 90 };
+    song.tracks[0].melodies[0].notes[1] = { 2, 0, 720, 60, 100 };
+    song.tracks[0].melodies[0].notes[2] = { 3, 960, 720, 64, 95 };
+    song.tracks[0].melodies[1].count = 2;
+    song.tracks[0].melodies[1].notes[0] = { 4, 0, 480, 55, 100 };
+    song.tracks[0].melodies[1].notes[1] = { 5, 960, 480, 67, 100 };
     for (int step = 0; step < sonora::gridSteps; step += 4)
-        song.drumPatterns[0].steps[0][static_cast<std::size_t>(step)] = 110;
+        song.tracks[1].drumPatterns[0].steps[0][static_cast<std::size_t>(step)] = 110;
     for (int step = 0; step < sonora::gridSteps; step += 2)
-        song.drumPatterns[1].steps[2][static_cast<std::size_t>(step)] = 80;
+        song.tracks[1].drumPatterns[1].steps[2][static_cast<std::size_t>(step)] = 80;
     song.song.sections = 4;
-    song.song.melodyPattern = { 0, 1, 0, 1, 0, 0, 0, 0 };
-    song.song.drumPattern = { 0, 0, 1, 1, 0, 0, 0, 0 };
+    for (int s = 0; s < 8; ++s)
+    {
+        song.song.slots[static_cast<std::size_t>(s)][0] = static_cast<std::uint8_t>(((int[]) { 0, 1, 0, 1, 0, 0, 0, 0 })[s]);
+        song.song.slots[static_cast<std::size_t>(s)][1] = static_cast<std::uint8_t>(((int[]) { 0, 0, 1, 1, 0, 0, 0, 0 })[s]);
+    }
     song.songMode = true;
-    song.melodyFx.eq.low = 3.0f;
-    song.melodyFx.delay.mix = 0.2f;
-    song.drumFx.comp.thresholdDb = -12.0f;
-    song.drumMix.volume = 0.9f;
+    song.tracks[0].fx.eq.low = 3.0f;
+    song.tracks[0].fx.delay.mix = 0.2f;
+    song.tracks[1].fx.comp.thresholdDb = -12.0f;
+    song.tracks[1].mix.volume = 0.9f;
     song.master.ceilingDb = -1.0f;
     // A two-second sung take starting at bar 2.
     const auto media = juce::File::getSpecialLocation(juce::File::tempDirectory)
