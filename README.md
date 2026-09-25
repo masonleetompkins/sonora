@@ -1,11 +1,26 @@
 # Sonora
 
-A native Linux synthesizer and DAW in development. Version 0.13.0 uses C++20,
-JUCE 8.0.6, and CMake.
-Initial licensing assumption: GPL-3.0-only; review and add full licensing notices
-before distributing. JUCE retains its own license. No third-party sound assets are bundled.
+A native Linux synthesizer and DAW in development. Version 0.14.0 uses C++20,
+JUCE 8.0.6, and CMake. Licensed GPL-3.0-only (see LICENSE); JUCE retains its
+own license. No third-party sound assets are bundled.
 
-## Build
+## Install on Arch / Omarchy
+
+The packaged route builds `sonora-git` from source:
+
+```sh
+cd packaging/arch
+makepkg -si
+sonora
+```
+
+This installs `/usr/bin/Sonora`, a desktop launcher, the icon, AppStream
+metadata, and the license. A git remote is required for redistribution; until
+one exists, the PKGBUILD builds from a local clone (see the `_gitremote`
+comment at its top). Full `makepkg` validation (a from-scratch network build)
+is still pending on a machine with `cmake` and `ninja` installed.
+
+## Build from source
 
 On Arch, install `base-devel cmake ninja git alsa-lib freetype2 fontconfig libx11
 libxext libxinerama libxrandr libxcursor` and a JACK provider (Omarchy normally
@@ -31,9 +46,23 @@ ctest --test-dir build-release --output-on-failure
 ./build-release/Sonora_artefacts/Release/Sonora
 ```
 
-If JACK is not discoverable in settings, try launching through `pw-jack`.
-The app also includes JUCE's ALSA backend. Choose the backend and enable MIDI
-inputs using **Audio / MIDI**. Audio settings are currently session-only.
+## Audio setup (PipeWire / JACK / ALSA)
+
+Sonora targets Omarchy's default stack: **PipeWire with its JACK
+compatibility layer**. In **Audio / MIDI**, prefer the JACK backend for
+low-latency routing through the desktop audio graph; use the ALSA backend as
+a fallback or for direct hardware access.
+
+- If JACK is not discoverable in settings, try launching through `pw-jack`,
+  or confirm `pipewire-jack` is installed (it provides the JACK libraries
+  PipeWire implements).
+- Enable MIDI inputs in the same dialog; USB controllers auto-enable on
+  plug-in and appear in the status bar.
+- For recording, select an input-capable device (built-in mic, USB interface)
+  and verify the input meter moves in **03 Audio** before pressing REC.
+- If you hear dropouts, raise the buffer size in Audio / MIDI; recording
+  overruns are reported rather than silently dropped.
+- Audio settings are currently session-only (not persisted between launches).
 
 ## Current features
 

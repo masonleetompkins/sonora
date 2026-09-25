@@ -29,20 +29,27 @@ pkgver() {
 }
 
 build() {
-  cmake -S "${srcdir}/${pkgname}" -B build -G Ninja \
+  cmake -S "${srcdir}/${pkgname}" -B "${srcdir}/${pkgname}/build" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX=/usr \
     -DBUILD_TESTING=OFF
-  cmake --build build --parallel "$(nproc)"
+  cmake --build "${srcdir}/${pkgname}/build" --parallel "$(nproc)"
 }
 
 check() {
   # Reconfigure the same tree with tests enabled and run the suite.
-  cmake -S "${srcdir}/${pkgname}" -B build -DBUILD_TESTING=ON
-  cmake --build build --parallel "$(nproc)" --target SonoraTests
-  ctest --test-dir build --output-on-failure
+  cmake -S "${srcdir}/${pkgname}" -B "${srcdir}/${pkgname}/build" -DBUILD_TESTING=ON
+  cmake --build "${srcdir}/${pkgname}/build" --parallel "$(nproc)" --target SonoraTests
+  ctest --test-dir "${srcdir}/${pkgname}/build" --output-on-failure
 }
 
 package() {
-  DESTDIR="${pkgdir}" cmake --install build
+  # NOTE: plain `cmake --install` would also stage all of JUCE's own headers
+  # (JUCE offers no install toggle), so the package installs files explicitly.
+  local src="${srcdir}/${pkgname}"
+  install -Dm755 "${src}/build/Sonora_artefacts/Release/Sonora" "${pkgdir}/usr/bin/Sonora"
+  install -Dm644 "${src}/packaging/sonora.desktop" "${pkgdir}/usr/share/applications/sonora.desktop"
+  install -Dm644 "${src}/assets/sonora.svg" "${pkgdir}/usr/share/icons/hicolor/scalable/apps/sonora.svg"
+  install -Dm644 "${src}/packaging/org.sonora.Sonora.metainfo.xml" "${pkgdir}/usr/share/metainfo/org.sonora.Sonora.metainfo.xml"
+  install -Dm644 "${src}/LICENSE" "${pkgdir}/usr/share/licenses/sonora/LICENSE"
 }

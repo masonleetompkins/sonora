@@ -1,44 +1,44 @@
-# Handoff status — 0.13.0
+# Handoff status — 0.14.0
 
 ## Completed this milestone
 
-- Added pattern instances: sections sharing a slot letter play one pattern, so
-  one edit updates them all; Ctrl-click detaches a section into a free slot
-  copy (make-unique) and jumps the editor there for immediate editing.
-- Sharing tooltips on every section block report exactly which sections share
-  each slot ("shared by sections 1, 3" vs. "unique to this section").
-- Refusals explain themselves (already unique, or every slot in use); refused
-  detaches provably mutate nothing.
-- No project-format change (v8 still): only slot indices move, so all existing
-  v8 files, saves, and migrations work untouched.
+- Added Arch packaging: `sonora-git` PKGBUILD (Release build, test stage,
+  explicit file installs), desktop entry, SVG icon, AppStream metainfo, and
+  the GPL-3.0-only license text.
+- CMake installs the binary, launcher, icon, metadata, and docs. The PKGBUILD
+  deliberately avoids `cmake --install` because JUCE offers no install toggle
+  and would stage all of its own headers into the package.
+- Initialized git version control for the project (v0.13.0 tagged) so the
+  `-git` package has a real source; build trees stay ignored.
+- README now documents packaged install, source builds, and a full PipeWire /
+  JACK / ALSA setup and troubleshooting section.
 
 ## Verified
 
-- `ctest` (Debug and Release): all 26 suites pass, zero warnings.
-- Detach copies content and repoints; second detach refuses; out-of-range
-  refuses; detached copies edit independently of sources.
-- True full-library refusal (shared section, zero free slots) for melody and
-  drums, with library immutability on refusal.
-- Sharing queries drive the tooltip indicators.
-- Screenshot-verified tabs, Dup, slot labels, and kit UI unaffected.
+- `ctest` (Debug and Release): all suites pass, zero warnings (no code changed
+  this round beyond the version bump).
+- `cmake --install` to a test prefix: binary, desktop file, icon, metainfo,
+  license, and README land in the right FHS locations.
+- `desktop-file-validate`: clean.
+- `makepkg --printsrcinfo`: metadata parses (deps, license, provides).
+- `package()` file layout simulated against the real Release binary: exact
+  five install targets verified.
 
-## Debugging notes (do not regress)
+## Known packaging gaps (need a full build host)
 
-- `bool shared = false, free = -1` declares free as BOOL: slot search always
-  "finds" slot 1 and full libraries clobber instead of refusing. Never name a
-  variable `free`; the -Wbool-compare warning flagged it.
-- Tests must assert presence per section, not just absence in muted ones —
-  vacuous gating tests previously hid a fully silent sections 1+ (fixed 0.10).
-- Seam off-events attribute to the previous section; only seam ons are leaks.
-
-## Still to verify interactively
-
-- Make-unique workflow by ear across a full song; Ctrl-click discoverability.
-- Tooltip accuracy while rearranging sections.
+- A from-scratch `makepkg -si` was not run here: this machine lacks system
+  `cmake`/`ninja` (builds use an isolated venv) and sudo for makedeps.
+- No git remote exists yet; the PKGBUILD builds from a local clone path with
+  a one-line `_gitremote` switch documented at its top. Set a remote, push,
+  and point it at the network URL before AUR submission.
+- `namcap` and AppStream validation (`appstreamcli validate`) were not
+  available; run both before submitting anywhere.
 
 ## Next implementation step
 
-Arch packaging (PKGBUILD, desktop entry, XDG dirs, PipeWire/JACK guidance),
-then a full end-to-end acceptance pass on Omarchy hardware.
+The end-to-end acceptance pass from the original plan: build the reference
+song (drums, bass, melody, arrangement, vocal, pitch, mix, export) on Omarchy
+hardware, then remaining hardening (device-loss behavior, xrun reporting,
+persisted audio settings).
 
 Build/run instructions, interactions, and realtime limitations are in README.md.
