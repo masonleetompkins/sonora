@@ -641,7 +641,8 @@ struct MainComponent::AudioView final : public juce::Component
     float getPitchSpeed() const { return static_cast<float>(pitchSpeed.getValue()); }
 
     void refresh(const ProjectState& project, int numInputs, int latencySamples,
-                 std::uint32_t selected, bool isRecording, const juce::String& extra)
+                 std::uint32_t selected, bool isRecording, const juce::String& deviceName,
+                 const juce::String& extra)
     {
         juce::String signature;
         for (int i = 0; i < project.takeCount; ++i)
@@ -688,9 +689,11 @@ struct MainComponent::AudioView final : public juce::Component
         }
         juce::String info;
         if (numInputs <= 0)
-            info = "No audio inputs on the current device — choose an input-capable device in Audio / MIDI.";
+            info = "No inputs open on " + (deviceName.isEmpty() ? juce::String("the current device")
+                : "\"" + deviceName + "\"") + " — press REC or enable Monitor to open them.";
         else
-            info = juce::String(numInputs) + (numInputs == 1 ? " input available" : " inputs available")
+            info = "\"" + deviceName + "\": " + juce::String(numInputs)
+                + (numInputs == 1 ? " input" : " inputs")
                 + "   /   input latency " + juce::String(latencySamples) + " samples (auto-compensated)";
         if (extra.isNotEmpty())
             info += "   /   " + extra;
@@ -882,6 +885,19 @@ struct MainComponent::AudioView final : public juce::Component
     std::function<void()> onPitchChanged, onAnalyze, onApply;
 };
 
+static int activeInputCount(juce::AudioDeviceManager& manager)
+{
+    if (auto* device = manager.getCurrentAudioDevice())
+        return device->getActiveInputChannels().countNumberOfSetBits();
+    return 0;
+}
+
+void MainComponent::ensureAudioInputs()
+{
+    if (activeInputCount(deviceManager) > 0)
+        return;
+    setAudioChannels(2, 2);
+}
 
 MainComponent::MainComponent()
 {
@@ -1182,7 +1198,12 @@ MainComponent::MainComponent()
     drumSequencer.onAudition = [this](int pad) { auditionPad(pad); };
     audioView = std::make_unique<AudioView>(
         [this](int mode) { inputMode = mode; },
-        [this](bool monitor) { monitorInputs = monitor; if (!monitor) inputPeak.store(0.0f); },
+        [this](bool monitor) {
+            if (monitor)
+                ensureAudioInputs();
+            monitorInputs = monitor;
+            if (!monitor) inputPeak.store(0.0f);
+        },
         [this](std::uint32_t id) {
             beginEdit();
             for (int i = 0; i < project.takeCount; ++i)
@@ -1236,9 +1257,12 @@ MainComponent::MainComponent()
     if (savedAudio != nullptr)
         deviceManager.initialise(2, 2, savedAudio.get(), true);
     deviceManager.addChangeListener(this);
-    // Stereo inputs for vocal/instrument recording; devices without inputs
-    // simply report zero input channels and disable recording.
-    setAudioChannels(2, 2);
+    // Output-only by default: requesting inputs at startup would wake
+    // Bluetooth headset mics (hearing aids) and force the whole system into a
+    // low-quality bidirectional profile. Inputs open on demand when the user
+    // opens the Audio tab, enables monitoring, or presses REC — unless a
+    // restored setup already had them.
+    setAudioChannels(activeInputCount(deviceManager) > 0 ? 2 : 0, 2);
     // Registered after the player's callback, so outputs already hold the
     // engine mix when our input tap runs on the same audio thread.
     deviceManager.addAudioCallback(this);
@@ -1332,6 +1356,7 @@ void MainComponent::audioDeviceIOCallbackWithContext(const float* const* inputCh
 }
 void MainComponent::handleIncomingMidiMessage(juce::MidiInput* source, const juce::MidiMessage& message)
 {
+    lastMidiMillis.store(juce::Time::getMillisecondCounter(), std::memory_order_relaxed);
     const bool fromMcu = source != nullptr && mcuDeviceIds.contains(source->getIdentifier());
     if (fromMcu)
     {
@@ -1730,6 +1755,8 @@ void MainComponent::selectChannel(int channel)
     const bool audio = channel == 2;
     drumsSelected = drums;
     audioSelected = audio;
+    if (audio)
+        ensureAudioInputs(); // inputs open only when recording becomes possible
     pianoRoll.setVisible(!drums && !audio);
     drumSequencer.setVisible(drums);
     audioView->setVisible(audio);
@@ -1790,10 +1817,11 @@ void MainComponent::refreshAudioView()
     auto* device = deviceManager.getCurrentAudioDevice();
     const int numInputs = device != nullptr ? device->getActiveInputChannels().countNumberOfSetBits() : 0;
     const int latency = currentInputLatency();
+    const juce::String deviceName = device != nullptr ? juce::String(device->getName()).trim() : juce::String();
     juce::String extra;
     if (recording)
         extra = "REC " + juce::String(recordChannels == 2 ? "stereo" : "mono");
-    audioView->refresh(project, numInputs, latency, selectedTake, recording, extra);
+    audioView->refresh(project, numInputs, latency, selectedTake, recording, deviceName, extra);
 }
 
 void MainComponent::updateTrackControls()
@@ -1833,13 +1861,6 @@ int MainComponent::currentInputLatency() const
     return 0;
 }
 
-static int activeInputCount(juce::AudioDeviceManager& manager)
-{
-    if (auto* device = manager.getCurrentAudioDevice())
-        return device->getActiveInputChannels().countNumberOfSetBits();
-    return 0;
-}
-
 void MainComponent::toggleRecord()
 {
     if (recording)
@@ -1847,6 +1868,7 @@ void MainComponent::toggleRecord()
         finalizeTake(); // punch out, keep playing
         return;
     }
+    ensureAudioInputs();
     if (activeInputCount(deviceManager) <= 0)
     {
         showError("No audio inputs on the current device. Choose an input-capable device in Audio / MIDI first.");
@@ -2800,6 +2822,8 @@ void MainComponent::timerCallback()
             autoConnectMidi(); // hotplug scan: new controllers just work
         const int xruns = deviceManager.getXRunCount();
         const juce::String xrunText = xruns > 0 ? "   /   XRUN " + juce::String(xruns) : "";
+        const bool midiLive = juce::Time::getMillisecondCounter() - lastMidiMillis.load() < 2000;
+        const juce::String midiText = "MIDI: " + midiStatusText + (midiLive ? " ●" : "");
         if (!audioErrorMessage.isEmpty())
         {
             status.setText("AUDIO ERROR: " + audioErrorMessage + " — reopen Audio / MIDI to recover.",
@@ -2810,12 +2834,12 @@ void MainComponent::timerCallback()
         {
             status.setText(device->getName() + "   /   " + juce::String(device->getCurrentSampleRate(), 0)
                 + " Hz   /   " + juce::String(device->getCurrentBufferSizeSamples()) + " samples   /   CPU "
-                + juce::String(deviceManager.getCpuUsage() * 100.0, 1) + "%" + xrunText + "   /   MIDI: " + midiStatusText,
+                + juce::String(deviceManager.getCpuUsage() * 100.0, 1) + "%" + xrunText + "   /   " + midiText,
                 juce::dontSendNotification);
             status.setColour(juce::Label::textColourId, ui::muted);
         }
         else
-            status.setText("No audio device - choose an output in Audio / MIDI.   /   MIDI: " + midiStatusText,
+            status.setText("No audio device - choose an output in Audio / MIDI.   /   " + midiText,
                            juce::dontSendNotification);
     }
     if (timerTicks % 60 == 0 && !editing && !dialogPending && dirty() && revision != recoveredRevision)

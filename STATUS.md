@@ -1,46 +1,39 @@
-# Handoff status — 0.16.0
+# Handoff status — 0.17.0
 
 ## Completed this milestone
 
-- The UI now follows Omarchy themes: on startup and every few seconds it reads
-  the active theme (`theme.name` → `themes/<name>/colors.toml`, falling back to
-  the live `current/theme` copy) and repaints the whole studio when anything
-  changes. Try `omarchy theme set <other>` while Sonora runs.
-- Mapping: theme background/foreground become app bg/text; panel/raised/border
-  derive by mixing so dark and light themes both stay readable; melody, drums,
-  audio, danger, and warn follow the theme's cyan/magenta/blue/red/orange.
-  Missing keys or a missing Omarchy install fall back to the neon defaults.
-- Implementation: new juce_core-only `OmarchyTheme.h` (discovery, flat-TOML
-  parse, hex colors, mapping, fingerprint) plus a runtime palette in
-  `NeonTheme.h` with a LookAndFeel re-sync. No project-format change.
+- Fixed the hearing-aid grab: Sonora no longer requests audio inputs at
+  startup (output-only by default), so Bluetooth headset mics stay asleep in
+  their high-quality output profile. Inputs open lazily when the user opens
+  the Audio tab, enables monitoring, or presses REC — and a restored setup
+  keeps previously opted-in inputs. This also removes the startup device
+  renegotiation that was stalling MiniLab connection.
+- MIDI activity dot (●) in the status bar, live for 2 s after any message, so
+  controller connection is verifiable at a glance.
+- Audio view names the active input device and explains inputs open on demand.
 
 ## Verified
 
-- `ctest` (Debug and Release): all 28 suites pass, zero warnings.
-- Hex parsing (6/3-digit, fallbacks), TOML edge cases (comments, sections,
-  quotes, bare values), mason-like mapping, per-key fallbacks, light-mode flag.
-- Live `loadOmarchyPalette()` runs against this machine's real mason theme.
+- `ctest` (Debug and Release): all 25 suites pass, zero warnings, no code-path
+  changes to DSP (UI/device layer only).
+- Could not smoke-launch: the owner's live session holds the single-instance
+  lock (correctly left undisturbed). Visual check of the new strings deferred
+  to the next restart.
 
 ## Debugging notes (do not regress)
 
-- TOML values starting with `#` are hex colors, not comments; only strip `#`
-  comments that follow other content.
-- Nested-component method bodies must sit below the nested struct definitions
-  in MainComponent.cpp, or the build fails on incomplete types.
-- Sonora is single-instance: a second launch exits 0 silently while one copy
-  runs. Headless smoke tests must check `pgrep` first (and never kill a live
-  user session to test).
+- Never request input channels speculatively on Linux: it activates headset
+  mics and forces system-wide Bluetooth profile switches.
+- `AudioAppComponent` restores nothing; explicit `initialise()` with saved XML
+  plus `setAudioChannels()` to match is the correct startup sequence.
+- Single-instance guard exits 0 silently — smoke scripts must check `pgrep`
+  first and must never kill a live user session.
 
 ## Still to verify interactively
 
-- Relaunch the app and confirm the mason look (pure-black bg, theme cyan
-  accents, blue drums); then `omarchy theme set` something else and watch it
-  follow live within seconds.
-- Light-mode theme readability (no light Omarchy theme installed here).
-
-## Next step
-
-Human acceptance on Omarchy hardware, then AUR submission (needs a git
-remote + a full `makepkg -si` host).
+- Restart with hearing aids connected: no mic activation during playback;
+  inputs open on REC with the right device.
+- MiniLab connects promptly on a fresh launch now that startup is output-only.
+- MIDI ● flashes on key/pad hits.
 
 Build/run instructions, interactions, and realtime limitations are in README.md.

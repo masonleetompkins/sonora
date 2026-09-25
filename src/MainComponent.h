@@ -68,6 +68,10 @@ private:
     void auditionPad(int pad);
     void toggleRecord();
     void finalizeTake();
+    // Opens stereo inputs on the current device if none are active. Called
+    // when recording becomes possible (Audio tab, monitoring, REC) so plain
+    // playback never touches input hardware like Bluetooth headset mics.
+    void ensureAudioInputs();
     void deleteTake(std::uint32_t id);
     void refreshTakes();
     void rebuildWaveCache();
@@ -161,6 +165,7 @@ private:
     // pushes into the recorder FIFO and reads atomics).
     TakeRecorder recorder;
     bool recording = false, monitorInputs = false;
+    std::atomic<std::int64_t> lastMidiMillis { 0 };
     int inputMode = 0, recordChannels = 1, recordStartTick = 0;
     juce::File recordFile;
     std::atomic<float> inputPeak { 0.0f };

@@ -1,6 +1,6 @@
 # Sonora
 
-A native Linux synthesizer and DAW in development. Version 0.16.0 uses C++20,
+A native Linux synthesizer and DAW in development. Version 0.17.0 uses C++20,
 JUCE 8.0.6, and CMake. Licensed GPL-3.0-only (see LICENSE); JUCE retains its
 own license. No third-party sound assets are bundled.
 
@@ -57,9 +57,14 @@ a fallback or for direct hardware access.
   or confirm `pipewire-jack` is installed (it provides the JACK libraries
   PipeWire implements).
 - Enable MIDI inputs in the same dialog; USB controllers auto-enable on
-  plug-in and appear in the status bar.
+  plug-in and appear in the status bar, with a ● dot while messages arrive.
 - For recording, select an input-capable device (built-in mic, USB interface)
   and verify the input meter moves in **03 Audio** before pressing REC.
+  Sonora opens audio inputs lazily — plain playback never touches input
+  hardware, so Bluetooth headset mics (hearing aids) stay asleep in their
+  high-quality output profile until you actually record or monitor. Inputs
+  open automatically when you visit the Audio tab, enable monitoring, or
+  press REC; the audio view names the active input device.
 - If you hear dropouts, raise the buffer size in Audio / MIDI; recording
   overruns are reported rather than silently dropped.
 - Audio/MIDI setup (device, sample rate, buffer size, enabled MIDI inputs)
