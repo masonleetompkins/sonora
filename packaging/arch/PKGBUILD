@@ -8,7 +8,7 @@ pkgrel=1
 pkgdesc="Native Linux synthesizer and DAW: beats, arrangement, FX, recording, pitch correction"
 arch=('x86_64')
 url="https://github.com/masonleetompkins/sonora"
-license=('GPL-3.0-only')
+license=('GPL-3.0-only' 'MIT' 'LicenseRef-GeneralUser-GS')
 depends=('alsa-lib' 'freetype2' 'fontconfig' 'libx11' 'libxext' 'libxinerama'
          'libxrandr' 'libxcursor' 'libgl' 'gtk3' 'webkit2gtk-4.1' 'libcurl'
          'pipewire-jack')
@@ -48,4 +48,8 @@ package() {
   install -Dm644 "${src}/assets/sonora.svg" "${pkgdir}/usr/share/icons/hicolor/scalable/apps/sonora.svg"
   install -Dm644 "${src}/packaging/org.sonora.Sonora.metainfo.xml" "${pkgdir}/usr/share/metainfo/org.sonora.Sonora.metainfo.xml"
   install -Dm644 "${src}/LICENSE" "${pkgdir}/usr/share/licenses/sonora/LICENSE"
+  # Sampled instruments: Sonora finds the bank at ../share/sonora relative to the binary.
+  install -Dm644 "${src}/assets/GeneralUser-GS.sf2" "${pkgdir}/usr/share/sonora/GeneralUser-GS.sf2"
+  install -Dm644 "${src}/assets/GeneralUser-GS-LICENSE.txt" "${pkgdir}/usr/share/licenses/sonora/GeneralUser-GS-LICENSE.txt"
+  install -Dm644 "${src}/third_party/TinySoundFont-LICENSE" "${pkgdir}/usr/share/licenses/sonora/TinySoundFont-LICENSE"
 }

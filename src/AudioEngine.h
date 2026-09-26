@@ -1,4 +1,5 @@
 #pragma once
+#include "SampledInstrument.h"
 #include "Synth.h"
 #include "DrumSampler.h"
 #include "Fx.h"
@@ -16,6 +17,11 @@ namespace sonora
 struct TrackUnit
 {
     juce::Synthesiser synth;
+    SampledInstrument sampled;
+    // Shared by this track's voices; written only by the audio thread
+    // between blocks, so voices never see a half-updated patch.
+    SynthParams voiceParams;
+    Chorus chorus;
     DrumSampler drums;
     TrackChain chain;
     juce::SmoothedValue<float> gain;
@@ -27,6 +33,7 @@ class AudioEngine
 {
 public:
     AudioEngine();
+    bool instrumentsAvailable() const { return units[0].sampled.available(); }
     bool submit(const ProjectState& project)
     {
         if (!project.valid() || !pending.push(project))
@@ -56,6 +63,10 @@ public:
     void setArturiaPadMap(bool value) { arturiaPads.store(value); }
     // Loop-mode preview follows the editor's track and library slots.
     void setLoopSelection(int track, int melodySlot, int drumSlot);
+    // Song playback starts (and rewinds) to this section.
+    void setSongStartSection(int section) { songStartSection.store(std::clamp(section, 0, maxSections - 1)); }
+    // Loop preview of one song part: only tracks whose bit is set sound.
+    void setLoopTrackMask(unsigned mask) { loopTrackMask.store(mask); }
     void prepare(double sampleRate);
     void process(const juce::AudioSourceChannelInfo& block);
     void release();
@@ -67,6 +78,8 @@ private:
     std::array<TrackUnit, maxTracks> units;
     BrickLimiter master;
     juce::MidiBuffer midi;
+    juce::MidiBuffer renderEvents;
+    juce::AudioBuffer<float> trackBuffer { 2, 512 };
     struct DrumHit { int track, pad, velocity; };
     static constexpr int wildcardTrack = -1;
     SnapshotQueue<DrumHit, 64> auditions;
@@ -82,6 +95,9 @@ private:
     std::atomic<bool> playing { false }, panicRequested { false };
     std::atomic<bool> arturiaPads { false };
     std::atomic<int> loopTrack { 0 };
+    std::atomic<int> songStartSection { 0 };
+    std::atomic<unsigned> loopTrackMask { ~0u };
+    unsigned activeLoopMask = ~0u;
     // Per-track loop-preview slots: every track previews its own library slot.
     std::array<std::atomic<int>, maxTracks> loopMelodySlots {}, loopDrumSlots {};
     std::atomic<unsigned> rewindRequest { 0 };

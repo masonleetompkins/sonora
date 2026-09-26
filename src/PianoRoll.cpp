@@ -114,7 +114,7 @@ void PianoRoll::paint(juce::Graphics& g)
         ui::caption(g, "YOUR NEXT IDEA STARTS HERE", card.toNearestInt().reduced(20, 0).withTrimmedBottom(25), ui::cyan, 11);
         g.setColour(ui::muted);
         g.setFont(ui::font(11));
-        g.drawText("Draw a note, or load the demo melody.", card.toNearestInt().reduced(20, 0).withTrimmedTop(24),
+        g.drawText("Draw a note, or ask the AI assistant.", card.toNearestInt().reduced(20, 0).withTrimmedTop(24),
                    juce::Justification::centredLeft);
     }
 }

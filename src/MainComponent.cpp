@@ -5,11 +5,24 @@ namespace sonora
 // Per-track hues keyed by track icon; the palette cycles every 8 icons.
 juce::Colour trackColour(int icon)
 {
-    static const juce::Colour palette[] {
+    const juce::Colour palette[] {
         ui::cyan, ui::violet, ui::blue, ui::warn, ui::danger,
         juce::Colour(0xff9dff70), juce::Colour(0xff70e0ff), juce::Colour(0xffff8de0),
     };
     return palette[icon & 7];
+}
+
+// Names Sonora generated itself (instrument or synth-patch names). Tracks with
+// these names follow instrument/patch changes; custom names are never touched.
+bool isGeneratedTrackName(const juce::String& name)
+{
+    for (const auto& preset : instruments)
+        if (name == preset.name)
+            return true;
+    for (const auto& patch : synthPatches())
+        if (name == patch.name)
+            return true;
+    return false;
 }
 
 const char* trackIconName(int icon)
@@ -37,7 +50,7 @@ struct MainComponent::FxBar final : public juce::Component
           onGet(std::move(getCb)), onSet(std::move(setCb)),
           onDragStart(std::move(dragStartCb)), onDragEnd(std::move(dragEndCb))
     {
-        const char* targets[] { "MEL", "DRM", "MST" };
+        const char* targets[] { "TRACK", "TRACK", "MASTER" };
         for (int i = 0; i < 3; ++i)
         {
             auto& button = targetButtons[static_cast<std::size_t>(i)];
@@ -46,9 +59,10 @@ struct MainComponent::FxBar final : public juce::Component
             button.setWantsKeyboardFocus(false);
             button.setColour(juce::TextButton::buttonOnColourId, ui::blue);
             button.onClick = [this, i] { if (onTarget) onTarget(i); };
+            button.setVisible(i != 1);
         }
-        const char* effects[] { "EQ", "CMP", "DLY", "VRB" };
-        for (int i = 0; i < 4; ++i)
+        const char* effects[] { "DRV", "EQ", "CMP", "CHO", "DLY", "VRB" };
+        for (int i = 0; i < numEffects; ++i)
         {
             auto& button = effectButtons[static_cast<std::size_t>(i)];
             addAndMakeVisible(button);
@@ -96,11 +110,14 @@ struct MainComponent::FxBar final : public juce::Component
             return { { "CEIL", -12.0f, 0.0f, "dB" }, { "REL", 20.0f, 500.0f, "ms" } };
         switch (effect)
         {
-            case 0: return { { "LOW", -15.0f, 15.0f, "dB" }, { "MID", -15.0f, 15.0f, "dB" },
+            case 0: return { { "DRIVE", 0.0f, 1.0f, "%" }, { "TONE", 800.0f, 16000.0f, "Hz", 4000.0f } };
+            case 1: return { { "LOW", -15.0f, 15.0f, "dB" }, { "MID", -15.0f, 15.0f, "dB" },
                              { "MIDF", 200.0f, 8000.0f, "Hz", 1200.0f }, { "HIGH", -15.0f, 15.0f, "dB" } };
-            case 1: return { { "THR", -40.0f, 0.0f, "dB" }, { "RATIO", 1.0f, 12.0f, ":1" },
+            case 2: return { { "THR", -40.0f, 0.0f, "dB" }, { "RATIO", 1.0f, 12.0f, ":1" },
                              { "ATT", 0.5f, 100.0f, "ms" }, { "REL", 20.0f, 1000.0f, "ms" } };
-            case 2: return { { "TIME", 20.0f, 1000.0f, "ms" }, { "FDBK", 0.0f, 0.8f, "" },
+            case 3: return { { "RATE", 0.1f, 5.0f, "Hz", 1.0f }, { "DEPTH", 0.0f, 1.0f, "%" },
+                             { "MIX", 0.0f, 1.0f, "%" } };
+            case 4: return { { "TIME", 20.0f, 1000.0f, "ms" }, { "FDBK", 0.0f, 0.8f, "" },
                              { "MIX", 0.0f, 1.0f, "%", } };
             default: return { { "SIZE", 0.0f, 1.0f, "" }, { "DAMP", 0.0f, 1.0f, "" }, { "MIX", 0.0f, 1.0f, "%" } };
         }
@@ -110,7 +127,7 @@ struct MainComponent::FxBar final : public juce::Component
     {
         for (int i = 0; i < 3; ++i)
             targetButtons[static_cast<std::size_t>(i)].setToggleState(i == target, juce::dontSendNotification);
-        for (int i = 0; i < 4; ++i)
+        for (int i = 0; i < numEffects; ++i)
         {
             auto& button = effectButtons[static_cast<std::size_t>(i)];
             button.setVisible(target != 2);
@@ -158,21 +175,23 @@ struct MainComponent::FxBar final : public juce::Component
     void resized() override
     {
         auto row = getLocalBounds().reduced(10, 8);
-        auto tabs = row.removeFromLeft(150);
+        auto tabs = row.removeFromLeft(248);
         tabs.removeFromTop(2);
         auto targetRow = tabs.removeFromTop(26);
         for (int i = 0; i < 3; ++i)
         {
-            targetButtons[static_cast<std::size_t>(i)].setBounds(targetRow.removeFromLeft(46));
+            if (i == 1)
+                continue;
+            targetButtons[static_cast<std::size_t>(i)].setBounds(targetRow.removeFromLeft(112));
             targetRow.removeFromLeft(4);
         }
         auto effectRow = tabs.removeFromTop(26);
-        for (int i = 0; i < 4; ++i)
+        for (int i = 0; i < numEffects; ++i)
         {
             if (effectButtons[static_cast<std::size_t>(i)].isVisible())
             {
-                effectButtons[static_cast<std::size_t>(i)].setBounds(effectRow.removeFromLeft(46));
-                effectRow.removeFromLeft(4);
+                effectButtons[static_cast<std::size_t>(i)].setBounds(effectRow.removeFromLeft(38));
+                effectRow.removeFromLeft(3);
             }
         }
         enable.setBounds(row.removeFromLeft(64).removeFromTop(30));
@@ -196,7 +215,9 @@ struct MainComponent::FxBar final : public juce::Component
     }
 
     std::array<juce::TextButton, 3> targetButtons;
-    std::array<juce::TextButton, 4> effectButtons;
+    // Effect tab order mirrors the signal chain; indices are the fxEffect ids.
+    static constexpr int numEffects = 6;
+    std::array<juce::TextButton, numEffects> effectButtons;
     juce::TextButton enable;
     std::array<juce::Slider, 4> knobs;
     std::array<juce::Label, 4> knobLabels;
@@ -369,6 +390,562 @@ struct MainComponent::KitPanel final : public juce::Component
     std::function<void()> onClose, onPresetSave, onPresetDelete;
     std::function<void(int)> onPresetLoad;
 };
+
+// Sound designer for the editable synth (instrument 0). Edits stream straight
+// to the engine, so held notes and the performance keyboard play the new sound
+// immediately; drag gestures and combo changes each form one undo step.
+struct MainComponent::SynthPanel final : public juce::Component
+{
+    struct Knob
+    {
+        const char* group;
+        const char* name;
+        float SynthParams::*field;
+        float min, max, skewMid;
+        const char* suffix;
+        int x, y;
+    };
+    static const std::vector<Knob>& layout()
+    {
+        static const std::vector<Knob> knobs {
+            { "OSC 2", "LEVEL", &SynthParams::mix2, 0.0f, 1.0f, 0.0f, "%", 470, 72 },
+            { "OSC 2", "SEMI", &SynthParams::semis2, -24.0f, 24.0f, 0.0f, "st", 540, 72 },
+            { "OSC 2", "FINE", &SynthParams::detune2, -50.0f, 50.0f, 0.0f, "ct", 610, 72 },
+            { "CHARACTER", "DRIVE", &SynthParams::drive, 0.0f, 1.0f, 0.0f, "%", 700, 72 },
+            { "CHARACTER", "CHORUS", &SynthParams::chorus, 0.0f, 1.0f, 0.0f, "%", 770, 72 },
+            { "CHARACTER", "LEVEL", &SynthParams::level, 0.0f, 1.5f, 0.0f, "%", 840, 72 },
+            { "FILTER", "CUTOFF", &SynthParams::cutoff, 40.0f, 20000.0f, 1000.0f, "Hz", 24, 212 },
+            { "FILTER", "RESO", &SynthParams::resonance, 0.0f, 0.95f, 0.0f, "%", 94, 212 },
+            { "FILTER", "ENV", &SynthParams::envAmount, -4.0f, 4.0f, 0.0f, "oct", 164, 212 },
+            { "FILTER ENVELOPE", "ATTACK", &SynthParams::filterAttack, 0.001f, 5.0f, 0.3f, "s", 264, 212 },
+            { "FILTER ENVELOPE", "DECAY", &SynthParams::filterDecay, 0.001f, 5.0f, 0.5f, "s", 334, 212 },
+            { "FILTER ENVELOPE", "SUSTAIN", &SynthParams::filterSustain, 0.0f, 1.0f, 0.0f, "%", 404, 212 },
+            { "FILTER ENVELOPE", "RELEASE", &SynthParams::filterRelease, 0.001f, 5.0f, 0.5f, "s", 474, 212 },
+            { "LFO", "RATE", &SynthParams::lfoRate, 0.1f, 20.0f, 4.0f, "Hz", 574, 212 },
+            { "LFO", "VIBRATO", &SynthParams::lfoPitch, 0.0f, 2.0f, 0.0f, "st", 644, 212 },
+            { "LFO", "WOBBLE", &SynthParams::lfoFilter, 0.0f, 4.0f, 0.0f, "oct", 714, 212 },
+            { "AMP ENVELOPE", "ATTACK", &SynthParams::attack, 0.001f, 5.0f, 0.3f, "s", 24, 346 },
+            { "AMP ENVELOPE", "DECAY", &SynthParams::decay, 0.001f, 5.0f, 0.5f, "s", 94, 346 },
+            { "AMP ENVELOPE", "SUSTAIN", &SynthParams::sustain, 0.0f, 1.0f, 0.0f, "%", 164, 346 },
+            { "AMP ENVELOPE", "RELEASE", &SynthParams::release, 0.001f, 5.0f, 0.5f, "s", 234, 346 },
+        };
+        return knobs;
+    }
+
+    SynthPanel(std::function<void(const SynthParams&)> changeCb, std::function<void()> dragStartCb,
+               std::function<void()> dragEndCb, std::function<void(int)> patchCb, std::function<void()> closeCb)
+        : onChange(std::move(changeCb)), onDragStart(std::move(dragStartCb)), onDragEnd(std::move(dragEndCb)),
+          onPatch(std::move(patchCb)), onClose(std::move(closeCb))
+    {
+        addAndMakeVisible(patchBox);
+        patchBox.setTextWhenNothingSelected("Custom sound");
+        for (std::size_t i = 0; i < synthPatches().size(); ++i)
+            patchBox.addItem(synthPatches()[i].name, static_cast<int>(i) + 1);
+        patchBox.setWantsKeyboardFocus(false);
+        patchBox.setTooltip("Start from a factory sound, then shape it with the knobs (undoable).");
+        patchBox.onChange = [this] {
+            const int id = patchBox.getSelectedId();
+            if (id > 0 && onPatch)
+                onPatch(id - 1);
+        };
+        for (auto* box : { &wave1, &wave2 })
+        {
+            addAndMakeVisible(box);
+            for (int wave = 0; wave < numSynthWaves; ++wave)
+                box->addItem(synthWaveName(wave), wave + 1);
+            box->setWantsKeyboardFocus(false);
+            box->onChange = [this] {
+                if (loading)
+                    return;
+                params.wave = std::max(0, wave1.getSelectedId() - 1);
+                params.wave2 = std::max(0, wave2.getSelectedId() - 1);
+                if (onDragStart) onDragStart();
+                publish();
+                if (onDragEnd) onDragEnd();
+            };
+        }
+        wave1.setTooltip("Main oscillator shape. Sine is pure; triangle soft; saw bright; square hollow.");
+        wave2.setTooltip("Second oscillator shape. Raise OSC 2 LEVEL to blend it in.");
+        const auto& spec = layout();
+        knobs.resize(spec.size());
+        for (std::size_t i = 0; i < spec.size(); ++i)
+        {
+            auto& knob = knobs[i];
+            knob.slider = std::make_unique<juce::Slider>();
+            knob.label = std::make_unique<juce::Label>();
+            addAndMakeVisible(knob.slider.get());
+            addAndMakeVisible(knob.label.get());
+            auto& slider = *knob.slider;
+            slider.setSliderStyle(juce::Slider::RotaryVerticalDrag);
+            slider.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+            slider.setWantsKeyboardFocus(false);
+            slider.setRange(spec[i].min, spec[i].max, 0.0);
+            if (spec[i].skewMid > 0.0f)
+                slider.setSkewFactorFromMidPoint(spec[i].skewMid);
+            slider.setDoubleClickReturnValue(true, static_cast<double>(SynthParams {}.*spec[i].field));
+            slider.setColour(juce::Slider::thumbColourId, ui::cyan);
+            slider.onDragStart = [this] { if (onDragStart) onDragStart(); };
+            slider.onDragEnd = [this] { if (onDragEnd) onDragEnd(); };
+            slider.onValueChange = [this, i] {
+                if (loading)
+                    return;
+                params.*layout()[i].field = static_cast<float>(knobs[i].slider->getValue());
+                publish();
+            };
+            knob.label->setFont(ui::font(9.0f, true, 0.08f));
+            knob.label->setColour(juce::Label::textColourId, ui::muted);
+            knob.label->setJustificationType(juce::Justification::centred);
+            knob.label->setInterceptsMouseClicks(false, false);
+        }
+        close.setButtonText("Done");
+        close.setWantsKeyboardFocus(false);
+        addAndMakeVisible(close);
+        close.onClick = [this] { if (onClose) onClose(); };
+        addAndMakeVisible(hint);
+        hint.setFont(ui::font(11.0f));
+        hint.setColour(juce::Label::textColourId, ui::muted);
+        hint.setText("Play the keys or your MIDI controller while you tweak. Double-click a knob to reset it. "
+                     "TRACK effects below add EQ, compression, delay, and reverb.",
+                     juce::dontSendNotification);
+        setSize(920, 470);
+    }
+
+    void refresh(const SynthParams& value, const juce::String& trackName)
+    {
+        loading = true;
+        params = value;
+        title = trackName;
+        wave1.setSelectedId(params.wave + 1, juce::dontSendNotification);
+        wave2.setSelectedId(params.wave2 + 1, juce::dontSendNotification);
+        int patch = 0;
+        for (std::size_t i = 0; i < synthPatches().size(); ++i)
+            if (synthPatches()[i].params == params)
+                patch = static_cast<int>(i) + 1;
+        patchBox.setSelectedId(patch, juce::dontSendNotification);
+        for (std::size_t i = 0; i < knobs.size(); ++i)
+            knobs[i].slider->setValue(params.*layout()[i].field, juce::dontSendNotification);
+        refreshLabels();
+        loading = false;
+        repaint();
+    }
+
+    void publish()
+    {
+        refreshLabels();
+        int patch = 0;
+        for (std::size_t i = 0; i < synthPatches().size(); ++i)
+            if (synthPatches()[i].params == params)
+                patch = static_cast<int>(i) + 1;
+        patchBox.setSelectedId(patch, juce::dontSendNotification);
+        repaint(previewArea());
+        if (onChange)
+            onChange(params);
+    }
+
+    void refreshLabels()
+    {
+        for (std::size_t i = 0; i < knobs.size(); ++i)
+        {
+            const auto& spec = layout()[i];
+            const float value = params.*spec.field;
+            const juce::String suffix(spec.suffix);
+            juce::String text;
+            if (suffix == "%")
+                text = juce::String(juce::roundToInt(value * 100.0f)) + "%";
+            else if (suffix == "s")
+                text = value < 1.0f ? juce::String(juce::roundToInt(value * 1000.0f)) + " ms" : juce::String(value, 2) + " s";
+            else if (suffix == "Hz" && value >= 1000.0f)
+                text = juce::String(value / 1000.0f, value >= 10000.0f ? 1 : 2) + " kHz";
+            else if (suffix == "st" || suffix == "ct" || suffix == "oct")
+                text = (value > 0.0f ? "+" : "") + juce::String(value, suffix == "oct" ? 1 : 0) + " " + suffix;
+            else
+                text = juce::String(value, value >= 100.0f ? 0 : 1) + " " + suffix;
+            knobs[i].label->setText(juce::String(spec.name) + "\n" + text, juce::dontSendNotification);
+        }
+    }
+
+    juce::Rectangle<int> previewArea() const { return { 24, 72, 286, 96 }; }
+
+    void resized() override
+    {
+        patchBox.setBounds(getWidth() - 360, 16, 200, 28);
+        close.setBounds(getWidth() - 100, 16, 76, 28);
+        wave1.setBounds(330, 88, 120, 26);
+        wave2.setBounds(330, 130, 120, 26);
+        const auto& spec = layout();
+        for (std::size_t i = 0; i < knobs.size(); ++i)
+        {
+            knobs[i].slider->setBounds(spec[i].x + 4, spec[i].y, 56, 56);
+            knobs[i].label->setBounds(spec[i].x - 4, spec[i].y + 56, 72, 26);
+        }
+        hint.setBounds(330, 350, getWidth() - 354, 60);
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        ui::surface(g, getLocalBounds().toFloat(), 12.0f);
+        ui::caption(g, "SYNTH ENGINE  /  " + title.toUpperCase(), { 24, 16, 460, 26 }, ui::text, 13.0f);
+        ui::caption(g, "PATCH", { getWidth() - 420, 16, 56, 28 }, ui::muted, 9.0f);
+        ui::caption(g, "WAVEFORM", { 24, 52, 200, 16 }, ui::cyan, 9.0f);
+        ui::caption(g, "OSC 1", { 330, 72, 120, 16 }, ui::cyan, 9.0f);
+        ui::caption(g, "OSC 2", { 330, 114, 120, 16 }, ui::cyan, 9.0f);
+        juce::String last;
+        const auto& spec = layout();
+        for (const auto& knob : spec)
+            if (last != knob.group)
+            {
+                last = knob.group;
+                ui::caption(g, knob.group, { knob.x + 4, knob.y - 20, 220, 16 }, ui::cyan, 9.0f);
+            }
+        // One and a half cycles of the combined oscillators, through the drive.
+        const auto area = previewArea().toFloat();
+        g.setColour(ui::background);
+        g.fillRoundedRectangle(area, 8.0f);
+        g.setColour(ui::border);
+        g.drawRoundedRectangle(area, 8.0f, 1.0f);
+        g.drawHorizontalLine(static_cast<int>(area.getCentreY()), area.getX() + 6, area.getRight() - 6);
+        auto shape = [](int wave, double t) {
+            t -= std::floor(t);
+            switch (wave)
+            {
+                case WaveSine: return std::sin(t * juce::MathConstants<double>::twoPi);
+                case WaveTriangle: return 4.0 * std::abs(t - 0.5) - 1.0;
+                case WaveSaw: return 0.8 * (2.0 * t - 1.0);
+                default: return t < 0.5 ? 0.6 : -0.6;
+            }
+        };
+        const double ratio = std::pow(2.0, (params.semis2 + params.detune2 / 100.0) / 12.0);
+        const float driveGain = 1.0f + params.drive * 24.0f;
+        std::vector<float> points;
+        const int n = static_cast<int>(area.getWidth()) - 12;
+        float maxAbs = 1.0e-6f;
+        for (int i = 0; i <= n; ++i)
+        {
+            const double t = 1.5 * i / n;
+            auto v = static_cast<float>(shape(params.wave, t) + params.mix2 * shape(params.wave2, t * ratio));
+            if (params.drive > 0.0f)
+                v = std::tanh(v * driveGain);
+            points.push_back(v);
+            maxAbs = std::max(maxAbs, std::abs(v));
+        }
+        juce::Path path;
+        const float scale = (area.getHeight() * 0.5f - 10.0f) / std::max(1.0f, maxAbs);
+        for (int i = 0; i <= n; ++i)
+        {
+            const float x = area.getX() + 6.0f + static_cast<float>(i);
+            const float y = area.getCentreY() - points[static_cast<std::size_t>(i)] * scale;
+            if (i == 0) path.startNewSubPath(x, y); else path.lineTo(x, y);
+        }
+        g.setColour(ui::cyan);
+        g.strokePath(path, juce::PathStrokeType(2.0f, juce::PathStrokeType::curved));
+    }
+
+    struct KnobUi
+    {
+        std::unique_ptr<juce::Slider> slider;
+        std::unique_ptr<juce::Label> label;
+    };
+    SynthParams params;
+    juce::String title;
+    bool loading = false;
+    std::vector<KnobUi> knobs;
+    juce::ComboBox patchBox, wave1, wave2;
+    juce::TextButton close;
+    juce::Label hint;
+    std::function<void(const SynthParams&)> onChange;
+    std::function<void()> onDragStart, onDragEnd;
+    std::function<void(int)> onPatch;
+    std::function<void()> onClose;
+};
+
+void MainComponent::refreshSynthPanel()
+{
+    if (synthPanel == nullptr)
+        return;
+    const auto& track = project.tracks[static_cast<std::size_t>(selectedTrack)];
+    synthPanel->refresh(track.synth, track.trackName());
+}
+
+void MainComponent::applySynthPatch(int patch)
+{
+    if (patch < 0 || patch >= static_cast<int>(synthPatches().size()))
+        return;
+    auto& track = project.tracks[static_cast<std::size_t>(selectedTrack)];
+    if (track.kind != TrackKind::Synth)
+        return;
+    beginEdit();
+    track.synth = synthPatches()[static_cast<std::size_t>(patch)].params;
+    track.instrumentPreset = 0;
+    if (isGeneratedTrackName(track.trackName()))
+        track.setTrackName(synthPatches()[static_cast<std::size_t>(patch)].name);
+    projectChanged();
+    endEdit();
+    refreshSynthPanel();
+    repaint();
+}
+
+// Runs one AI request off the message thread. The job posts its own result
+// back to the message thread (callAsync) when it finishes.
+struct MainComponent::AssistantWorker final : public juce::Thread
+{
+    explicit AssistantWorker(std::function<void(const std::atomic<bool>*)> jobIn)
+        : juce::Thread("Sonora AI assistant"), job(std::move(jobIn))
+    {
+    }
+    void run() override { job(&cancel); }
+    std::function<void(const std::atomic<bool>*)> job;
+    std::atomic<bool> cancel { false };
+};
+
+bool MainComponent::sidebarOpen() const { return aiSidebar != nullptr && aiSidebar->isVisible(); }
+
+void MainComponent::toggleAiSidebar()
+{
+    if (aiSidebar == nullptr)
+        return;
+    const bool opening = !aiSidebar->isVisible();
+    if (opening)
+    {
+        claudeAvailable = ai::findClaudeExecutable() != juce::File();
+        for (juce::Component* panel : std::initializer_list<juce::Component*> { kitPanel.get(), synthPanel.get() })
+            if (panel != nullptr)
+                panel->setVisible(false);
+    }
+    aiSidebar->setVisible(opening);
+    demo.setToggleState(opening, juce::dontSendNotification);
+    refreshAiSidebar();
+    resized();
+    repaint();
+    if (opening)
+    {
+        aiSidebar->toFront(false);
+        aiSidebar->focusInput();
+    }
+}
+
+void MainComponent::refreshAiSidebar()
+{
+    if (!sidebarOpen())
+        return;
+    const juce::String reason = !claudeAvailable
+        ? "Claude Code was not found. Install it and run `claude` once in a terminal to sign in."
+        : "Select an instrument or drum track to work on.";
+    // Song view: the assistant composes the whole song.
+    if (project.songMode)
+    {
+        int tracks = 0;
+        for (const auto& track : project.tracks)
+            tracks += track.kind != TrackKind::None ? 1 : 0;
+        aiSidebar->setContext("Whole song", juce::String(project.song.sections) + " parts  /  "
+                                  + juce::String(project.song.sections * 4) + " bars  /  " + juce::String(tracks)
+                                  + (tracks == 1 ? " track" : " tracks"),
+                              AiSidebar::Mode::Song, claudeAvailable && tracks > 0,
+                              claudeAvailable ? juce::String("Add a track with some loops first.") : reason);
+        if (chatTrackId != songChatId)
+        {
+            if (aiSidebar->hasMessages())
+                aiSidebar->addMessage({ AiSidebar::Message::Role::Info, "Now arranging the whole song." });
+            chatTrackId = songChatId;
+        }
+        return;
+    }
+    const auto sel = static_cast<std::size_t>(std::clamp(selectedTrack, 0, maxTracks - 1));
+    const auto& track = project.tracks[sel];
+    const bool usable = !audioSelected && track.kind != TrackKind::None;
+    const bool drums = track.kind == TrackKind::Drums;
+    const int part = editPart;
+    const bool inPart = part >= 0 && part < project.song.sections;
+    const int slot = inPart ? project.song.slots[static_cast<std::size_t>(part)][sel]
+                            : (drums ? trackDrumSlot[sel] : trackMelodySlot[sel]);
+    juce::String detail = inPart
+        ? juce::String(songPartName(project.song.parts[static_cast<std::size_t>(part)])) + "  /  part "
+              + juce::String(part + 1) + ", bars " + juce::String(part * 4 + 1) + "-" + juce::String(part * 4 + 4)
+        : juce::String("Free loop");
+    detail << "  /  loop " << juce::String::charToString(static_cast<juce::juce_wchar>('A' + slot));
+    if (inPart && !project.song.trackOn[static_cast<std::size_t>(part)][sel])
+        detail << "  (silent in this part)";
+    aiSidebar->setContext(usable ? track.trackName() : juce::String("No track selected"), usable ? detail : juce::String(),
+                          drums ? AiSidebar::Mode::Drums : AiSidebar::Mode::Melody, usable && claudeAvailable, reason);
+    // Switching tracks mid-conversation: note it so the transcript stays clear.
+    if (usable && track.id != chatTrackId)
+    {
+        if (chatTrackId != 0 && aiSidebar->hasMessages())
+            aiSidebar->addMessage({ AiSidebar::Message::Role::Info, "Now working on " + track.trackName() + "." });
+        chatTrackId = track.id;
+    }
+}
+
+void MainComponent::startAiJob(std::function<void(const std::atomic<bool>*)> job)
+{
+    assistantWorker = std::make_unique<AssistantWorker>(std::move(job));
+    assistantStartedAt = juce::Time::getMillisecondCounter();
+    aiSidebar->setBusy(true);
+    aiSidebar->setStatus("Thinking...");
+    assistantWorker->startThread();
+}
+
+void MainComponent::finishAiJob()
+{
+    if (assistantWorker != nullptr)
+    {
+        assistantWorker->stopThread(2000);
+        assistantWorker.reset();
+    }
+    assistantStartedAt = 0;
+    if (aiSidebar != nullptr)
+        aiSidebar->setBusy(false);
+}
+
+void MainComponent::sendToAssistant(const juce::String& text)
+{
+    if (assistantWorker != nullptr)
+        return;
+    auto safe = juce::Component::SafePointer<MainComponent>(this);
+    if (project.songMode)
+    {
+        ai::SongRequest request;
+        request.message = text;
+        request.project = project;
+        request.history = songHistory;
+        songHistory.push_back({ true, text });
+        aiSidebar->addMessage({ AiSidebar::Message::Role::User, text });
+        // Track ids at send time: new loops only land on the same tracks.
+        std::array<juce::uint32, maxTracks> ids {};
+        for (int t = 0; t < maxTracks; ++t)
+            ids[static_cast<std::size_t>(t)] = project.tracks[static_cast<std::size_t>(t)].id;
+        startAiJob([safe, request, ids](const std::atomic<bool>* cancel) {
+            auto result = ai::runSongComposer(request, cancel);
+            juce::MessageManager::callAsync([safe, result, ids] {
+                if (safe != nullptr)
+                    safe->songComposerFinished(result, ids);
+            });
+        });
+        aiSidebar->setStatus("Composing the song... (this can take a minute)");
+        return;
+    }
+    if (audioSelected)
+        return;
+    const auto sel = static_cast<std::size_t>(std::clamp(selectedTrack, 0, maxTracks - 1));
+    if (project.tracks[sel].kind == TrackKind::None)
+        return;
+    ai::AssistantRequest request;
+    request.message = text;
+    request.project = project;
+    request.track = selectedTrack;
+    request.part = editPart;
+    request.melodySlots = trackMelodySlot;
+    request.drumSlots = trackDrumSlot;
+    request.history = chatHistory;
+    const int slot = ai::assistantTargetSlot(request);
+    const auto trackId = project.tracks[sel].id;
+    chatHistory.push_back({ true, text });
+    aiSidebar->addMessage({ AiSidebar::Message::Role::User, text });
+    startAiJob([safe, request, trackId, slot](const std::atomic<bool>* cancel) {
+        auto result = ai::runAssistant(request, cancel);
+        juce::MessageManager::callAsync([safe, result, trackId, slot] {
+            if (safe != nullptr)
+                safe->assistantFinished(result, trackId, slot);
+        });
+    });
+}
+
+void MainComponent::assistantFinished(const ai::AssistantResult& result, juce::uint32 trackId, int slot)
+{
+    finishAiJob();
+    if (aiSidebar == nullptr)
+        return;
+    using Role = AiSidebar::Message::Role;
+    if (!result.ok())
+    {
+        aiSidebar->addMessage({ result.error == "Cancelled." ? Role::Info : Role::Error, result.error });
+        return;
+    }
+    juce::String applied;
+    if (result.changed)
+    {
+        // Find the track again by stable id: it may have moved or changed.
+        int target = -1;
+        for (int index = 0; index < maxTracks; ++index)
+        {
+            const auto& track = project.tracks[static_cast<std::size_t>(index)];
+            if (track.id == trackId && (track.kind == TrackKind::Drums) == result.drums && track.kind != TrackKind::None)
+                target = index;
+        }
+        if (target < 0)
+            aiSidebar->addMessage({ Role::Error, "That track was removed or changed type, so nothing was applied." });
+        else
+        {
+            beginEdit();
+            auto& track = project.tracks[static_cast<std::size_t>(target)];
+            const auto s = static_cast<std::size_t>(std::clamp(slot, 0, numPatterns - 1));
+            if (result.drums)
+                track.drumPatterns[s] = result.drumPattern;
+            else
+                track.melodies[s] = result.pattern;
+            projectChanged();
+            endEdit();
+            const auto letter = juce::String::charToString(static_cast<juce::juce_wchar>('A' + slot));
+            applied = result.count() == 0 ? "Cleared loop " + letter + "."
+                : "Applied to loop " + letter + ": " + juce::String(result.count()) + (result.drums ? " hits." : " notes.");
+        }
+    }
+    aiSidebar->addMessage({ Role::Assistant, result.reply });
+    if (applied.isNotEmpty())
+    {
+        aiSidebar->addMessage({ Role::Info, applied + " Press Play to hear it; Undo (Ctrl+Z) restores the old one." });
+        status.setText("AI assistant: " + applied, juce::dontSendNotification);
+    }
+    chatHistory.push_back({ false, result.reply + (applied.isNotEmpty() ? " [" + applied + "]" : juce::String()) });
+}
+
+void MainComponent::songComposerFinished(const ai::SongResult& result, const std::array<juce::uint32, maxTracks>& ids)
+{
+    finishAiJob();
+    if (aiSidebar == nullptr)
+        return;
+    using Role = AiSidebar::Message::Role;
+    if (!result.ok())
+    {
+        aiSidebar->addMessage({ result.error == "Cancelled." ? Role::Info : Role::Error, result.error });
+        return;
+    }
+    aiSidebar->addMessage({ Role::Assistant, result.reply });
+    if (!result.changed)
+    {
+        songHistory.push_back({ false, result.reply });
+        return;
+    }
+    // The arrangement refers to tracks by position: if tracks were added,
+    // removed, or reordered while Claude worked, it no longer fits.
+    for (int t = 0; t < maxTracks; ++t)
+        if (project.tracks[static_cast<std::size_t>(t)].id != ids[static_cast<std::size_t>(t)])
+        {
+            aiSidebar->addMessage({ Role::Error, "The track list changed while I was composing, so nothing was applied. "
+                                                 "Ask again to compose for the current tracks." });
+            return;
+        }
+    beginEdit();
+    ai::applySongResult(project, result);
+    songStartPart = 0;
+    editPart = -1;
+    engine.stop();
+    projectChanged();
+    endEdit();
+    juce::StringArray loops;
+    for (const auto& write : result.writes)
+        loops.add(project.tracks[static_cast<std::size_t>(write.track)].trackName() + " loop "
+                  + juce::String::charToString(static_cast<juce::juce_wchar>('A' + write.slot)));
+    juce::String applied = "New arrangement: " + juce::String(result.song.sections) + " parts ("
+        + juce::String(result.song.sections * 4) + " bars).";
+    if (!loops.isEmpty())
+        applied << " New variation loops: " << loops.joinIntoString(", ") << ".";
+    if (!result.skipped.isEmpty())
+        applied << " I " << result.skipped.joinIntoString("; ") << ".";
+    aiSidebar->addMessage({ Role::Info, applied + " Press Play to hear it from the top; Undo (Ctrl+Z) restores your "
+                                                  "previous song in one step." });
+    status.setText("AI assistant: " + applied, juce::dontSendNotification);
+    songHistory.push_back({ false, result.reply + " [" + applied + "]" });
+}
 
 void MainComponent::refreshKitPanel()
 {
@@ -938,16 +1515,57 @@ MainComponent::MainComponent()
              &panic, &keyboard, &pianoRoll, &play, &stop, &record, &undo, &redo, &newProject,
              &open, &save, &saveAs, &exportButton, &clear, &demo, &tempo, &drumSequencer,
              &audioTab, &mute, &solo, &trackVolume, &repeatBar, &kitButton, &outputMeter,
-             &songMode, &addSection, &removeSection, &duplicatePattern })
+             &loopView, &songView, &duplicatePattern })
         addAndMakeVisible(component);
+    for (auto* component : std::initializer_list<juce::Component*> { &songTemplate, &partChoice, &partTrackOn, &partHint })
+        addChildComponent(component);
+    arrangement = std::make_unique<ArrangementView>();
+    addChildComponent(arrangement.get());
+    arrangement->onAction = [this](const ArrangementAction& action) { handleArrangementAction(action); };
+    arrangement->onGestureBegin = [this] { beginEdit(); };
+    arrangement->onGestureEnd = [this] { endEdit(); };
     for (auto& button : trackButtons)
         addAndMakeVisible(button);
     addAndMakeVisible(addTrack);
+    addAndMakeVisible(instrumentChoice);
+    juce::String family;
+    for (std::size_t i = 0; i < instruments.size(); ++i)
+    {
+        const auto& preset = instruments[i];
+        if (family != preset.family)
+        {
+            family = preset.family;
+            instrumentChoice.addSectionHeading(family);
+        }
+        // Item 0 is the editable synth; its saved name stays "Sine Keys" so
+        // existing tracks keep following instrument/patch renames.
+        instrumentChoice.addItem(i == 0 ? juce::String("Sonora Synth (editable)") : juce::String(preset.name),
+                                 static_cast<int>(i) + 1);
+        if (i > 0 && !engine.instrumentsAvailable())
+            instrumentChoice.setItemEnabled(static_cast<int>(i) + 1, false);
+    }
+    instrumentChoice.setTooltip(engine.instrumentsAvailable()
+        ? "Choose this track's instrument. Notes stay the same; TRACK effects shape the selected sound."
+        : "Sound bank missing: reinstall GeneralUser-GS.sf2 with Sonora to enable sampled instruments.");
+    instrumentChoice.onChange = [this] {
+        const int choice = instrumentChoice.getSelectedId() - 1;
+        auto& track = project.tracks[static_cast<std::size_t>(selectedTrack)];
+        if (audioSelected || track.kind != TrackKind::Synth || !validInstrument(choice)
+            || track.instrumentPreset == choice)
+            return;
+        beginEdit();
+        if (isGeneratedTrackName(track.trackName()))
+            track.setTrackName(instruments[static_cast<std::size_t>(choice)].name);
+        track.instrumentPreset = choice;
+        engine.keyboardState.allNotesOff(0);
+        projectChanged();
+        endEdit();
+        repaint();
+    };
     for (auto& tab : patternTabs)
         addAndMakeVisible(tab);
-    for (auto& button : sectionButtons) addAndMakeVisible(button);
     fxBar = std::make_unique<FxBar>(
-        [this](int target) { fxTarget = target; fxEffect = target == 2 ? 0 : fxEffect; refreshFxBar(); },
+        [this](int target) { fxTarget = target; refreshFxBar(); },
         [this](int effect) { fxEffect = effect; refreshFxBar(); },
         [this](bool enabled) { beginEdit(); setFxEnabled(enabled); projectChanged(); endEdit(); },
         [this](int slot) { return getFxParam(slot); },
@@ -969,6 +1587,40 @@ MainComponent::MainComponent()
     addAndMakeVisible(kitPanel.get());
     // NB: addAndMakeVisible shows the component, so hide it afterwards.
     kitPanel->setVisible(false);
+    synthPanel = std::make_unique<SynthPanel>(
+        [this](const SynthParams& params) {
+            auto& track = project.tracks[static_cast<std::size_t>(selectedTrack)];
+            if (track.kind != TrackKind::Synth || track.synth == params)
+                return;
+            // Wheel/double-click edits arrive without a drag: own the undo step.
+            const bool ownGesture = !editing;
+            if (ownGesture) beginEdit();
+            track.synth = params;
+            projectChanged();
+            if (ownGesture) endEdit();
+        },
+        [this] { beginEdit(); },
+        [this] { endEdit(); },
+        [this](int patch) { applySynthPatch(patch); },
+        [this] { synthPanel->setVisible(false); });
+    addAndMakeVisible(synthPanel.get());
+    synthPanel->setVisible(false);
+    addAndMakeVisible(editSynth);
+    editSynth.setWantsKeyboardFocus(false);
+    editSynth.setColour(juce::TextButton::buttonOnColourId, ui::cyan);
+    editSynth.setTooltip("Open the synth engine: waveforms, filter, envelopes, LFO, drive, chorus, and factory patches.");
+    editSynth.onClick = [this] {
+        if (synthPanel->isVisible())
+        {
+            synthPanel->setVisible(false);
+            return;
+        }
+        if (kitPanel != nullptr)
+            kitPanel->setVisible(false);
+        refreshSynthPanel();
+        synthPanel->setVisible(true);
+        synthPanel->toFront(false);
+    };
     kitButton.onClick = [this] {
         if (kitPanel == nullptr)
             return;
@@ -989,7 +1641,7 @@ MainComponent::MainComponent()
              &play, &stop, &record, &panic, &audioSettings, &undo, &redo,
              &newProject, &open, &save, &saveAs, &exportButton, &clear, &demo, &duplicatePattern,
              &audioTab, &mute, &solo, &repeatBar, &kitButton,
-             &songMode, &addSection, &removeSection })
+             &loopView, &songView, &partTrackOn })
         button->setWantsKeyboardFocus(false);
     for (int i = 0; i < numPatterns; ++i)
     {
@@ -1017,76 +1669,64 @@ MainComponent::MainComponent()
             project.tracks[sel].melodies[static_cast<std::size_t>(next)] = project.tracks[sel].melodies[static_cast<std::size_t>(trackMelodySlot[sel])];
             trackMelodySlot[sel] = next;
         }
+        // Working on a song part: that part now uses the new copy.
+        if (editPart >= 0 && editPart < project.song.sections)
+            project.song.slots[static_cast<std::size_t>(editPart)][sel] = static_cast<std::uint8_t>(
+                drumsSelected ? trackDrumSlot[sel] : trackMelodySlot[sel]);
         projectChanged();
         endEdit();
     };
-    songMode.setClickingTogglesState(true);
-    songMode.setColour(juce::TextButton::buttonOnColourId, ui::cyan);
-    songMode.onClick = [this] {
+    for (auto* button : { &loopView, &songView })
+    {
+        button->setClickingTogglesState(false);
+        button->setColour(juce::TextButton::buttonOnColourId, ui::cyan);
+    }
+    loopView.onClick = [this] { setSongView(false); };
+    songView.onClick = [this] { setSongView(true); };
+    loopView.setTooltip("Loop view: write and edit 4-bar patterns. Playback repeats the loop.");
+    songView.setTooltip("Song view: arrange your loops into a song (intro, verse, chorus...). Playback plays the song.");
+    songTemplate.setTextWhenNothingSelected("Song structure...");
+    for (int i = 0; i < static_cast<int>(SongTemplate::numTemplates); ++i)
+        songTemplate.addItem(songTemplateName(static_cast<SongTemplate>(i)), i + 1);
+    songTemplate.setTooltip("Build a whole song structure in one step from your loops (undoable).");
+    songTemplate.onChange = [this] {
+        const int id = songTemplate.getSelectedId();
+        if (id <= 0)
+            return;
+        const auto tpl = static_cast<SongTemplate>(id - 1);
         beginEdit();
-        project.songMode = songMode.getToggleState();
+        project.song = buildSongFromTemplate(project, tpl);
+        songStartPart = 0;
+        editPart = -1;
         engine.stop();
         projectChanged();
         endEdit();
+        songTemplate.setSelectedId(0, juce::dontSendNotification);
+        status.setText("Song structure built: verses use loop A, choruses/drops B, bridges/builds C. "
+                       "Write those loops in Loop view; Undo restores the old arrangement.",
+                       juce::dontSendNotification);
     };
-    songMode.setTooltip("Loop repeats the 4-bar pattern. Song plays arranged sections in order, then stops.");
-    addSection.onClick = [this] {
-        if (project.song.sections >= maxSections) return;
+    partChoice.setTooltip("Pick the song part you are working on: the loop plays exactly that part, "
+                          "and pattern tabs choose which loop this track uses in it.");
+    partChoice.onChange = [this] {
+        const int id = partChoice.getSelectedId();
+        editPart = id >= 2 ? id - 2 : -1;
+        projectChanged();
+    };
+    partTrackOn.setClickingTogglesState(true);
+    partTrackOn.setColour(juce::TextButton::buttonOnColourId, ui::cyan);
+    partTrackOn.setTooltip("Whether the selected track plays in this song part.");
+    partTrackOn.onClick = [this] {
+        if (editPart < 0 || editPart >= project.song.sections)
+            return;
         beginEdit();
-        ++project.song.sections;
-        project.song.trackOn[static_cast<std::size_t>(project.song.sections - 1)][0] = true;
-        project.song.trackOn[static_cast<std::size_t>(project.song.sections - 1)][1] = true;
-        engine.stop(); projectChanged(); endEdit();
+        project.song.trackOn[static_cast<std::size_t>(editPart)][static_cast<std::size_t>(selectedTrack)]
+            = partTrackOn.getToggleState();
+        projectChanged();
+        endEdit();
     };
-    removeSection.onClick = [this] {
-        if (project.song.sections <= 1) return;
-        beginEdit();
-        --project.song.sections;
-        engine.stop(); projectChanged(); endEdit();
-    };
-    for (int s = 0; s < maxSections; ++s)
-    {
-        auto& button = sectionButtons[static_cast<std::size_t>(s)];
-        button.setClickingTogglesState(true);
-        button.setWantsKeyboardFocus(false);
-        button.onClick = [this, s] {
-            const auto track = selectedTrack;
-            const auto t = static_cast<std::size_t>(track);
-            const bool drums = project.tracks[t].kind == TrackKind::Drums;
-            beginEdit();
-            const auto modifiers = juce::ModifierKeys::getCurrentModifiers();
-            // Click toggles the section; Shift-click cycles its pattern slot;
-            // Ctrl-click detaches it into its own library copy (make unique).
-            if (modifiers.isCommandDown())
-            {
-                bool detached = false;
-                if (drums)
-                {
-                    detached = makeDrumSectionUnique(project.song, project.tracks[t].drumPatterns, s, track);
-                    if (detached)
-                        trackDrumSlot[t] = project.song.slots[static_cast<std::size_t>(s)][t];
-                }
-                else
-                {
-                    detached = makeSectionUnique(project.song, project.tracks[t].melodies, s, track);
-                    if (detached)
-                        trackMelodySlot[t] = project.song.slots[static_cast<std::size_t>(s)][t];
-                }
-                if (!detached)
-                    showError("Nothing to detach: this section already stands alone, or every slot is in use.");
-            }
-            else if (modifiers.isShiftDown())
-                project.song.slots[static_cast<std::size_t>(s)][t] =
-                    static_cast<std::uint8_t>((project.song.slots[static_cast<std::size_t>(s)][t] + 1) % numPatterns);
-            else
-            {
-                auto& flag = project.song.trackOn[static_cast<std::size_t>(s)][t];
-                flag = sectionButtons[static_cast<std::size_t>(s)].getToggleState();
-            }
-            projectChanged(); endEdit();
-        };
-        button.setTooltip("Click: section on/off. Shift-click: next pattern. Ctrl-click: make unique.");
-    }
+    partHint.setFont(ui::font(11.0f));
+    partHint.setColour(juce::Label::textColourId, ui::muted);
 
     constexpr char padKeys[] = "QWERASDF";
     for (int pad = 0; pad < drumPads; ++pad)
@@ -1104,17 +1744,18 @@ MainComponent::MainComponent()
     for (int track = 0; track < maxTracks; ++track)
     {
         auto& button = trackButtons[static_cast<std::size_t>(track)];
-        button.getProperties().set("role", "track");
+        button.getProperties().set("role", "trackCompact");
+        button.setTooltip("Click to select; right-click for track options. Drag to reorder (or Alt+Up/Down).");
         button.setClickingTogglesState(true);
         button.setWantsKeyboardFocus(false);
         button.onClick = [this, track] { selectTrackIndex(track); };
         button.addMouseListener(this, false);
     }
-    addTrack.setButtonText("+ track");
+    addTrack.setButtonText("+ / Menu");
     addTrack.setTooltip("Add a synth or drum track (up to 8).");
     addTrack.setWantsKeyboardFocus(false);
     addTrack.onClick = [this] { showAddTrackMenu(); };
-    audioTab.getProperties().set("role", "track");
+    audioTab.setTooltip("Record audio and manage recorded takes. Instrument tracks remain available above.");
     audioTab.getProperties().set("detail", "RECORDER / TAKES");
     audioTab.setColour(juce::TextButton::buttonOnColourId, ui::blue);
     record.setColour(juce::TextButton::buttonOnColourId, ui::danger);
@@ -1125,7 +1766,7 @@ MainComponent::MainComponent()
     panic.setColour(juce::TextButton::buttonOnColourId, ui::danger);
     mute.setColour(juce::TextButton::buttonOnColourId, ui::danger);
     solo.setColour(juce::TextButton::buttonOnColourId, ui::violet);
-    audioTab.onClick = [this] { selectChannel(2); };
+    audioTab.onClick = [this] { selectChannel(-1); };
     mute.setClickingTogglesState(true);
     solo.setClickingTogglesState(true);
     mute.onClick = [this] { beginEdit(); selectedMix().mute = mute.getToggleState(); projectChanged(); endEdit(); };
@@ -1187,8 +1828,24 @@ MainComponent::MainComponent()
         projectChanged();
         endEdit();
     };
-    demo.onClick = [this] { if (drumsSelected) loadDrumDemo(); else loadDemo(); };
-    demo.setTooltip("Replace the selected pattern slot with a four-bar starter (undoable).");
+    demo.setButtonText("AI assistant");
+    demo.setClickingTogglesState(false);
+    demo.setColour(juce::TextButton::buttonOnColourId, ui::cyan);
+    demo.onClick = [this] { toggleAiSidebar(); };
+    demo.setTooltip("Open the AI sidebar (Ctrl+I): chat with Claude to write or change this track's "
+                    "melody or beat. It hears the other tracks in the section you're working on.");
+    aiSidebar = std::make_unique<AiSidebar>();
+    addChildComponent(aiSidebar.get());
+    aiSidebar->onSend = [this](const juce::String& text) { sendToAssistant(text); };
+    aiSidebar->onCancel = [this] { if (assistantWorker != nullptr) assistantWorker->cancel.store(true); };
+    aiSidebar->onClose = [this] { toggleAiSidebar(); };
+    aiSidebar->onNewChat = [this] {
+        if (assistantWorker != nullptr)
+            return;
+        chatHistory.clear();
+        songHistory.clear();
+        aiSidebar->clearMessages();
+    };
     repeatBar.onClick = [this] {
         beginEdit();
         const auto sel = static_cast<std::size_t>(selectedTrack);
@@ -1287,6 +1944,9 @@ MainComponent::MainComponent()
     // One router for all MIDI inputs; auto-connect enables hardware below.
     deviceManager.addMidiInputDeviceCallback({}, this);
     autoConnectMidi();
+    for (auto& value : knobValues)
+        value.store(-1);
+    appliedKnobValues.fill(-1);
     startTimerHz(30);
     juce::MessageManager::callAsync([safe = juce::Component::SafePointer<MainComponent>(this)] {
         if (safe != nullptr)
@@ -1297,6 +1957,15 @@ MainComponent::MainComponent()
 MainComponent::~MainComponent()
 {
     stopTimer();
+    if (miniLabOut != nullptr)
+        miniLabSend(minilab::disconnectDaw());
+    miniLabOut.reset();
+    if (assistantWorker != nullptr)
+    {
+        assistantWorker->cancel.store(true);
+        assistantWorker->stopThread(5000);
+        assistantWorker.reset();
+    }
     delete audioDialog.getComponent();
     chooser.reset();
     if (recording)
@@ -1404,18 +2073,112 @@ void MainComponent::handleIncomingMidiMessage(juce::MidiInput* source, const juc
                         break;
                     case midi::McuAction::Record: safe->toggleRecord(); break;
                     case midi::McuAction::ToggleLoop:
-                        safe->beginEdit();
-                        safe->project.songMode = !safe->project.songMode;
-                        safe->engine.stop();
-                        safe->projectChanged();
-                        safe->endEdit();
+                        safe->setSongView(!safe->project.songMode);
                         break;
                     case midi::McuAction::None: break;
                 }
             });
         return;
     }
+    if (message.isSysEx())
+    {
+        minilab::Bytes bytes(message.getRawData(), message.getRawData() + message.getRawDataSize());
+        juce::MessageManager::callAsync([safe = juce::Component::SafePointer<MainComponent>(this), bytes] {
+            if (safe != nullptr)
+                safe->handleMiniLabSysex(bytes);
+        });
+        return;
+    }
+    // MiniLab encoders drive the selected instrument's effect knobs instead
+    // of reaching the synth (keeps CC 74/71 from also altering sampled voices).
+    if (message.isController() && message.getChannel() != 10)
+    {
+        const int knob = knobIndexForController(message.getControllerNumber());
+        if (knob >= 0)
+        {
+            knobValues[static_cast<std::size_t>(knob)].store(message.getControllerValue(), std::memory_order_relaxed);
+            knobSerial.fetch_add(1, std::memory_order_release);
+            return;
+        }
+    }
     engine.midiCollector.handleIncomingMidiMessage(source, message);
+}
+
+void MainComponent::applyKnobChanges()
+{
+    const auto t = static_cast<std::size_t>(std::clamp(selectedTrack, 0, maxTracks - 1));
+    auto& track = project.tracks[t];
+    if (track.kind == TrackKind::None)
+        return;
+    const auto map = knobMapFor(track);
+    int turned = -1;
+    for (int knob = 0; knob < 8; ++knob)
+    {
+        const int value = knobValues[static_cast<std::size_t>(knob)].load(std::memory_order_relaxed);
+        if (value < 0 || value == appliedKnobValues[static_cast<std::size_t>(knob)])
+            continue;
+        appliedKnobValues[static_cast<std::size_t>(knob)] = value;
+        if (turned < 0 && !knobGesture && !editing)
+        {
+            beginEdit();
+            knobGesture = true;
+        }
+        applyKnob(track, map[static_cast<std::size_t>(knob)].target, static_cast<float>(value) / 127.0f);
+        turned = knob;
+    }
+    if (turned < 0)
+        return;
+    const auto now = juce::Time::getMillisecondCounter();
+    knobIdleUntil = now + 600;
+    knobHighlightUntil = now + 1500;
+    knobScreenUntil = now + 2000;
+    lastKnob = turned;
+    refreshMiniLabDisplay(false);
+    projectChanged();
+    if (synthPanel != nullptr && synthPanel->isVisible())
+        refreshSynthPanel();
+    status.setText("Knob " + juce::String(turned + 1) + "  /  " + track.trackName() + "  /  "
+                   + map[static_cast<std::size_t>(turned)].label + " "
+                   + knobValueText(track, map[static_cast<std::size_t>(turned)].target),
+                   juce::dontSendNotification);
+    repaint(knobStripArea());
+}
+
+juce::Rectangle<int> MainComponent::knobStripArea() const
+{
+    return { 540, getHeight() - 172, contentWidth() - 580, 30 };
+}
+
+void MainComponent::paintKnobStrip(juce::Graphics& g)
+{
+    if (audioSelected)
+        return;
+    const auto& track = project.tracks[static_cast<std::size_t>(std::clamp(selectedTrack, 0, maxTracks - 1))];
+    if (track.kind == TrackKind::None)
+        return;
+    const auto area = knobStripArea();
+    const auto map = knobMapFor(track);
+    const bool highlight = juce::Time::getMillisecondCounter() < knobHighlightUntil;
+    const auto accent = trackColour(track.icon);
+    const float chip = static_cast<float>(area.getWidth()) / 8.0f;
+    ui::caption(g, "KNOBS", { area.getX() - 50, area.getY() + 3, 46, 20 }, ui::muted, 9.0f);
+    for (int knob = 0; knob < 8; ++knob)
+    {
+        const auto& slot = map[static_cast<std::size_t>(knob)];
+        const auto cell = juce::Rectangle<float>(static_cast<float>(area.getX()) + chip * static_cast<float>(knob),
+                                                 static_cast<float>(area.getY()) + 4.0f, chip - 6.0f, 22.0f);
+        const bool hot = highlight && knob == lastKnob;
+        g.setColour((hot ? accent.withAlpha(0.18f) : ui::raised.withAlpha(0.6f)));
+        g.fillRoundedRectangle(cell, 5.0f);
+        const float knobAt = juce::jlimit(0.0f, 1.0f, knobPosition(track, slot.target));
+        g.setColour(accent.withAlpha(hot ? 0.95f : 0.55f));
+        g.fillRoundedRectangle(cell.getX() + 4.0f, cell.getBottom() - 4.0f, (cell.getWidth() - 8.0f) * knobAt, 2.0f, 1.0f);
+        juce::String text = juce::String(knob + 1) + " " + juce::String(slot.label).toUpperCase();
+        if (cell.getWidth() > 118.0f)
+            text += "  " + knobValueText(track, slot.target);
+        ui::caption(g, text, cell.reduced(6.0f, 1.0f).withTrimmedBottom(4.0f).toNearestInt(),
+                    hot ? ui::text : ui::muted, 8.5f);
+    }
 }
 
 void MainComponent::autoConnectMidi()
@@ -1443,12 +2206,123 @@ void MainComponent::autoConnectMidi()
     for (const auto& device : available)
         if (deviceManager.isMidiInputDeviceEnabled(device.identifier))
             active.push_back(device);
+    openMiniLabOutput();
     const auto summary = midi::midiStatusText(active);
     if (summary != midiStatusText)
     {
         midiStatusText = summary;
         updateTrackControls(); // status bar picks the new text up this tick
     }
+}
+
+void MainComponent::openMiniLabOutput()
+{
+    juce::String wanted;
+    for (const auto& device : juce::MidiOutput::getAvailableDevices())
+    {
+        const auto name = device.name.toLowerCase();
+        if (name.contains("minilab") && name.contains("midi") && !name.contains("thru")
+            && !name.contains("mcu") && !name.contains("alv"))
+            wanted = device.identifier;
+    }
+    if (wanted == miniLabOutId)
+        return;
+    if (miniLabOut != nullptr)
+        miniLabSend(minilab::disconnectDaw());
+    miniLabOut.reset();
+    miniLabOutId = wanted;
+    miniLabMode = MiniLabMode::Unknown;
+    miniLabTop.clear();
+    miniLabBottom.clear();
+    miniLabPadRgb = 0;
+    if (wanted.isEmpty())
+        return;
+    miniLabOut = juce::MidiOutput::openDevice(wanted);
+    // Identify first; the reply triggers the DAW connect handshake.
+    if (miniLabOut != nullptr)
+        miniLabSend(minilab::deviceInquiry());
+}
+
+void MainComponent::miniLabSend(const minilab::Bytes& bytes)
+{
+    if (miniLabOut == nullptr || bytes.size() < 2 || bytes.front() != 0xF0 || bytes.back() != 0xF7)
+        return;
+    miniLabOut->sendMessageNow(juce::MidiMessage::createSysExMessage(bytes.data() + 1,
+                                                                    static_cast<int>(bytes.size()) - 2));
+}
+
+void MainComponent::handleMiniLabSysex(const minilab::Bytes& bytes)
+{
+    using minilab::Reply;
+    switch (minilab::classify(bytes.data(), static_cast<int>(bytes.size())))
+    {
+        case Reply::DeviceIdentity:
+        case Reply::DawModeChanged:
+            miniLabSend(minilab::connectDaw());
+            miniLabSend(minilab::requestPadBank());
+            miniLabSend(minilab::requestMode());
+            break;
+        case Reply::DawMode:
+            miniLabMode = MiniLabMode::Daw;
+            refreshMiniLabDisplay(true);
+            status.setText("MiniLab 3 connected in DAW mode: knob names now show on its screen.",
+                           juce::dontSendNotification);
+            break;
+        case Reply::ArturiaMode:
+        case Reply::ArturiaModeChanged:
+            miniLabMode = MiniLabMode::Arturia;
+            if (!miniLabHintShown)
+            {
+                miniLabHintShown = true;
+                status.setText("Tip: press Shift + Pad 3 on the MiniLab (DAW mode) to see knob names on its screen.",
+                               juce::dontSendNotification);
+            }
+            break;
+        case Reply::PadBankA:
+        case Reply::PadBankB:
+            miniLabPadBank = minilab::classify(bytes.data(), static_cast<int>(bytes.size())) == Reply::PadBankB
+                ? minilab::padBankB : minilab::padBankA;
+            miniLabPadRgb = 0;
+            refreshMiniLabDisplay(true);
+            break;
+        case Reply::OtherState:
+        case Reply::None:
+            break;
+    }
+}
+
+void MainComponent::refreshMiniLabDisplay(bool force)
+{
+    if (miniLabOut == nullptr || miniLabMode != MiniLabMode::Daw)
+        return;
+    const auto now = juce::Time::getMillisecondCounter();
+    // The MiniLab replaces idle host screens with its screensaver; replay
+    // the current frame once a minute to keep it.
+    if (now - miniLabRefreshedAt > 60000)
+        force = true;
+    const auto& track = project.tracks[static_cast<std::size_t>(std::clamp(selectedTrack, 0, maxTracks - 1))];
+    std::pair<juce::String, juce::String> screen;
+    if (audioSelected || track.kind == TrackKind::None)
+        screen = { "AUDIO", "Recorder / takes" };
+    else if (now < knobScreenUntil && lastKnob >= 0)
+        screen = minilab::knobScreen(track, lastKnob);
+    else
+        screen = minilab::trackScreen(track);
+    if (force || screen.first != miniLabTop || screen.second != miniLabBottom)
+    {
+        miniLabTop = screen.first;
+        miniLabBottom = screen.second;
+        miniLabSend(minilab::screenMessage(screen.first, screen.second));
+    }
+    const auto rgb = static_cast<std::uint32_t>(trackColour(track.icon).getARGB()) & 0xFFFFFFu;
+    if (force || rgb != miniLabPadRgb)
+    {
+        miniLabPadRgb = rgb;
+        miniLabSend(minilab::padBankMessage(minilab::padBankA, rgb, 0.35f));
+        miniLabSend(minilab::padBankMessage(minilab::padBankB, rgb, 0.35f));
+    }
+    if (force)
+        miniLabRefreshedAt = now;
 }
 
 void MainComponent::audioDeviceError(const juce::String& message)
@@ -1524,94 +2398,62 @@ void MainComponent::refreshFxBar()
         fxBar->refresh(fxTarget, fxTarget == 2 ? 0 : fxEffect, getFxEnabled());
 }
 
+namespace
+{
+// fxEffect ids: 0 drive, 1 EQ, 2 compressor, 3 chorus, 4 delay, 5 reverb.
+float* fxSlot(TrackFx& fx, int effect, int slot)
+{
+    switch (effect)
+    {
+        case 0: return slot == 0 ? &fx.drive.amount : &fx.drive.tone;
+        case 1: return slot == 0 ? &fx.eq.low : slot == 1 ? &fx.eq.mid : slot == 2 ? &fx.eq.midFreq : &fx.eq.high;
+        case 2: return slot == 0 ? &fx.comp.thresholdDb : slot == 1 ? &fx.comp.ratio
+                     : slot == 2 ? &fx.comp.attackMs : &fx.comp.releaseMs;
+        case 3: return slot == 0 ? &fx.chorus.rate : slot == 1 ? &fx.chorus.depth : &fx.chorus.mix;
+        case 4: return slot == 0 ? &fx.delay.timeMs : slot == 1 ? &fx.delay.feedback : &fx.delay.mix;
+        default: return slot == 0 ? &fx.reverb.size : slot == 1 ? &fx.reverb.damping : &fx.reverb.mix;
+    }
+}
+
+bool* fxEnable(TrackFx& fx, int effect)
+{
+    switch (effect)
+    {
+        case 0: return &fx.drive.enabled;
+        case 1: return &fx.eq.enabled;
+        case 2: return &fx.comp.enabled;
+        case 3: return &fx.chorus.enabled;
+        case 4: return &fx.delay.enabled;
+        default: return &fx.reverb.enabled;
+    }
+}
+}
+
 float MainComponent::getFxParam(int slot) const
 {
-    const TrackFx& fx = project.tracks[static_cast<std::size_t>(fxTrackFor(fxTarget == 1))].fx;
     if (fxTarget == 2)
         return slot == 0 ? project.master.ceilingDb : project.master.releaseMs;
-    switch (fxEffect)
-    {
-        case 0:
-            switch (slot)
-            {
-                case 0: return fx.eq.low;
-                case 1: return fx.eq.mid;
-                case 2: return fx.eq.midFreq;
-                default: return fx.eq.high;
-            }
-        case 1:
-            switch (slot)
-            {
-                case 0: return fx.comp.thresholdDb;
-                case 1: return fx.comp.ratio;
-                case 2: return fx.comp.attackMs;
-                default: return fx.comp.releaseMs;
-            }
-        case 2:
-            switch (slot)
-            {
-                case 0: return fx.delay.timeMs;
-                case 1: return fx.delay.feedback;
-                default: return fx.delay.mix;
-            }
-        default:
-            switch (slot)
-            {
-                case 0: return fx.reverb.size;
-                case 1: return fx.reverb.damping;
-                default: return fx.reverb.mix;
-            }
-    }
+    auto fx = project.tracks[static_cast<std::size_t>(fxTrackFor(fxTarget == 1))].fx;
+    return *fxSlot(fx, fxEffect, slot);
 }
 
 void MainComponent::setFxParam(int slot, float value)
 {
-    TrackFx& fx = project.tracks[static_cast<std::size_t>(fxTrackFor(fxTarget == 1))].fx;
     if (fxTarget == 2)
     {
         if (slot == 0) project.master.ceilingDb = value;
         else project.master.releaseMs = value;
         return;
     }
-    switch (fxEffect)
-    {
-        case 0:
-            if (slot == 0) fx.eq.low = value;
-            else if (slot == 1) fx.eq.mid = value;
-            else if (slot == 2) fx.eq.midFreq = value;
-            else fx.eq.high = value;
-            break;
-        case 1:
-            if (slot == 0) fx.comp.thresholdDb = value;
-            else if (slot == 1) fx.comp.ratio = value;
-            else if (slot == 2) fx.comp.attackMs = value;
-            else fx.comp.releaseMs = value;
-            break;
-        case 2:
-            if (slot == 0) fx.delay.timeMs = value;
-            else if (slot == 1) fx.delay.feedback = value;
-            else fx.delay.mix = value;
-            break;
-        default:
-            if (slot == 0) fx.reverb.size = value;
-            else if (slot == 1) fx.reverb.damping = value;
-            else fx.reverb.mix = value;
-            break;
-    }
+    *fxSlot(project.tracks[static_cast<std::size_t>(fxTrackFor(fxTarget == 1))].fx, fxEffect, slot) = value;
 }
 
 bool MainComponent::getFxEnabled() const
 {
     if (fxTarget == 2)
         return project.master.enabled;
-    const TrackFx& fx = project.tracks[static_cast<std::size_t>(fxTrackFor(fxTarget == 1))].fx;
-    switch (fxEffect)
-    {
-        case 0: return fx.eq.enabled;
-        case 1: return fx.comp.enabled;
-        case 2: return fx.delay.enabled;
-        default: return fx.reverb.enabled;
-    }
+    auto fx = project.tracks[static_cast<std::size_t>(fxTrackFor(fxTarget == 1))].fx;
+    return *fxEnable(fx, fxEffect);
 }
 
 void MainComponent::setFxEnabled(bool enabled)
@@ -1621,28 +2463,51 @@ void MainComponent::setFxEnabled(bool enabled)
         project.master.enabled = enabled;
         return;
     }
-    TrackFx& fx = project.tracks[static_cast<std::size_t>(fxTrackFor(fxTarget == 1))].fx;
-    switch (fxEffect)
-    {
-        case 0: fx.eq.enabled = enabled; break;
-        case 1: fx.comp.enabled = enabled; break;
-        case 2: fx.delay.enabled = enabled; break;
-        default: fx.reverb.enabled = enabled; break;
-    }
+    *fxEnable(project.tracks[static_cast<std::size_t>(fxTrackFor(fxTarget == 1))].fx, fxEffect) = enabled;
 }
 
 void MainComponent::projectChanged()
 {
     ++revision;
-    if (project.tracks[static_cast<std::size_t>(selectedTrack)].kind == TrackKind::None || audioSelected)
+    if (project.tracks[static_cast<std::size_t>(selectedTrack)].kind == TrackKind::None)
         for (int track = 0; track < maxTracks; ++track)
             if (project.tracks[static_cast<std::size_t>(track)].kind != TrackKind::None)
             {
                 selectedTrack = track;
                 break;
             }
+    if (editPart >= project.song.sections)
+        editPart = -1;
+    songStartPart = std::clamp(songStartPart, 0, project.song.sections - 1);
+    unsigned loopMask = ~0u;
+    if (editPart >= 0)
+    {
+        loopMask = 0;
+        for (int track = 0; track < maxTracks; ++track)
+        {
+            const auto slot = project.song.slots[static_cast<std::size_t>(editPart)][static_cast<std::size_t>(track)];
+            trackMelodySlot[static_cast<std::size_t>(track)] = slot;
+            trackDrumSlot[static_cast<std::size_t>(track)] = slot;
+            if (project.song.trackOn[static_cast<std::size_t>(editPart)][static_cast<std::size_t>(track)])
+                loopMask |= 1u << track;
+        }
+    }
+    engine.setLoopTrackMask(loopMask);
+    engine.setSongStartSection(songStartPart);
     const auto sel = static_cast<std::size_t>(selectedTrack);
     const bool selDrums = project.tracks[sel].kind == TrackKind::Drums;
+    instrumentChoice.setVisible(!audioSelected && project.tracks[sel].kind == TrackKind::Synth);
+    const bool editableSynth = !audioSelected && project.tracks[sel].kind == TrackKind::Synth
+        && project.tracks[sel].instrumentPreset == 0;
+    editSynth.setVisible(editableSynth);
+    if (synthPanel != nullptr && synthPanel->isVisible())
+    {
+        if (editableSynth)
+            synthPanel->refresh(project.tracks[sel].synth, project.tracks[sel].trackName());
+        else
+            synthPanel->setVisible(false);
+    }
+    instrumentChoice.setSelectedId(project.tracks[sel].instrumentPreset + 1, juce::dontSendNotification);
     drumsSelected = selDrums && !audioSelected;
     pianoRoll.setPattern(project.tracks[sel].kind == TrackKind::Synth
                              ? project.tracks[sel].melodies[static_cast<std::size_t>(trackMelodySlot[sel])]
@@ -1662,33 +2527,8 @@ void MainComponent::projectChanged()
     for (int track = 0; track < maxTracks; ++track)
         engine.setLoopSelection(track, trackMelodySlot[static_cast<std::size_t>(track)],
                                 trackDrumSlot[static_cast<std::size_t>(track)]);
+    engine.setLoopSelection(selectedTrack, trackMelodySlot[sel], trackDrumSlot[sel]);
     tempo.setValue(project.bpm, juce::dontSendNotification);
-    songMode.setToggleState(project.songMode, juce::dontSendNotification);
-    songMode.setButtonText(project.songMode ? "SONG" : "LOOP");
-    for (int s = 0; s < maxSections; ++s)
-    {
-        const auto si = static_cast<std::size_t>(s);
-        const bool inSong = s < project.song.sections && !audioSelected;
-        auto& button = sectionButtons[si];
-        button.setVisible(inSong);
-        button.setToggleState(project.song.trackOn[si][sel], juce::dontSendNotification);
-        button.setButtonText(
-            juce::String(s + 1) + juce::String::charToString(static_cast<char>(
-                'A' + project.song.slots[si][sel])));
-        button.setColour(juce::TextButton::buttonOnColourId, trackColour(project.tracks[sel].icon));
-        const auto sharers = sectionsSharingSlot(project.song, selectedTrack,
-            project.song.slots[si][sel]);
-        auto sharedText = [](const std::vector<int>& sharers) {
-            juce::String text;
-            for (const auto section : sharers)
-                text += (text.isEmpty() ? "" : ", ") + juce::String(section);
-            return sharers.size() > 1 ? "shared by sections " + text : "unique to this section";
-        };
-        button.setTooltip(
-            "Section " + juce::String(s + 1) + " " + project.tracks[sel].trackName()
-            + " (" + sharedText(sharers) + "). "
-            "Click: on/off. Shift-click: next pattern. Ctrl-click: make unique.");
-    }
     pendingPublish = !engine.submit(project);
     int totalNotes = 0, totalHits = 0;
     for (const auto& track : project.tracks)
@@ -1704,6 +2544,8 @@ void MainComponent::projectChanged()
                      + juce::String(project.takeCount) + " takes",
                      juce::dontSendNotification);
     refreshAudioView();
+    updateSongControls();
+    refreshAiSidebar();
 }
 
 void MainComponent::undoEdit()
@@ -1714,6 +2556,7 @@ void MainComponent::undoEdit()
     project = undoStack.back();
     undoStack.pop_back();
     projectChanged();
+    selectChannel(audioSelected ? -1 : selectedTrack);
 }
 
 void MainComponent::redoEdit()
@@ -1724,56 +2567,7 @@ void MainComponent::redoEdit()
     project = redoStack.back();
     redoStack.pop_back();
     projectChanged();
-}
-
-void MainComponent::loadDemo()
-{
-    beginEdit();
-    const auto sel = static_cast<std::size_t>(selectedTrack);
-    project.tracks[sel].melodies[static_cast<std::size_t>(trackMelodySlot[sel])] = {};
-    constexpr int roots[] { 48, 53, 55, 48 };
-    constexpr int melody[] { 60, 64, 67, 64, 65, 69, 67, 65, 67, 71, 69, 67, 64, 62, 60, 67 };
-    for (int bar = 0; bar < 4; ++bar)
-    {
-        auto& p = project.tracks[sel].melodies[static_cast<std::size_t>(trackMelodySlot[sel])];
-        p.notes[static_cast<std::size_t>(p.count)] = { static_cast<std::uint32_t>(p.count + 1), bar * 3840, 3360, roots[bar], 85 };
-        ++p.count;
-        for (int beat = 0; beat < 4; ++beat)
-        {
-            p.notes[static_cast<std::size_t>(p.count)] = { static_cast<std::uint32_t>(p.count + 1),
-                bar * 3840 + beat * 960, 720, melody[bar * 4 + beat], beat == 0 ? 110 : 95 };
-            ++p.count;
-        }
-    }
-    projectChanged();
-    endEdit();
-}
-
-void MainComponent::loadDrumDemo()
-{
-    beginEdit();
-    const auto sel = static_cast<std::size_t>(selectedTrack);
-    project.tracks[sel].drumPatterns[static_cast<std::size_t>(trackDrumSlot[sel])] = {};
-    auto hit = [this, sel](int pad, int step, int velocity) {
-        project.tracks[sel].drumPatterns[static_cast<std::size_t>(trackDrumSlot[sel])].steps[static_cast<std::size_t>(pad)][static_cast<std::size_t>(step)]
-            = static_cast<std::uint8_t>(velocity);
-    };
-    for (int bar = 0; bar < 4; ++bar)
-    {
-        const auto base = bar * 16;
-        for (int step : { 0, 6, 8 }) hit(0, base + step, step == 0 ? 120 : 100);
-        for (int step : { 4, 12 }) hit(1, base + step, 110);
-        for (int step = 0; step < 16; step += 2)
-            if (step != 14 || bar % 2 == 0)
-                hit(2, base + step, step % 4 == 0 ? 92 : 66);
-        if (bar % 2 != 0) hit(3, base + 14, 82);
-        hit(4, base + 12, 58);
-        for (int step : { 3, 7, 11, 15 }) hit(7, base + step, 55);
-    }
-    hit(5, 62, 95);
-    hit(5, 63, 75);
-    projectChanged();
-    endEdit();
+    selectChannel(audioSelected ? -1 : selectedTrack);
 }
 
 void MainComponent::selectTrack(bool drums)
@@ -1800,7 +2594,7 @@ void MainComponent::selectTrackIndex(int track)
 
 void MainComponent::selectChannel(int channel)
 {
-    const bool audio = channel == 2;
+    const bool audio = channel == -1;
     if (!audio)
     {
         if (channel < 0 || channel >= maxTracks)
@@ -1819,6 +2613,8 @@ void MainComponent::selectChannel(int channel)
     drumSequencer.setVisible(drums);
     audioView->setVisible(audio);
     keyboard.setVisible(!drums && !audio);
+    if (fxBar != nullptr)
+        fxBar->setVisible(!audio);
     repeatBar.setVisible(drums);
     kitButton.setVisible(drums);
     for (auto& button : padButtons)
@@ -1841,13 +2637,14 @@ void MainComponent::selectChannel(int channel)
     }
     refreshTrackList();
     audioTab.setToggleState(audio, juce::dontSendNotification);
-    demo.setButtonText(drums ? "Demo beat" : "Demo melody");
+
     description.setText(audio ? "REC: record from song start (or punch in)  |  Takes play in SONG mode  |  Click a take to inspect  |  Delete key removes it"
         : drums ? "Toggle: click  |  Paint: drag  |  Erase: right-drag  |  Velocity: scroll  |  Audition: pad names / QWER ASDF"
         : "Draw: click + drag  |  Move: drag note  |  Resize: right edge / Shift-drag  |  Delete: right-click  |  Velocity: scroll",
         juce::dontSendNotification);
     updateTrackControls();
     refreshAudioView();
+    projectChanged();
     resized();
     repaint();
     if (isShowing())
@@ -1862,6 +2659,15 @@ void MainComponent::selectPattern(int slot)
 {
     if (slot < 0 || slot >= numPatterns || audioSelected)
         return;
+    if (editPart >= 0 && editPart < project.song.sections)
+    {
+        beginEdit();
+        project.song.slots[static_cast<std::size_t>(editPart)][static_cast<std::size_t>(selectedTrack)]
+            = static_cast<std::uint8_t>(slot);
+        projectChanged();
+        endEdit();
+        return;
+    }
     if (drumsSelected)
         trackDrumSlot[static_cast<std::size_t>(selectedTrack)] = slot;
     else
@@ -1906,7 +2712,7 @@ void MainComponent::showAddTrackMenu()
         ? project.tracks[static_cast<std::size_t>(selectedTrack)].icon & 7 : -1;
     for (int icon = 0; icon < 8; ++icon)
         icons.addItem(10 + icon, trackIconName(icon), true, icon == currentIcon);
-    menu.addSubMenu("Icon / colour", icons);
+    menu.addSubMenu("Icon / colour", icons, !audioSelected);
     menu.addItem(20, "Move selected up", !audioSelected && selectedTrack > 0);
     menu.addItem(21, "Move selected down", !audioSelected && selectedTrack < maxTracks - 1
                      && project.tracks[static_cast<std::size_t>(selectedTrack + 1)].kind != TrackKind::None);
@@ -1920,10 +2726,14 @@ void MainComponent::showAddTrackMenu()
                                addTrackOfKind(TrackKind::Drums);
                            else if (result >= 10 && result < 18)
                                setTrackIcon(selectedTrack, result - 10);
-                           else if (result == 20)
-                               moveTrack(selectedTrack, selectedTrack - 1);
-                           else if (result == 21)
-                               moveTrack(selectedTrack, selectedTrack + 1);
+                           else if (result == 20 || result == 21)
+                           {
+                               beginEdit();
+                               moveTrack(selectedTrack, selectedTrack + (result == 20 ? -1 : 1));
+                               projectChanged();
+                               endEdit();
+                               selectChannel(selectedTrack);
+                           }
                            else if (result == 3)
                                renameTrack(selectedTrack);
                            else if (result == 4)
@@ -1946,9 +2756,9 @@ void MainComponent::renameTrack(int track)
     window->addTextEditor("name", project.tracks[static_cast<std::size_t>(track)].trackName());
     window->addButton("Rename", 1, juce::KeyPress(juce::KeyPress::returnKey));
     window->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+    hostModal(window);
     window->enterModalState(true,
                             juce::ModalCallbackFunction::create([this, track, window](int result) {
-                                std::unique_ptr<juce::AlertWindow> deleter(window);
                                 if (result != 1)
                                     return;
                                 const auto name = window->getTextEditorContents("name").trim();
@@ -1987,6 +2797,7 @@ void MainComponent::addTrackOfKind(TrackKind kind)
     projectChanged();
     endEdit();
     selectTrackIndex(slot);
+    resized();
 }
 
 void MainComponent::deleteTrack(int track)
@@ -2053,6 +2864,11 @@ void MainComponent::mouseDown(const juce::MouseEvent& event)
         if (event.eventComponent == &trackButtons[static_cast<std::size_t>(track)]
             && project.tracks[static_cast<std::size_t>(track)].kind != TrackKind::None)
         {
+            if (event.mods.isPopupMenu())
+            {
+                showTrackMenu(track);
+                return;
+            }
             dragTrack = dragHover = track;
             dragStartPos = event.getPosition();
         }
@@ -2422,12 +3238,13 @@ struct MainComponent::ExportWorker final : public juce::ThreadWithProgressWindow
         else if (writeStatus.failed())
             owner->showError(writeStatus.getErrorMessage());
         else
-            juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::InfoIcon, "Export complete",
+            owner->showDialog(juce::MessageBoxOptions::makeOptionsOk(juce::MessageBoxIconType::InfoIcon,
+                "Export complete",
                 file.getFileName() + "  /  "
                 + juce::String(result.audio.getNumSamples() / result.sampleRate, 1) + " s  /  "
                 + juce::String(juce::Decibels::gainToDecibels(result.peak, -80.0f), 1) + " dB peak"
-                + (result.clipped ? "  (CLIPPED — lower track volumes or enable normalization)"
-                                  : result.normalized ? "  (normalized)" : ""));
+                + (result.clipped ? "  (CLIPPED: lower track volumes or enable normalization)"
+                                  : result.normalized ? "  (normalized)" : "")));
         owner->exportFinished();
     }
     ExportJob job;
@@ -2812,7 +3629,19 @@ void MainComponent::exportFinished()
 
 void MainComponent::showError(const juce::String& message)
 {
-    juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "Sonora", message);
+    showDialog(juce::MessageBoxOptions::makeOptionsOk(juce::MessageBoxIconType::WarningIcon, "Sonora", message));
+}
+
+void MainComponent::showDialog(const juce::MessageBoxOptions& options, std::function<void(int)> callback)
+{
+    juce::AlertWindow::showAsync(options.withParentComponent(this), std::move(callback));
+}
+
+void MainComponent::hostModal(juce::Component* dialog)
+{
+    addAndMakeVisible(dialog);
+    dialog->setCentrePosition(getLocalBounds().getCentre());
+    dialog->toFront(true);
 }
 
 void MainComponent::saveProject(bool choosePath, std::function<void()> after)
@@ -2897,7 +3726,10 @@ void MainComponent::openProject()
             safe->resolveTakes(file);
             safe->pitchContours.clear();
             safe->lastTakesSignature.clear(); // force take reload on the timer
+            safe->trackMelodySlot.fill(0);
+            safe->trackDrumSlot.fill(0);
             safe->projectChanged();
+            safe->selectChannel(safe->selectedTrack);
             safe->refreshTakes();
         });
 }
@@ -2907,7 +3739,10 @@ void MainComponent::resetProject()
     if (recording)
         finalizeTake();
     engine.stop();
-    project = savedProject = {};
+    project = savedProject = defaultProject();
+    selectedTrack = 0;
+    trackMelodySlot.fill(0);
+    trackDrumSlot.fill(0);
     recoveredUnsaved = false;
     projectFile = juce::File();
     undoStack.clear();
@@ -2918,6 +3753,7 @@ void MainComponent::resetProject()
     pitchContours.clear();
     lastTakesSignature.clear();
     projectChanged();
+    selectChannel(0);
     refreshTakes();
 }
 
@@ -2931,9 +3767,8 @@ void MainComponent::confirmDiscard(std::function<void()> action)
         return;
     }
     dialogPending = true;
-    juce::AlertWindow::showYesNoCancelBox(juce::MessageBoxIconType::QuestionIcon,
-        "Save your changes?", "This project has unsaved changes.", "Save", "Discard", "Cancel", this,
-        juce::ModalCallbackFunction::create(
+    showDialog(juce::MessageBoxOptions::makeOptionsYesNoCancel(juce::MessageBoxIconType::QuestionIcon,
+        "Save your changes?", "This project has unsaved changes.", "Save", "Discard", "Cancel"),
             [safe = juce::Component::SafePointer<MainComponent>(this), action](int answer) {
                 if (safe == nullptr)
                     return;
@@ -2942,7 +3777,7 @@ void MainComponent::confirmDiscard(std::function<void()> action)
                     safe->saveProject(false, action);
                 else if (answer == 2)
                     action();
-            }));
+            });
 }
 
 void MainComponent::requestClose(std::function<void()> callback)
@@ -2957,9 +3792,9 @@ void MainComponent::offerRecovery()
     if (!recoveryFile.existsAsFile())
         return;
     dialogPending = true;
-    juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon,
-        "Recover unsaved work?", "Sonora found a recovery snapshot from an earlier session.", "Recover", "Discard", this,
-        juce::ModalCallbackFunction::create([safe = juce::Component::SafePointer<MainComponent>(this)](int answer) {
+    showDialog(juce::MessageBoxOptions::makeOptionsOkCancel(juce::MessageBoxIconType::QuestionIcon,
+        "Recover unsaved work?", "Sonora found a recovery snapshot from an earlier session.", "Recover", "Discard"),
+        [safe = juce::Component::SafePointer<MainComponent>(this)](int answer) {
             if (safe == nullptr)
                 return;
             safe->dialogPending = false;
@@ -2985,7 +3820,7 @@ void MainComponent::offerRecovery()
             }
             else
                 safe->recoveryFile.deleteFile();
-        }));
+        });
 }
 
 void MainComponent::openAudioSettings()
@@ -3001,14 +3836,39 @@ void MainComponent::openAudioSettings()
     options.content.setOwned(new juce::AudioDeviceSelectorComponent(deviceManager, 0, 2, 0, 2,
                                                                    true, false, true, false));
     options.content->setSize(580, 480);
-    options.componentToCentreAround = this;
-    options.useNativeTitleBar = true;
+    options.useNativeTitleBar = false;
     options.resizable = false;
-    audioDialog = options.launchAsync();
+    auto* dialog = options.create();
+    hostModal(dialog);
+    dialog->enterModalState(true, nullptr, true);
+    audioDialog = dialog;
 }
 
 void MainComponent::timerCallback()
 {
+    refreshMiniLabDisplay(false);
+    if (assistantStartedAt != 0 && aiSidebar != nullptr && timerTicks % 15 == 0)
+        aiSidebar->setStatus((project.songMode ? "Composing the song...  " : "Thinking...  ")
+                             + juce::String((juce::Time::getMillisecondCounter() - assistantStartedAt) / 1000) + " s");
+    {
+        const auto serial = knobSerial.load(std::memory_order_acquire);
+        if (serial != lastKnobSerial)
+        {
+            lastKnobSerial = serial;
+            applyKnobChanges();
+        }
+        const auto now = juce::Time::getMillisecondCounter();
+        if (knobGesture && now > knobIdleUntil)
+        {
+            knobGesture = false;
+            endEdit();
+        }
+        if (lastKnob >= 0 && knobHighlightUntil != 0 && now > knobHighlightUntil)
+        {
+            knobHighlightUntil = 0;
+            repaint(knobStripArea());
+        }
+    }
     if (pendingPublish)
         pendingPublish = !engine.submit(project);
     const bool running = engine.isPlaying();
@@ -3022,19 +3882,11 @@ void MainComponent::timerCallback()
     drumSequencer.setPlayhead(std::fmod(engine.getTickPosition(), patternTicks), running);
     const auto tick = static_cast<int>(engine.getTickPosition());
     const auto currentSection = juce::jlimit(0, maxSections - 1, tick / patternTicks);
-    if (currentSection != lastSection || running != lastSectionRunning)
-    {
-        lastSection = currentSection;
-        lastSectionRunning = running;
-        for (int s = 0; s < maxSections; ++s)
-        {
-            const bool active = running && project.songMode && s == currentSection && s < project.song.sections;
-            sectionButtons[static_cast<std::size_t>(s)].setColour(juce::TextButton::buttonColourId,
-                active ? trackColour(project.tracks[static_cast<std::size_t>(selectedTrack)].icon)
-                               .withMultipliedBrightness(0.35f)
-                       : ui::raised);
-        }
-    }
+    if (arrangement != nullptr && arrangement->isVisible()
+        && (running || running != lastSectionRunning || currentSection != lastSection))
+        refreshArrangement();
+    lastSection = currentSection;
+    lastSectionRunning = running;
     meterPeak = std::max(engine.getOutputPeak(), meterPeak * 0.94f);
     outputMeter.setText(meterPeak >= 1.0f ? "OUT  CLIP" : "OUT  "
         + juce::String(juce::Decibels::gainToDecibels(meterPeak, -80.0f), 1) + " dB",
@@ -3161,6 +4013,16 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
         exportPanel->setVisible(false);
         return true;
     }
+    if (key == juce::KeyPress::escapeKey && sidebarOpen())
+    {
+        toggleAiSidebar();
+        return true;
+    }
+    if (key == juce::KeyPress::escapeKey && synthPanel != nullptr && synthPanel->isVisible())
+    {
+        synthPanel->setVisible(false);
+        return true;
+    }
     if (key == juce::KeyPress::escapeKey && kitPanel != nullptr && kitPanel->isVisible())
     {
         kitPanel->setVisible(false);
@@ -3198,9 +4060,10 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
     {
         if (key.getKeyCode() == '1') { selectTrack(false); return true; }
         if (key.getKeyCode() == '2') { selectTrack(true); return true; }
-        if (key.getKeyCode() == '3') { selectChannel(2); return true; }
+        if (key.getKeyCode() == '3') { selectChannel(-1); return true; }
         if (key.getKeyCode() == 'S') { saveProject(key.getModifiers().isShiftDown()); return true; }
         if (key.getKeyCode() == 'E') { exportAudio(); return true; }
+        if (key.getKeyCode() == 'I') { toggleAiSidebar(); return true; }
         if (key.getKeyCode() == 'O') { confirmDiscard([this] { openProject(); }); return true; }
         if (key.getKeyCode() == 'N') { confirmDiscard([this] { resetProject(); }); return true; }
         if (key.getKeyCode() == 'Z')
@@ -3229,8 +4092,8 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
 
 void MainComponent::paint(juce::Graphics& g)
 {
-    const auto w = static_cast<float>(getWidth()), h = static_cast<float>(getHeight());
-    const auto accent = audioSelected ? ui::blue : drumsSelected ? ui::violet : ui::cyan;
+    const auto w = static_cast<float>(contentWidth()), h = static_cast<float>(getHeight());
+    const auto accent = audioSelected ? ui::blue : trackColour(project.tracks[static_cast<std::size_t>(selectedTrack)].icon);
     g.fillAll(ui::background);
     g.setGradientFill(juce::ColourGradient(juce::Colour(0xff142337), 80, 0,
                                           ui::background, w * 0.7f, 180, false));
@@ -3253,29 +4116,17 @@ void MainComponent::paint(juce::Graphics& g)
     ui::caption(g, "TRANSPORT", { 38, 118, 174, 15 }, ui::muted, 9.0f);
     ui::caption(g, "TEMPO", { 276, 118, 120, 15 }, ui::muted, 9.0f);
     ui::caption(g, "POSITION  /  BAR . BEAT . STEP", { 454, 118, 222, 15 }, ui::muted, 9.0f);
-    ui::caption(g, "ARRANGEMENT", { 790, 118, 220, 15 }, ui::muted, 9.0f);
+    ui::caption(g, "VIEW", { 704, 118, 160, 15 }, ui::muted, 9.0f);
     for (float x : { 268.0f, 434.0f })
     {
         g.setColour(ui::border);
         g.drawVerticalLine(static_cast<int>(x), 128, 173);
     }
-    if (getWidth() > 1280)
-    {
-        ui::caption(g, "4 / 4", { 704, 134, 80, 20 }, ui::text, 15.0f);
-        ui::caption(g, "4 BAR LOOP", { 704, 158, 95, 15 }, ui::muted, 9.0f);
-    }
 
     ui::surface(g, { 20, 208, 204, h - 266 });
-    ui::caption(g, "CHANNEL RACK", { 38, 222, 170, 20 });
-    ui::caption(g, "CHANNEL GAIN", { 38, 550, 170, 16 });
-    if (getHeight() > 880)
-    {
-        ui::caption(g, audioSelected ? "TAKE ENGINE" : drumsSelected ? "ONE-SHOT ENGINE" : "SINE ENGINE",
-                    { 38, 690, 172, 20 }, accent);
-        ui::caption(g, audioSelected ? juce::String(project.takeCount) + " TAKES / SONG ONLY"
-                    : drumsSelected ? "8 PADS / 64 STEPS" : "16 VOICES / 2 OCTAVES",
-                    { 38, 714, 172, 18 }, ui::muted, 9.0f);
-    }
+    ui::caption(g, "TRACKS", { 38, 222, 170, 20 });
+    if (!audioSelected)
+        ui::caption(g, "SELECTED TRACK LEVEL", { 38, 550, 170, 16 }, accent, 9.0f);
     ui::caption(g, "MASTER OUTPUT", { 38, getHeight() - 147, 170, 20 });
     const auto meter = juce::jlimit(0.0f, 1.0f, (juce::Decibels::gainToDecibels(meterPeak, -60.0f) + 60) / 60);
     for (int i = 0; i < 18; ++i)
@@ -3288,23 +4139,41 @@ void MainComponent::paint(juce::Graphics& g)
     ui::surface(g, { 240, 208, w - 264, h - 394 });
     g.setColour(accent);
     g.fillRoundedRectangle(256, 228, 3, 18, 1.5f);
-    ui::caption(g, audioSelected ? "AUDIO TAKES" : drumsSelected ? "RHYTHM MATRIX" : "NOTE MATRIX",
-                { 270, 223, 234, 26 }, ui::text, 15.0f);
+    if (project.songMode)
+    {
+        ui::caption(g, "SONG", { 270, 220, 120, 26 }, ui::cyan, 15.0f);
+        ui::caption(g, juce::String(project.song.sections) + " parts  /  " + juce::String(project.song.sections * 4)
+                        + " bars  /  " + juce::String(project.song.songTicks() / 960.0 * 60.0 / project.bpm, 0) + " s",
+                    { 340, 220, 260, 26 }, ui::muted, 10.0f);
+    }
+    else
+    {
+        ui::caption(g, audioSelected ? "AUDIO TAKES" : project.tracks[static_cast<std::size_t>(selectedTrack)].trackName(),
+                    { 270, 220, 206, 26 }, accent, 15.0f);
+        if (!audioSelected && !drumsSelected)
+            ui::caption(g, "INSTRUMENT", { 484, 220, 92, 26 }, ui::muted, 9.0f);
+        if (!audioSelected)
+        {
+            ui::caption(g, "PATTERN", { 256, 258, 72, 24 }, ui::muted, 9.0f);
+            ui::caption(g, "WORKING ON", { 256, 294, 116, 24 }, ui::muted, 9.0f);
+        }
+    }
     g.setColour(ui::border.withAlpha(0.7f));
-    g.drawHorizontalLine(278, 254, w - 38);
+    g.drawHorizontalLine(project.songMode ? 254 : audioSelected ? 250 : 346, 254, w - 38);
     ui::surface(g, { 240, h - 172, w - 264, 114 });
     ui::caption(g, audioSelected ? "TAKE INSPECTOR" : drumsSelected ? "PERFORMANCE PADS" : "PERFORMANCE KEYS",
                 { 256, getHeight() - 169, 280, 22 }, accent, 9.0f);
+    paintKnobStrip(g);
     g.setColour(ui::border.withAlpha(0.5f));
     g.drawHorizontalLine(getHeight() - 44, 24, w - 24);
-    ui::caption(g, "SONORA  /  NATIVE AUDIO", { getWidth() - 237, getHeight() - 34, 211, 20 }, ui::muted, 9.0f);
+    ui::caption(g, "SONORA  /  NATIVE AUDIO", { contentWidth() - 237, getHeight() - 34, 211, 20 }, ui::muted, 9.0f);
 }
 
 void MainComponent::resized()
 {
     title.setBounds(78, 22, 254, 40);
-    subtitle.setBounds(350, 33, getWidth() - 920, 28);
-    auto fileRow = juce::Rectangle<int>(getWidth() - 548, 27, 524, 34);
+    subtitle.setBounds(350, 63, contentWidth() - 380, 24);
+    auto fileRow = juce::Rectangle<int>(contentWidth() - 548, 27, 524, 34);
     for (auto* button : { &newProject, &open, &save, &saveAs, &exportButton })
     {
         button->setBounds(fileRow.removeFromLeft(98));
@@ -3314,49 +4183,267 @@ void MainComponent::resized()
     stop.setBounds(138, 138, 56, 34);
     record.setBounds(202, 138, 58, 34);
     tempo.setBounds(274, 139, 144, 32);
-    position.setBounds(450, 134, 250, 42);
-    songMode.setBounds(716, 138, 84, 34);
-    removeSection.setBounds(808, 138, 34, 34);
-    addSection.setBounds(848, 138, 34, 34);
-    undo.setBounds(getWidth() - 416, 138, 62, 34);
-    redo.setBounds(getWidth() - 346, 138, 62, 34);
-    panic.setBounds(getWidth() - 266, 138, 76, 34);
-    audioSettings.setBounds(getWidth() - 180, 138, 142, 34);
+    position.setBounds(450, 134, 242, 42);
+    loopView.setBounds(704, 138, 58, 34);
+    songView.setBounds(764, 138, 58, 34);
+    undo.setBounds(contentWidth() - 174, 218, 62, 28);
+    redo.setBounds(contentWidth() - 104, 218, 62, 28);
+    const int instrumentWidth = std::clamp(contentWidth() - 900, 160, 240);
+    instrumentChoice.setBounds(580, 218, instrumentWidth, 28);
+    editSynth.setBounds(588 + instrumentWidth, 218, 104, 28);
+    panic.setBounds(840, 138, 76, 34);
+    audioSettings.setBounds(contentWidth() - 180, 138, 142, 34);
+    int row = 0;
     for (int track = 0; track < maxTracks; ++track)
-        trackButtons[static_cast<std::size_t>(track)].setBounds(34, 246 + track * 29, 176, 26);
-    audioTab.setBounds(34, 482, 124, 28);
-    addTrack.setBounds(162, 482, 48, 28);
+        if (project.tracks[static_cast<std::size_t>(track)].kind != TrackKind::None)
+            trackButtons[static_cast<std::size_t>(track)].setBounds(34, 250 + row++ * 28, 176, 26);
+    audioTab.setBounds(34, 482, 94, 28);
+    addTrack.setBounds(132, 482, 78, 28);
     mute.setBounds(38, 516, 78, 30);
     solo.setBounds(126, 516, 78, 30);
-    trackVolume.setBounds(44, 568, 156, 80);
-    clear.setBounds(getWidth() - 242, 222, 66, 30);
-    demo.setBounds(getWidth() - 168, 222, 130, 30);
-    kitButton.setBounds(getWidth() - 330, 222, 80, 30);
-    description.setBounds(256, 256, getWidth() - 294, 18);
-    repeatBar.setBounds(getWidth() - 470, 222, 132, 30);
-    const int sectionWidth = 46;
-    for (int s = 0; s < maxSections; ++s)
-        sectionButtons[static_cast<std::size_t>(s)].setBounds(624 + s * (sectionWidth + 4), 222, sectionWidth, 24);
+    trackVolume.setBounds(44, 568, 156, 54);
+    trackVolume.setSliderStyle(juce::Slider::LinearHorizontal);
+    clear.setBounds(contentWidth() - 106, 256, 68, 28);
+    if (project.songMode)
+        demo.setBounds(contentWidth() - 174 - 136, 218, 128, 28);
+    else
+        demo.setBounds(contentWidth() - 242, 256, 128, 28);
+    kitButton.setBounds(contentWidth() - 322, 256, 72, 28);
+    description.setBounds(256, audioSelected ? getHeight() - 132 : 324, contentWidth() - 294, 18);
+    repeatBar.setBounds(contentWidth() - 466, 256, 136, 28);
+    partChoice.setBounds(354, 292, 300, 28);
+    partTrackOn.setBounds(662, 292, 150, 28);
+    partHint.setBounds(partTrackOn.isVisible() ? 820 : 662, 292,
+                       std::max(120, contentWidth() - (partTrackOn.isVisible() ? 820 : 662) - 200), 28);
+    songTemplate.setBounds(620, 218, std::clamp(contentWidth() - 174 - 136 - 620 - 12, 160, 340), 28);
+    if (arrangement != nullptr)
+        arrangement->setBounds(254, 262, contentWidth() - 292, getHeight() - 530);
     for (int i = 0; i < numPatterns; ++i)
-        patternTabs[static_cast<std::size_t>(i)].setBounds(420 + i * 32, 222, 28, 24);
-    duplicatePattern.setBounds(556, 222, 60, 24);
-    pianoRoll.setBounds(254, 288, getWidth() - 292, getHeight() - 568);
+        patternTabs[static_cast<std::size_t>(i)].setBounds(330 + i * 36, 256, 32, 28);
+    duplicatePattern.setBounds(480, 256, 60, 28);
+    pianoRoll.setBounds(254, 354, contentWidth() - 292, getHeight() - 634);
     drumSequencer.setBounds(pianoRoll.getBounds());
     if (audioView != nullptr)
-        audioView->setBounds(pianoRoll.getBounds());
+        audioView->setBounds(254, 258, contentWidth() - 292, getHeight() - 444);
     if (fxBar != nullptr)
-        fxBar->setBounds(240, getHeight() - 268, getWidth() - 264, 88);
-    keyboard.setBounds(256, getHeight() - 140, getWidth() - 296, 68);
+        fxBar->setBounds(240, getHeight() - 268, contentWidth() - 264, 88);
+    keyboard.setBounds(256, getHeight() - 140, contentWidth() - 296, 68);
     keyboard.setKeyWidth(static_cast<float>(keyboard.getWidth()) / 21.0f);
-    const auto padWidth = (getWidth() - 288) / drumPads;
+    const auto padWidth = (contentWidth() - 288) / drumPads;
     for (int pad = 0; pad < drumPads; ++pad)
         padButtons[static_cast<std::size_t>(pad)].setBounds(254 + pad * padWidth,
             getHeight() - 144, padWidth - 6, 74);
-    status.setBounds(24, getHeight() - 36, getWidth() - 282, 24);
+    status.setBounds(24, getHeight() - 36, contentWidth() - 282, 24);
     outputMeter.setBounds(34, getHeight() - 98, 174, 24);
     if (exportPanel != nullptr)
-        exportPanel->setBounds((getWidth() - 460) / 2, (getHeight() - 300) / 2, 460, 300);
+        exportPanel->setBounds((contentWidth() - 460) / 2, (getHeight() - 300) / 2, 460, 300);
     if (kitPanel != nullptr)
-        kitPanel->setBounds((getWidth() - 560) / 2, (getHeight() - 460) / 2, 560, 460);
+        kitPanel->setBounds((contentWidth() - 560) / 2, (getHeight() - 460) / 2, 560, 460);
+    if (aiSidebar != nullptr)
+        aiSidebar->setBounds(getWidth() - sidebarWidth, 12, sidebarWidth - 12, getHeight() - 58);
+    if (synthPanel != nullptr)
+        synthPanel->setBounds((contentWidth() - 920) / 2, std::max(200, (getHeight() - 470) / 2 - 60), 920, 470);
+}
+
+void MainComponent::setSongView(bool song)
+{
+    if (project.songMode != song)
+    {
+        beginEdit();
+        project.songMode = song;
+        engine.stop();
+        projectChanged();
+        endEdit();
+    }
+    // Re-apply the editor for the current selection (Song view hides it).
+    selectChannel(audioSelected && !song ? -1 : selectedTrack);
+    updateSongControls();
+    resized();
+    repaint();
+}
+
+void MainComponent::refreshArrangement()
+{
+    if (arrangement == nullptr)
+        return;
+    ArrangementState view;
+    view.song = project.song;
+    for (int track = 0; track < maxTracks; ++track)
+    {
+        const auto t = static_cast<std::size_t>(track);
+        const auto& state = project.tracks[t];
+        view.used[t] = state.kind != TrackKind::None;
+        view.drums[t] = state.kind == TrackKind::Drums;
+        view.names[t] = state.trackName();
+        view.colours[t] = trackColour(state.icon);
+        for (int slot = 0; slot < numPatterns; ++slot)
+            view.contentCount[t][static_cast<std::size_t>(slot)] = state.kind == TrackKind::Drums
+                ? state.drumPatterns[static_cast<std::size_t>(slot)].hitCount()
+                : state.melodies[static_cast<std::size_t>(slot)].count;
+    }
+    view.selected = songStartPart;
+    view.playTick = engine.isPlaying() && project.songMode ? engine.getTickPosition() : -1.0;
+    arrangement->setState(view);
+}
+
+void MainComponent::handleArrangementAction(const ArrangementAction& action)
+{
+    using K = ArrangementAction::Kind;
+    auto& song = project.song;
+    auto edit = [this](auto&& change) {
+        const bool own = !editing;
+        if (own)
+            beginEdit();
+        change();
+        projectChanged();
+        if (own)
+            endEdit();
+    };
+    auto partLabel = [&song](int s) {
+        return juce::String(songPartName(song.parts[static_cast<std::size_t>(s)])) + " (bars "
+            + juce::String(s * 4 + 1) + "-" + juce::String(s * 4 + 4) + ")";
+    };
+    const auto s = static_cast<std::size_t>(std::max(0, action.section));
+    const auto t = static_cast<std::size_t>(std::clamp(action.track, 0, maxTracks - 1));
+    switch (action.kind)
+    {
+        case K::SetCell:
+            edit([&] {
+                song.trackOn[s][t] = action.on;
+                song.slots[s][t] = static_cast<std::uint8_t>(std::clamp(action.value, 0, numPatterns - 1));
+            });
+            break;
+        case K::SelectSection:
+            songStartPart = action.section;
+            engine.setSongStartSection(songStartPart);
+            if (engine.isPlaying() && project.songMode)
+            {
+                engine.stop();
+                engine.setPlaying(true);
+            }
+            refreshArrangement();
+            status.setText("Song plays from " + partLabel(action.section) + ". Press Play (Space).",
+                           juce::dontSendNotification);
+            break;
+        case K::EditPart:
+            editPart = action.section;
+            setSongView(false);
+            break;
+        case K::EditLoop:
+            if (project.tracks[t].kind == TrackKind::None)
+                break;
+            selectedTrack = action.track;
+            editPart = action.section;
+            if (editPart < 0)
+            {
+                trackMelodySlot[t] = std::clamp(action.value, 0, numPatterns - 1);
+                trackDrumSlot[t] = trackMelodySlot[t];
+            }
+            setSongView(false);
+            break;
+        case K::SetPartType:
+            edit([&] { song.parts[s] = static_cast<SongPart>(std::clamp(action.value, 0, static_cast<int>(SongPart::numParts) - 1)); });
+            break;
+        case K::Duplicate:
+            edit([&] { song.duplicateSection(action.section); });
+            break;
+        case K::Insert:
+            edit([&] { song.insertSection(action.section + 1); });
+            break;
+        case K::Remove:
+            edit([&] { song.removeSection(action.section); });
+            if (editPart == action.section)
+                editPart = -1;
+            else if (editPart > action.section)
+                --editPart;
+            if (songStartPart > action.section)
+                --songStartPart;
+            projectChanged();
+            break;
+        case K::Move:
+            edit([&] { song.moveSection(action.section, action.value); });
+            if (songStartPart == action.section)
+                songStartPart = action.value;
+            projectChanged();
+            break;
+        case K::Add:
+            if (song.sections >= maxSections)
+            {
+                showError("Songs can have up to " + juce::String(maxSections) + " parts (" + juce::String(maxSections * 4)
+                          + " bars).");
+                break;
+            }
+            edit([&] { song.insertSection(song.sections, song.sections - 1); });
+            status.setText("Added part " + juce::String(song.sections) + " as a copy of the one before. "
+                           "Right-click its header to name it.", juce::dontSendNotification);
+            break;
+        case K::MakeUnique:
+        {
+            bool made = false;
+            edit([&] {
+                made = project.tracks[t].kind == TrackKind::Drums
+                    ? makeDrumSectionUnique(song, project.tracks[t].drumPatterns, action.section, action.track)
+                    : makeSectionUnique(song, project.tracks[t].melodies, action.section, action.track);
+            });
+            if (!made)
+                showError("This part already has its own copy, or all four loops on this track are in use.");
+            break;
+        }
+    }
+}
+
+void MainComponent::updateSongControls()
+{
+    const bool song = project.songMode;
+    loopView.setToggleState(!song, juce::dontSendNotification);
+    songView.setToggleState(song, juce::dontSendNotification);
+    if (arrangement == nullptr)
+        return;
+    arrangement->setVisible(song);
+    songTemplate.setVisible(song);
+    if (song)
+    {
+        for (juce::Component* c : std::initializer_list<juce::Component*> {
+                 &pianoRoll, &drumSequencer, audioView.get(), &duplicatePattern, &clear, &kitButton,
+                 &repeatBar, &description, &instrumentChoice, &editSynth, &partChoice, &partTrackOn, &partHint })
+            if (c != nullptr)
+                c->setVisible(false);
+        for (auto& tab : patternTabs)
+            tab.setVisible(false);
+        demo.setVisible(true); // AI composer stays reachable in Song view
+        refreshArrangement();
+        return;
+    }
+    const bool trackEditor = !audioSelected;
+    partChoice.setVisible(trackEditor);
+    partHint.setVisible(trackEditor);
+    partChoice.clear(juce::dontSendNotification);
+    partChoice.addItem("Free loop (no song part)", 1);
+    for (int s = 0; s < project.song.sections; ++s)
+        partChoice.addItem(juce::String(s + 1) + "   " + songPartName(project.song.parts[static_cast<std::size_t>(s)])
+                               + "   (bars " + juce::String(s * 4 + 1) + "-" + juce::String(s * 4 + 4) + ")",
+                           s + 2);
+    partChoice.setSelectedId(editPart >= 0 ? editPart + 2 : 1, juce::dontSendNotification);
+    const auto sel = static_cast<std::size_t>(selectedTrack);
+    const bool inPart = editPart >= 0 && editPart < project.song.sections;
+    partTrackOn.setVisible(trackEditor && inPart);
+    juce::String hint;
+    if (inPart)
+    {
+        const auto e = static_cast<std::size_t>(editPart);
+        const int slot = project.song.slots[e][sel];
+        partTrackOn.setToggleState(project.song.trackOn[e][sel], juce::dontSendNotification);
+        juce::StringArray others;
+        for (const auto part : sectionsSharingSlot(project.song, selectedTrack, slot))
+            if (part != editPart + 1)
+                others.add(juce::String(part));
+        hint = "This track plays loop " + juce::String::charToString(static_cast<juce::juce_wchar>('A' + slot))
+            + " here" + (others.isEmpty() ? juce::String(".") : ", also used in parts " + others.joinIntoString(", ") + ".");
+    }
+    else
+        hint = "Each track loops its own chosen pattern. Pick a part to hear and edit it in context.";
+    partHint.setText(hint, juce::dontSendNotification);
+    const int hintX = partTrackOn.isVisible() ? 820 : 662;
+    partHint.setBounds(hintX, 292, std::max(120, getWidth() - hintX - 200), 28);
 }
 }

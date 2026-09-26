@@ -1,6 +1,7 @@
 #pragma once
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <cmath>
+#include <vector>
 
 namespace sonora
 {
@@ -60,6 +61,33 @@ struct ReverbParams
     }
 };
 
+// Overdrive: tanh waveshaper with loudness compensation and a post tone
+// low-pass. Amount 0 bypasses the stage entirely (bit-exact).
+struct DriveParams
+{
+    float amount = 0.0f, tone = 12000.0f; // 0..1, Hz
+    bool enabled = true;
+    bool operator==(const DriveParams&) const = default;
+    bool valid() const
+    {
+        return std::isfinite(amount) && std::isfinite(tone)
+            && amount >= 0.0f && amount <= 1.0f && tone >= 800.0f && tone <= 16000.0f;
+    }
+};
+
+// Stereo chorus: two modulated delay taps 90 degrees apart. Mix 0 bypasses.
+struct ChorusParams
+{
+    float mix = 0.0f, rate = 0.7f, depth = 0.5f; // 0..1, Hz, 0..1
+    bool enabled = true;
+    bool operator==(const ChorusParams&) const = default;
+    bool valid() const
+    {
+        return std::isfinite(mix) && std::isfinite(rate) && std::isfinite(depth)
+            && mix >= 0.0f && mix <= 1.0f && rate >= 0.1f && rate <= 5.0f && depth >= 0.0f && depth <= 1.0f;
+    }
+};
+
 struct LimiterParams
 {
     float ceilingDb = -0.5f, releaseMs = 80.0f;
@@ -78,8 +106,13 @@ struct TrackFx
     CompParams comp;
     DelayParams delay;
     ReverbParams reverb;
+    DriveParams drive;
+    ChorusParams chorus;
     bool operator==(const TrackFx&) const = default;
-    bool valid() const { return eq.valid() && comp.valid() && delay.valid() && reverb.valid(); }
+    bool valid() const
+    {
+        return eq.valid() && comp.valid() && delay.valid() && reverb.valid() && drive.valid() && chorus.valid();
+    }
 };
 
 class ThreeBandEq
@@ -144,6 +177,37 @@ private:
     float wetL[2048] {}, wetR[2048] {};
 };
 
+class Overdrive
+{
+public:
+    void prepare(double sampleRate);
+    void setParams(const DriveParams& params);
+    void process(float* left, float* right, int count);
+    void reset();
+
+private:
+    DriveParams current;
+    juce::SmoothedValue<float> amountSmooth;
+    float toneCoeff = 1.0f, toneL = 0.0f, toneR = 0.0f, tone2L = 0.0f, tone2R = 0.0f;
+    double rate = 48000.0;
+};
+
+class StereoChorus
+{
+public:
+    void prepare(double sampleRate);
+    void setParams(const ChorusParams& params);
+    void process(float* left, float* right, int count);
+    void reset();
+
+private:
+    std::vector<float> lineL, lineR;
+    ChorusParams current;
+    juce::SmoothedValue<float> mixSmooth;
+    double rate = 48000.0, lfo = 0.0;
+    int write = 0;
+};
+
 class BrickLimiter
 {
 public:
@@ -160,7 +224,7 @@ private:
     double rate = 48000.0;
 };
 
-// Fixed track chain: EQ -> compressor -> delay -> reverb. Mix knobs at zero
+// Fixed track chain: drive -> EQ -> compressor -> chorus -> delay -> reverb. Mix knobs at zero
 // make delay/reverb transparent; flat EQ and 1:1 compression pass audio
 // through untouched, so default projects sound exactly as before.
 class TrackChain
@@ -172,8 +236,10 @@ public:
     void reset();
 
 private:
+    Overdrive drive;
     ThreeBandEq eq;
     Compressor comp;
+    StereoChorus chorus;
     TempoDelay delay;
     SimpleReverb reverb;
     TrackFx current;

@@ -1,8 +1,11 @@
 # Sonora
 
-A native Linux synthesizer and DAW in development. Version 0.17.0 uses C++20,
+A native Linux synthesizer and DAW in development. Version 0.19.0 uses C++20,
 JUCE 8.0.6, and CMake. Licensed GPL-3.0-only (see LICENSE); JUCE retains its
-own license. No third-party sound assets are bundled.
+own license. Sampled instruments use the bundled GeneralUser GS 2.0.3 bank by
+S. Christian Collins (free for private and commercial music; see
+`assets/GeneralUser-GS-LICENSE.txt`) played by TinySoundFont (MIT). See
+`third_party/README.md` for pinned sources.
 
 Source and issue tracker: https://github.com/masonleetompkins/sonora
 
@@ -84,7 +87,55 @@ a fallback or for direct hardware access.
   Omarchy present it keeps the built-in neon look.
 - Cyan/violet track identity, custom buttons/rotary control, and animated transport/playhead/pad cues.
 - Resizable dark native UI; Ctrl+1/Ctrl+2 switch melody/drums.
-- 16-voice sine instrument with velocity and ADSR envelope.
+- MiniLab 3 knobs 1-8 control the selected instrument's sound, mapped per
+  instrument family (e.g. guitar: Distortion, Tone, Mids, Compress, Chorus,
+  Delay, Echoes, Reverb; synth: Cutoff, Resonance, Attack, Release, Drive,
+  Chorus, Delay, Reverb). Works in the Arturia/User program (CC 74, 71, 76,
+  77, 93, 18, 19, 16) and DAW mode (CC 86, 87, 89, 90, 110, 111, 116, 117).
+  The performance strip shows the current map and values; each knob gesture is
+  one undo step and is saved with the project.
+- MiniLab 3 screen and pads: switch the MiniLab to its DAW program
+  (Shift + Pad 3) and its screen shows the selected track and instrument,
+  then the knob name and value while you turn (e.g. DISTORTION / 42%); pads
+  light in the track colour. Sonora performs Arturia's DAW handshake itself;
+  in the regular program it just shows a tip and the MiniLab works as before.
+- Song view (LOOP | SONG switch at the top): an arrangement board with named,
+  colour-coded parts across the top (Intro, Verse, Pre-Chorus, Chorus,
+  Bridge, Break, Build, Drop, Outro) and one row per track. Drag a track's
+  loop chips (A-D) onto parts, click cells on/off, drag across to paint,
+  scroll or right-click to pick a loop, drag part headers to reorder, and
+  right-click a part to name, duplicate, insert, or delete it. Click a part to
+  play the song from there; the playhead follows along. Song structure
+  templates (Simple, Pop, EDM, Hip-hop) build a full song from your loops in
+  one step. Up to 16 parts (64 bars).
+- "Working on" part selector in Loop view: the loop plays exactly that part
+  (each track's loop for it, silent tracks muted) and pattern tabs choose
+  which loop the track uses there.
+- Per-track Drive (overdrive with tone control) and stereo Chorus effects, in
+  a Drive -> EQ -> Compressor -> Chorus -> Delay -> Reverb chain.
+- AI assistant sidebar (AI assistant button or Ctrl+I): chat with Claude on
+  the right while you work. It writes or edits the selected track's melody
+  or drum beat, sees the whole song structure and the other tracks in the
+  part you're working on (silent tracks included), and remembers the
+  conversation so you can say "simpler" or "add a fill in bar 4". Each
+  change replaces the current loop in one undoable step. Docks beside the
+  editor on wide windows and floats over it on narrow ones. In Song view it
+  becomes a song composer: it sees every track's loops and the arrangement,
+  composes the whole song (section order, which tracks play where), and
+  writes new variation loops (fills, half-time grooves, lifted final-chorus
+  melodies) into empty loop slots only, never rewriting your loops. One Undo
+  restores the previous song. See "AI melody and privacy" below.
+- Editable synth (Sine Keys, "Edit sound"): two oscillators (sine/triangle/
+  saw/square, blend, semitone, fine), resonant low-pass filter with its own
+  ADSR, amp ADSR, LFO vibrato/filter wobble, drive, stereo chorus, output
+  level, a live waveform preview, and 10 factory patches (pads, leads, basses,
+  plucks, brass, bells, organ, chip). Edits play instantly on held notes and
+  are undoable; synth, FX, and volume tweaks never cut sounding notes.
+- Per-track instrument selector: Sine Keys (editable synth) or sampled Grand/
+  Bright/Electric Piano, Nylon/Steel/Jazz/Clean/Overdriven Guitar, Acoustic/
+  Fingered/Picked/Synth Bass, Trumpet, Trombone, French Horn, Brass Section,
+  and String Ensemble. Notes stay put when you switch; TRACK effects shape the
+  chosen sound, and exports render the same instrument.
 - On-screen/computer keyboard and external MIDI input.
 - Output selection, sample-rate/buffer controls, CPU status, and panic button.
 - Four-bar, 4/4 looping transport with 40-240 BPM tempo control and playhead.
@@ -217,7 +268,10 @@ sample import and kit browsing are still to come. See `ASSETS.md` for provenance
 
 ### Project files and recovery
 
-Save projects as `*.sonora.json`. Format v6 contains tempo, timing metadata, two
+Save projects as `*.sonora.json`. Format v10 adds each synth track's
+instrument preset, v11 adds each track's synth patch, and v12 adds per-track
+drive and chorus, and v13 adds named song parts and 16-part songs; older projects open
+with Sine Keys and the default sine patch. It contains tempo, timing metadata, two
 stable track IDs/instrument identifiers, track mix settings, per-track effect
 chains, master limiter settings, four melody patterns and four drum patterns
 per track, per-pad custom sample filenames, the factory kit variant, audio take
@@ -293,3 +347,24 @@ and project snapshot transfer themselves require no locks or dynamic allocation.
 Synth voice stealing is disabled until click-free stealing is implemented. Pitch
 bend and sustain are not implemented yet. Melody edits and transport/mute changes
 can still silence/reconstruct voices abruptly; seamless reconciliation is future work.
+
+## AI melody and privacy
+
+The AI assistant runs through the Claude Code CLI already installed and signed in on
+your computer, so it uses your Claude subscription. Sonora never asks for,
+reads, stores, or transmits credentials. Each request:
+
+- runs `claude` as a child process with a fixed argument list (no shell) and
+  sends the request on stdin;
+- disables every Claude Code tool, MCP server, user/project setting, and hook,
+  keeps no session history, and runs in an empty temporary folder, so Claude
+  can only reply with text;
+- removes `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` from the child's
+  environment so a stray key is never billed or exposed;
+- shares only the tempo, song structure, track names, instruments, notes/drum
+  steps of the section you're working on, and the recent conversation;
+- treats the reply as untrusted data: schema-constrained, then clamped and
+  validated into notes (pitches folded into range, overlaps trimmed, capped).
+
+Sonora looks for `claude` via `SONORA_CLAUDE_PATH` (absolute path), then
+absolute `PATH` entries, then common per-user install locations.

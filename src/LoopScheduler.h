@@ -20,6 +20,8 @@ public:
         position = std::min(loopFrames - 1, static_cast<std::int64_t>(fraction * static_cast<double>(loopFrames)));
     }
     void rewind() { position = 0; }
+    // Song mode starts playback at a section boundary ("play from here").
+    void seekTicks(int tick) { position = std::max<std::int64_t>(0, frameAt(tick)); }
     double tickPosition() const { return static_cast<double>(position) / framesPerTick; }
     std::int64_t lengthInSamples() const { return loopFrames; }
     std::int64_t samplePosition() const { return position; }

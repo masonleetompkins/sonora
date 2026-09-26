@@ -3,6 +3,9 @@
 #include "Export.h"
 #include "Fx.h"
 #include "KitSamples.h"
+#include "KnobMaps.h"
+#include "AiMelody.h"
+#include "MiniLabDisplay.h"
 #include "OmarchyTheme.h"
 #include "PitchCorrect.h"
 #include "ProjectIO.h"
@@ -23,6 +26,16 @@ void require(bool value, const char* message)
 
 // Rewrites a current-version document into an older version's shape so
 // migration paths decode realistic legacy files (not just relabeled v9).
+// Files before v13 store 8 arrangement rows and no part types.
+inline void toPreV13Song(juce::var& document)
+{
+    auto* song = document.getDynamicObject()->getProperty("song").getDynamicObject();
+    for (const char* key : { "slots", "cells" })
+        if (auto* rows = song->getProperty(key).getArray())
+            rows->removeRange(sonora::legacyMaxSections, rows->size());
+    song->removeProperty("parts");
+}
+
 inline juce::var downshapeToVersion(juce::var document, int version)
 {
     auto* root = document.getDynamicObject();
@@ -38,7 +51,7 @@ inline juce::var downshapeToVersion(juce::var document, int version)
     else
     {
         juce::Array<juce::var> melodyFlags, drumFlags;
-        for (int s = 0; s < sonora::maxSections; ++s)
+        for (int s = 0; s < sonora::legacyMaxSections; ++s)
         {
             melodyFlags.add(song9->getProperty("cells").getArray()->getReference(s)
                                 .getArray()->getReference(0));
@@ -50,7 +63,7 @@ inline juce::var downshapeToVersion(juce::var document, int version)
         if (version >= 6)
         {
             juce::Array<juce::var> melodySlots, drumSlots;
-            for (int s = 0; s < sonora::maxSections; ++s)
+            for (int s = 0; s < sonora::legacyMaxSections; ++s)
             {
                 melodySlots.add(song9->getProperty("slots").getArray()->getReference(s)
                                     .getArray()->getReference(0));
@@ -62,6 +75,7 @@ inline juce::var downshapeToVersion(juce::var document, int version)
         }
         song9->removeProperty("slots");
         song9->removeProperty("cells");
+        song9->removeProperty("parts");
     }
     // Legacy two-track list rebuilt from slots 0 and 1.
     auto legacyMelody = std::make_unique<juce::DynamicObject>();
@@ -207,9 +221,9 @@ void testPersistence()
     require(sonora::ProjectIO::decode("{broken json", loaded).failed(), "malformed JSON accepted");
     require(loaded == good, "failed load mutated the project");
     auto json = sonora::ProjectIO::encode(original);
-    require(sonora::ProjectIO::decode(json.replace("\"version\": 9", "\"version\": 10"), loaded).failed(),
+    require(sonora::ProjectIO::decode(json.replace("\"version\": 13", "\"version\": 14"), loaded).failed(),
             "unknown version accepted");
-    require(sonora::ProjectIO::decode(json.replace("\"version\": 9", "\"version\": 4294967297"), loaded).failed(),
+    require(sonora::ProjectIO::decode(json.replace("\"version\": 13", "\"version\": 4294967297"), loaded).failed(),
             "overflowed version accepted");
     require(sonora::ProjectIO::decode(json.replace("\"velocity\": 100", "\"velocity\": 0"), loaded).failed(),
             "zero velocity accepted");
@@ -649,7 +663,7 @@ void testArrangement()
     require(!loaded.songMode && loaded.song.sections == 2, "v2 default arrangement wrong");
     require(sonora::ProjectIO::decode(sonora::ProjectIO::encode(loaded), loaded).wasOk(), "migrated v2 re-save failed");
     auto bad = juce::JSON::parse(sonora::ProjectIO::encode(songProject));
-    bad.getDynamicObject()->getProperty("song").getDynamicObject()->setProperty("sections", 9);
+    bad.getDynamicObject()->getProperty("song").getDynamicObject()->setProperty("sections", sonora::maxSections + 1);
     require(sonora::ProjectIO::decode(juce::JSON::toString(bad), loaded).failed(), "oversized song accepted");
 
     // Engine: song mode stops at the end; loop mode keeps playing.
@@ -931,7 +945,7 @@ void testFxPersistence()
     original.master.releaseMs = 120.0f;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 9"), "projects must save as v9");
+    require(json.contains("\"version\": 13"), "projects must save as v13");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "fx round-trip changed parameters");
 
@@ -1006,7 +1020,7 @@ void testTakePersistence()
     original.takes[1].mute = true;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 9"), "take projects must save as v9");
+    require(json.contains("\"version\": 13"), "take projects must save as v13");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "take round-trip changed metadata");
 
@@ -1432,7 +1446,7 @@ void testVariations()
     original.song.sections = 4;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 9"), "variation projects must save as v9");
+    require(json.contains("\"version\": 13"), "variation projects must save as v13");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "variation round-trip changed slots or indices");
 
@@ -1697,7 +1711,7 @@ void testKitPersistence()
     original.tracks[1].kitVariant = 1;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 9"), "kit projects must save as v9");
+    require(json.contains("\"version\": 13"), "kit projects must save as v13");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "kit round-trip changed pad samples");
     // Version 6 documents migrate to the built-in kit.
@@ -1916,6 +1930,1028 @@ void testOmarchyTheme()
     (void) themeFingerprint();
 }
 
+void testInstruments()
+{
+    sonora::AudioEngine probe;
+    require(probe.instrumentsAvailable(), "bundled GeneralUser GS bank failed to load");
+    for (std::size_t i = 0; i < sonora::instruments.size(); ++i)
+        for (std::size_t j = 0; j < i; ++j)
+            require(juce::String(sonora::instruments[i].name) != sonora::instruments[j].name,
+                    "duplicate instrument name");
+
+    // One held note on track 0; drums silent so only the instrument sounds.
+    auto project = fixture();
+    project.tracks[0].melodies[0] = {};
+    project.tracks[0].melodies[0].count = 1;
+    project.tracks[0].melodies[0].notes[0] = { 1, 0, 3840, 60, 110 };
+    project.tracks[1].drumPatterns[0] = {};
+    auto render = [](const sonora::ProjectState& state, int blocks) {
+        sonora::AudioEngine engine;
+        engine.prepare(48000.0);
+        require(engine.submit(state), "instrument project rejected");
+        engine.setPlaying(true);
+        std::vector<float> out;
+        juce::AudioBuffer<float> buffer(2, 512);
+        for (int i = 0; i < blocks; ++i)
+        {
+            engine.process({ &buffer, 0, 512 });
+            for (int s = 0; s < 512; ++s)
+                out.push_back(buffer.getSample(0, s));
+        }
+        return out;
+    };
+    auto peak = [](const std::vector<float>& audio) {
+        float value = 0.0f;
+        for (auto x : audio)
+        {
+            require(std::isfinite(x), "instrument produced non-finite audio");
+            value = std::max(value, std::abs(x));
+        }
+        return value;
+    };
+    const auto sine = render(project, 40);
+    int audibleCount = 0;
+    for (int preset = 1; preset < static_cast<int>(sonora::instruments.size()); ++preset)
+    {
+        auto variant = project;
+        variant.tracks[0].instrumentPreset = preset;
+        const auto audio = render(variant, 40);
+        const auto level = peak(audio);
+        require(level < 1.0f, "sampled instrument clips");
+        if (level > 0.01f)
+            ++audibleCount;
+        require(audio != sine, "sampled preset rendered as the sine voice");
+    }
+    require(audibleCount == static_cast<int>(sonora::instruments.size()) - 1, "a sampled preset is silent");
+
+    // Panic cuts sampled voices at once; no release tail in the next block.
+    {
+        auto piano = project;
+        piano.tracks[0].instrumentPreset = 1;
+        sonora::AudioEngine engine;
+        engine.prepare(48000.0);
+        require(engine.submit(piano), "piano project rejected");
+        engine.setPlaying(true);
+        juce::AudioBuffer<float> buffer(2, 512);
+        for (int i = 0; i < 10; ++i)
+            engine.process({ &buffer, 0, 512 });
+        require(buffer.getMagnitude(0, 512) > 0.01f, "piano silent before panic");
+        engine.stop();
+        engine.panic();
+        engine.process({ &buffer, 0, 512 });
+        require(buffer.getMagnitude(0, 512) == 0.0f, "piano rang after panic");
+    }
+
+    // Another track's insert effects must never process this track's audio.
+    {
+        auto dry = project;
+        dry.tracks[0].instrumentPreset = 1;
+        auto wet = dry;
+        wet.tracks[1].fx.eq.low = 15.0f;
+        wet.tracks[1].fx.eq.high = 15.0f;
+        wet.tracks[1].fx.reverb.mix = 1.0f;
+        require(render(dry, 30) == render(wet, 30), "drum FX leaked into instrument track");
+    }
+
+    // Bounced WAVs carry the sampled instrument, not the sine.
+    {
+        sonora::ExportJob job;
+        job.project = project;
+        job.project.tracks[0].instrumentPreset = 13; // trumpet
+        const auto sampled = sonora::OfflineExport::render(job);
+        job.project.tracks[0].instrumentPreset = 0;
+        const auto sineBounce = sonora::OfflineExport::render(job);
+        require(sampled.ok() && sineBounce.ok() && sampled.peak > 0.01f, "instrument export failed");
+        bool differs = false;
+        for (int s = 0; s < std::min(sampled.audio.getNumSamples(), sineBounce.audio.getNumSamples()) && !differs; ++s)
+            differs = std::abs(sampled.audio.getSample(0, s) - sineBounce.audio.getSample(0, s)) > 1.0e-4f;
+        require(differs, "export ignored the instrument preset");
+    }
+
+    // v10 persistence, v9 migration to Sine Keys, and malformed presets.
+    auto saved = project;
+    saved.tracks[0].instrumentPreset = 10;
+    saved.tracks[2].id = 3;
+    saved.tracks[2].kind = sonora::TrackKind::Synth;
+    saved.tracks[2].setTrackName("Horns");
+    saved.tracks[2].instrumentPreset = 16;
+    const auto json = sonora::ProjectIO::encode(saved);
+    sonora::ProjectState loaded;
+    require(json.contains("\"version\": 13"), "instrument projects must save as v13");
+    require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "instrument round-trip failed");
+    auto legacy = juce::JSON::parse(json);
+    legacy.getDynamicObject()->setProperty("version", 9);
+    toPreV13Song(legacy);
+    for (auto& track : *legacy.getDynamicObject()->getProperty("tracks").getArray())
+        track.getDynamicObject()->removeProperty("preset");
+    require(sonora::ProjectIO::decode(juce::JSON::toString(legacy), loaded).wasOk()
+            && loaded.tracks[0].instrumentPreset == 0 && loaded.tracks[2].instrumentPreset == 0,
+            "v9 projects must open with Sine Keys");
+    for (const auto bad : { juce::var(-1), juce::var(static_cast<int>(sonora::instruments.size())), juce::var("piano") })
+    {
+        auto document = juce::JSON::parse(json);
+        document.getDynamicObject()->getProperty("tracks").getArray()->getReference(0)
+            .getDynamicObject()->setProperty("preset", bad);
+        loaded = saved;
+        require(sonora::ProjectIO::decode(juce::JSON::toString(document), loaded).failed(), "bad preset accepted");
+        require(loaded == saved, "bad preset destroyed current state");
+    }
+    auto missing = juce::JSON::parse(json);
+    missing.getDynamicObject()->getProperty("tracks").getArray()->getReference(0)
+        .getDynamicObject()->removeProperty("preset");
+    require(sonora::ProjectIO::decode(juce::JSON::toString(missing), loaded).failed(), "v10 without preset accepted");
+    auto invalid = saved;
+    invalid.tracks[0].instrumentPreset = 99;
+    require(!invalid.valid(), "out-of-range preset validated");
+}
+
+void testSynthEngine()
+{
+    for (const auto& patch : sonora::synthPatches())
+        require(patch.params.valid(), "factory synth patch out of range");
+    require(sonora::synthPatches()[0].params == sonora::SynthParams {}, "patch 0 must be the default sine");
+
+    auto project = fixture();
+    project.tracks[0].melodies[0] = {};
+    project.tracks[0].melodies[0].count = 1;
+    project.tracks[0].melodies[0].notes[0] = { 1, 0, 3840, 57, 110 };
+    project.tracks[1].drumPatterns[0] = {};
+    struct Stereo { std::vector<float> left, right; };
+    auto render = [](const sonora::ProjectState& state, int blocks) {
+        sonora::AudioEngine engine;
+        engine.prepare(48000.0);
+        require(engine.submit(state), "synth project rejected");
+        engine.setPlaying(true);
+        Stereo out;
+        juce::AudioBuffer<float> buffer(2, 512);
+        for (int i = 0; i < blocks; ++i)
+        {
+            engine.process({ &buffer, 0, 512 });
+            for (int s = 0; s < 512; ++s)
+            {
+                require(std::isfinite(buffer.getSample(0, s)), "synth produced non-finite audio");
+                out.left.push_back(buffer.getSample(0, s));
+                out.right.push_back(buffer.getSample(1, s));
+            }
+        }
+        return out;
+    };
+    auto peak = [](const std::vector<float>& a, std::size_t from = 0, std::size_t to = 0) {
+        float value = 0.0f;
+        for (std::size_t i = from; i < (to == 0 ? a.size() : to); ++i)
+            value = std::max(value, std::abs(a[i]));
+        return value;
+    };
+    // Brightness proxy: derivative energy over signal energy. Level-independent
+    // and grows with harmonic content (a pure sine scores (2*pi*f/fs)^2).
+    auto brightness = [](const std::vector<float>& a) {
+        double diff = 0.0, energy = 1.0e-12;
+        for (std::size_t i = 1; i < a.size(); ++i)
+        {
+            diff += (a[i] - a[i - 1]) * (a[i] - a[i - 1]);
+            energy += a[i] * a[i];
+        }
+        return diff / energy;
+    };
+    const auto sine = render(project, 30);
+
+    // Every factory patch sounds, stays in range, and differs from the sine.
+    for (std::size_t i = 1; i < sonora::synthPatches().size(); ++i)
+    {
+        auto variant = project;
+        variant.tracks[0].synth = sonora::synthPatches()[i].params;
+        const auto audio = render(variant, 60);
+        require(peak(audio.left) > 0.005f, "factory patch silent");
+        require(peak(audio.left) < 1.0f, "factory patch clips");
+        require(audio.left != sine.left, "factory patch rendered as sine");
+    }
+
+    // Saw is brighter than sine; closing the filter darkens it again.
+    auto saw = project;
+    saw.tracks[0].synth.wave = sonora::WaveSaw;
+    const auto sawAudio = render(saw, 30);
+    auto dark = saw;
+    dark.tracks[0].synth.cutoff = 300.0f;
+    const auto darkAudio = render(dark, 30);
+    require(brightness(sawAudio.left) > brightness(sine.left) * 1.5, "saw not brighter than sine");
+    require(brightness(darkAudio.left) < brightness(sawAudio.left) * 0.5, "low-pass filter did not darken");
+
+    // A slow attack starts quiet; chorus widens the mono voice to stereo.
+    auto slow = project;
+    slow.tracks[0].synth.attack = 2.0f;
+    const auto slowAudio = render(slow, 30);
+    require(peak(slowAudio.left, 0, 2400) < peak(sine.left, 0, 2400) * 0.2f, "attack time ignored");
+    require(sine.left == sine.right, "default synth should be mono");
+    auto wide = project;
+    wide.tracks[0].synth.chorus = 1.0f;
+    const auto wideAudio = render(wide, 30);
+    require(wideAudio.left != wideAudio.right, "chorus did not widen");
+
+    // Sound edits apply live: a held note is neither cut nor re-triggered.
+    // Edits that change stored settings but not the audible result must leave
+    // the output sample-identical to an untouched engine.
+    {
+        sonora::AudioEngine reference, edited;
+        for (auto* engine : { &reference, &edited })
+        {
+            engine->prepare(48000.0);
+            require(engine->submit(project), "live-edit project rejected");
+            engine->setPlaying(true);
+        }
+        juce::AudioBuffer<float> a(2, 512), b(2, 512);
+        for (int i = 0; i < 10; ++i)
+        {
+            reference.process({ &a, 0, 512 });
+            edited.process({ &b, 0, 512 });
+        }
+        auto tweaked = project;
+        tweaked.tracks[0].synth.lfoRate = 9.0f;       // LFO depths are zero
+        tweaked.tracks[0].fx.delay.timeMs = 500.0f;   // delay mix is zero
+        tweaked.tracks[0].synth.filterDecay = 1.0f;   // filter is open
+        require(edited.submit(tweaked), "tweaked project rejected");
+        for (int i = 0; i < 3; ++i)
+        {
+            reference.process({ &a, 0, 512 });
+            edited.process({ &b, 0, 512 });
+            require(a.getMagnitude(0, 0, 512) > 0.01f, "reference note ended early");
+            for (int s = 0; s < 512; ++s)
+                require(a.getSample(0, s) == b.getSample(0, s), "sound edit cut or re-triggered the held note");
+        }
+        // A real timbre edit on the held note is heard immediately.
+        auto brighter = tweaked;
+        brighter.tracks[0].synth.wave = sonora::WaveSaw;
+        require(edited.submit(brighter), "brighter project rejected");
+        reference.process({ &a, 0, 512 });
+        edited.process({ &b, 0, 512 });
+        bool changed = false;
+        for (int s = 0; s < 512 && !changed; ++s)
+            changed = a.getSample(0, s) != b.getSample(0, s);
+        require(changed && b.getMagnitude(0, 0, 512) > 0.01f, "live wave change not heard");
+    }
+
+    // v11 round-trip, v10 migration to the default sine, malformed synths.
+    auto saved = project;
+    saved.tracks[0].synth = sonora::synthPatches()[3].params;
+    const auto json = sonora::ProjectIO::encode(saved);
+    sonora::ProjectState loaded;
+    require(json.contains("\"version\": 13"), "synth projects must save as v13");
+    require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "synth round-trip failed");
+    auto legacy = juce::JSON::parse(json);
+    legacy.getDynamicObject()->setProperty("version", 10);
+    toPreV13Song(legacy);
+    for (auto& track : *legacy.getDynamicObject()->getProperty("tracks").getArray())
+        track.getDynamicObject()->removeProperty("synth");
+    require(sonora::ProjectIO::decode(juce::JSON::toString(legacy), loaded).wasOk()
+            && loaded.tracks[0].synth == sonora::SynthParams {}, "v10 projects must open with the default sine");
+    auto reject = [&](const char* field, juce::var value) {
+        auto document = juce::JSON::parse(json);
+        auto* synth = document.getDynamicObject()->getProperty("tracks").getArray()->getReference(0)
+                          .getDynamicObject()->getProperty("synth").getDynamicObject();
+        synth->setProperty(field, value);
+        loaded = saved;
+        require(sonora::ProjectIO::decode(juce::JSON::toString(document), loaded).failed(),
+                ("bad synth field accepted: " + juce::String(field)).toRawUTF8());
+        require(loaded == saved, "bad synth destroyed current state");
+    };
+    reject("wave", 4);
+    reject("wave2", -1);
+    reject("cutoff", 10.0);
+    reject("resonance", 1.5);
+    reject("attack", 0.0);
+    reject("level", "loud");
+    auto missing = juce::JSON::parse(json);
+    missing.getDynamicObject()->getProperty("tracks").getArray()->getReference(0)
+        .getDynamicObject()->removeProperty("synth");
+    require(sonora::ProjectIO::decode(juce::JSON::toString(missing), loaded).failed(), "v11 without synth accepted");
+}
+
+void testKnobs()
+{
+    // Both MiniLab CC sets resolve to knobs 1-8; everything else is ignored.
+    for (int knob = 0; knob < 8; ++knob)
+    {
+        require(sonora::knobIndexForController(sonora::miniLabKnobCcs[knob]) == knob, "user-program knob CC unmapped");
+        require(sonora::knobIndexForController(sonora::miniLabDawKnobCcs[knob]) == knob, "DAW-mode knob CC unmapped");
+    }
+    for (int cc : { 0, 1, 7, 64, 102, 114, 127 })
+        require(sonora::knobIndexForController(cc) < 0, "non-knob CC captured");
+
+    // Every instrument (and drums) gets 8 distinct, in-range controls, and
+    // extreme knob positions always leave a valid project.
+    auto project = fixture();
+    std::vector<sonora::Track> tracks;
+    for (int preset = 0; preset < static_cast<int>(sonora::instruments.size()); ++preset)
+    {
+        auto track = project.tracks[0];
+        track.instrumentPreset = preset;
+        tracks.push_back(track);
+    }
+    tracks.push_back(project.tracks[1]);
+    for (auto track : tracks)
+    {
+        const auto map = sonora::knobMapFor(track);
+        for (int a = 0; a < 8; ++a)
+            for (int b = 0; b < a; ++b)
+                require(map[static_cast<std::size_t>(a)].target != map[static_cast<std::size_t>(b)].target,
+                        "duplicate knob target");
+        for (float v : { 0.0f, 0.37f, 1.0f })
+            for (const auto& slot : map)
+            {
+                auto edited = project;
+                edited.tracks[0] = track;
+                sonora::applyKnob(edited.tracks[0], slot.target, v);
+                require(edited.valid(), ("knob made project invalid: " + juce::String(slot.label)).toRawUTF8());
+                require(sonora::knobValueText(edited.tracks[0], slot.target).isNotEmpty(), "empty knob readout");
+            }
+    }
+
+    // Guitars put distortion on knob 1 and reverb on knob 8.
+    auto guitar = project.tracks[0];
+    guitar.instrumentPreset = 8; // Overdriven Guitar
+    const auto guitarMap = sonora::knobMapFor(guitar);
+    require(juce::String(guitarMap[0].label) == "Distortion" && guitarMap[0].target == sonora::KnobTarget::Drive,
+            "guitar knob 1 should be distortion");
+    require(guitarMap[7].target == sonora::KnobTarget::ReverbMix, "guitar knob 8 should be reverb");
+    require(sonora::knobMapFor(project.tracks[0])[0].target == sonora::KnobTarget::SynthCutoff,
+            "editable synth knob 1 should be cutoff");
+
+    // Knob positions read back where they were set (log and linear curves).
+    for (auto target : { sonora::KnobTarget::SynthCutoff, sonora::KnobTarget::SynthAttack, sonora::KnobTarget::Drive,
+                         sonora::KnobTarget::DelayTime, sonora::KnobTarget::ReverbMix, sonora::KnobTarget::Volume })
+    {
+        auto track = project.tracks[0];
+        sonora::applyKnob(track, target, 0.73f);
+        require(std::abs(sonora::knobPosition(track, target) - 0.73f) < 0.01f, "knob position round-trip drifted");
+    }
+    // A knob wakes its effect from bypass; the EQ centre detent is exactly flat.
+    auto bypassed = project.tracks[0];
+    bypassed.fx.reverb.enabled = false;
+    sonora::applyKnob(bypassed, sonora::KnobTarget::ReverbMix, 0.5f);
+    require(bypassed.fx.reverb.enabled && bypassed.fx.reverb.mix > 0.49f, "knob did not enable bypassed reverb");
+    sonora::applyKnob(bypassed, sonora::KnobTarget::EqHigh, 64.0f / 127.0f);
+    require(bypassed.fx.eq.high == 0.0f, "EQ knob centre is not flat");
+
+    // Drive adds harmonics to a sampled guitar; the tone control tames them;
+    // track chorus makes a mono source stereo. Measured through the engine.
+    auto melody = project;
+    melody.tracks[0].melodies[0] = {};
+    melody.tracks[0].melodies[0].count = 1;
+    melody.tracks[0].melodies[0].notes[0] = { 1, 0, 3840, 52, 110 };
+    melody.tracks[1].drumPatterns[0] = {};
+    auto render = [](const sonora::ProjectState& state) {
+        sonora::AudioEngine engine;
+        engine.prepare(48000.0);
+        require(engine.submit(state), "knob project rejected");
+        engine.setPlaying(true);
+        std::vector<float> left, right;
+        juce::AudioBuffer<float> buffer(2, 512);
+        for (int i = 0; i < 40; ++i)
+        {
+            engine.process({ &buffer, 0, 512 });
+            for (int s = 0; s < 512; ++s)
+            {
+                require(std::isfinite(buffer.getSample(0, s)), "drive/chorus produced non-finite audio");
+                left.push_back(buffer.getSample(0, s));
+                right.push_back(buffer.getSample(1, s));
+            }
+        }
+        return std::pair { left, right };
+    };
+    auto brightness = [](const std::vector<float>& a) {
+        double diff = 0.0, energy = 1.0e-12;
+        for (std::size_t i = 1; i < a.size(); ++i)
+        {
+            diff += (a[i] - a[i - 1]) * (a[i] - a[i - 1]);
+            energy += a[i] * a[i];
+        }
+        return diff / energy;
+    };
+    const auto clean = render(melody);
+    auto driven = melody;
+    sonora::applyKnob(driven.tracks[0], sonora::KnobTarget::Drive, 1.0f);
+    const auto drivenAudio = render(driven);
+    require(brightness(drivenAudio.first) > brightness(clean.first) * 1.5, "drive did not add harmonics");
+    float drivenPeak = 0.0f;
+    for (auto x : drivenAudio.first)
+        drivenPeak = std::max(drivenPeak, std::abs(x));
+    require(drivenPeak < 1.0f, "full drive clips the track");
+    auto dark = driven;
+    dark.tracks[0].fx.drive.tone = 800.0f;
+    require(brightness(render(dark).first) < brightness(drivenAudio.first) * 0.5, "drive tone did not darken");
+    require(clean.first == clean.second, "sine source should be mono");
+    auto chorused = melody;
+    sonora::applyKnob(chorused.tracks[0], sonora::KnobTarget::Chorus, 1.0f);
+    const auto wide = render(chorused);
+    require(wide.first != wide.second, "track chorus did not widen");
+
+    // v12 persists drive and chorus; v11 files open with both bypassed.
+    auto saved = project;
+    saved.tracks[0].fx.drive = { 0.6f, 5000.0f, true };
+    saved.tracks[0].fx.chorus = { 0.4f, 1.2f, 0.8f, false };
+    const auto json = sonora::ProjectIO::encode(saved);
+    sonora::ProjectState loaded;
+    require(json.contains("\"version\": 13"), "fx projects must save as v13");
+    require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "drive/chorus round-trip failed");
+    auto legacy = juce::JSON::parse(json);
+    legacy.getDynamicObject()->setProperty("version", 11);
+    toPreV13Song(legacy);
+    for (auto& track : *legacy.getDynamicObject()->getProperty("tracks").getArray())
+    {
+        auto* fx = track.getDynamicObject()->getProperty("fx").getDynamicObject();
+        fx->removeProperty("drive");
+        fx->removeProperty("chorus");
+    }
+    require(sonora::ProjectIO::decode(juce::JSON::toString(legacy), loaded).wasOk()
+            && loaded.tracks[0].fx.drive == sonora::DriveParams {} && loaded.tracks[0].fx.chorus == sonora::ChorusParams {},
+            "v11 projects must open with drive/chorus bypassed");
+    auto reject = [&](const char* effect, const char* field, juce::var value) {
+        auto document = juce::JSON::parse(json);
+        auto* fx = document.getDynamicObject()->getProperty("tracks").getArray()->getReference(0)
+                       .getDynamicObject()->getProperty("fx").getDynamicObject();
+        if (value.isVoid())
+            fx->removeProperty(effect);
+        else
+            fx->getProperty(effect).getDynamicObject()->setProperty(field, value);
+        loaded = saved;
+        require(sonora::ProjectIO::decode(juce::JSON::toString(document), loaded).failed(),
+                ("bad " + juce::String(effect) + " accepted").toRawUTF8());
+        require(loaded == saved, "bad fx destroyed current state");
+    };
+    reject("drive", "amount", 1.5);
+    reject("drive", "tone", 100.0);
+    reject("chorus", "rate", 9.0);
+    reject("chorus", "enabled", "yes");
+    reject("drive", "", juce::var());
+}
+
+void testAiMelody()
+{
+    namespace ai = sonora::ai;
+    const auto dir = juce::File::getSpecialLocation(juce::File::tempDirectory).getNonexistentChildFile("sonora-ai-test", "");
+    require(dir.createDirectory(), "AI test dir failed");
+    auto script = [&](const char* name, const juce::String& body) {
+        auto file = dir.getChildFile(name);
+        require(file.replaceWithText("#!/bin/sh\n" + body, false, false, "\n"), "fake script write failed");
+        require(file.setExecutePermission(true), "fake script chmod failed");
+        return file;
+    };
+
+    // Arguments reach the child verbatim: no shell, no splitting, no expansion.
+    const auto echoArgs = script("args", "for a in \"$@\"; do printf '[%s]' \"$a\"; done\n");
+    auto run = ai::runProcess(echoArgs, { "a b", "", "$HOME", "; rm -rf /", "--tools" }, {}, dir, {}, 5000, nullptr);
+    require(run.ok() && run.output == "[a b][][$HOME][; rm -rf /][--tools]", "arguments were not passed verbatim");
+
+    // Stdin, working directory, and environment are exactly what we supply.
+    const auto probe = script("probe", "cat; echo; pwd; echo \"key=${ANTHROPIC_API_KEY:-none} keep=${KEEP_ME:-none}\"\n");
+    const auto env = ai::sanitizedEnvironment({ "ANTHROPIC_API_KEY=sk-secret", "ANTHROPIC_AUTH_TOKEN=tok",
+                                                "KEEP_ME=yes", "PATH=/usr/bin:/bin" });
+    require(!env.joinIntoString("\n").contains("sk-secret") && !env.joinIntoString("\n").contains("tok")
+            && env.contains("KEEP_ME=yes"), "API keys not stripped from child environment");
+    const auto workDir = dir.getChildFile("work");
+    require(workDir.createDirectory(), "work dir failed");
+    run = ai::runProcess(probe, {}, "hello from stdin", workDir, env, 5000, nullptr);
+    require(run.ok() && run.output.startsWith("hello from stdin"), "stdin not delivered");
+    require(run.output.contains(workDir.getFullPathName()), "child did not run in the sandbox folder");
+    require(run.output.contains("key=none keep=yes"), "child environment wrong");
+
+    // Large stdin with simultaneous output cannot deadlock.
+    const auto big = juce::String::repeatedString("0123456789", 20000);
+    run = ai::runProcess(script("cat", "cat\n"), {}, big, dir, env, 10000, nullptr);
+    require(run.ok() && run.output == big, "large stdin round-trip failed");
+
+    // Timeouts and cancellation stop the process group promptly.
+    const auto sleeper = script("sleep", "sleep 30 & sleep 30\n");
+    auto started = juce::Time::getMillisecondCounterHiRes();
+    run = ai::runProcess(sleeper, {}, {}, dir, env, 300, nullptr);
+    require(run.timedOut && !run.ok() && juce::Time::getMillisecondCounterHiRes() - started < 5000, "timeout did not stop child");
+    std::atomic<bool> cancel { true };
+    started = juce::Time::getMillisecondCounterHiRes();
+    run = ai::runProcess(sleeper, {}, {}, dir, env, 60000, &cancel);
+    require(run.cancelled && juce::Time::getMillisecondCounterHiRes() - started < 5000, "cancel did not stop child");
+    require(!ai::runProcess(dir.getChildFile("missing"), {}, {}, dir, env, 1000, nullptr).ok(), "missing binary ran");
+
+    // CLI hardening flags are always present; nothing that widens access.
+    const auto args = ai::claudeArguments();
+    const auto toolsAt = args.indexOf("--tools");
+    require(toolsAt >= 0 && args[toolsAt + 1].isEmpty(), "tools not disabled");
+    require(args.contains("--strict-mcp-config") && args.contains("--no-session-persistence")
+            && args.contains("--json-schema") && args.contains("-p"), "hardening flag missing");
+    const auto sources = args.indexOf("--setting-sources");
+    require(sources >= 0 && args[sources + 1].isEmpty(), "user settings/hooks not disabled");
+    for (const auto& arg : args)
+        require(!arg.contains("dangerously") && !arg.contains("bypassPermissions") && arg != "--add-dir",
+                "argument widens CLI access");
+    require(juce::JSON::parse(ai::responseSchema()).getDynamicObject() != nullptr, "response schema is not JSON");
+
+    // Context: tempo, other tracks (notes named, drum steps), target excluded,
+    // user text cleaned and bounded.
+    auto project = fixture();
+    project.tracks[0].setTrackName("Lead \x01Line");
+    project.tracks[2].id = 3;
+    project.tracks[2].kind = sonora::TrackKind::Synth;
+    project.tracks[2].instrumentPreset = 10;
+    project.tracks[2].setTrackName("Bass");
+    project.tracks[2].melodies[0].count = 1;
+    project.tracks[2].melodies[0].notes[0] = { 1, 0, 960, 48, 100 };
+    ai::MelodyRequest request;
+    request.project = project;
+    request.track = 0;
+    request.prompt = "A bouncy hook\x07" + juce::String::repeatedString("x", 5000);
+    const auto message = ai::buildUserMessage(request);
+    require(message.contains("123 BPM") && message.contains("\"Bass\" (Fingered Bass)")
+            && message.contains("pitch=48 (C3)"), "context missing other tracks");
+    require(message.contains("Kick on sixteenth steps: 0,16,32,48"), "context missing drum steps");
+    require(message.contains("\"Lead Line\"") && !message.contains("\x01") && !message.contains("\x07"),
+            "control characters leaked into the model message");
+    require(message.contains("A bouncy hook") && !message.contains(juce::String::repeatedString("x", 2001)),
+            "user prompt not bounded");
+
+    // Parsing: structured output, fenced text fallback, errors, sanitizing.
+    auto envelope = [](const juce::String& notes, bool structured = true) {
+        const auto body = "{\"title\":\"Hook\",\"explanation\":\"Answers the lead.\",\"notes\":[" + notes + "]}";
+        return structured ? "{\"is_error\":false,\"result\":\"\",\"structured_output\":" + body + "}"
+                          : "{\"is_error\":false,\"result\":" + juce::JSON::toString(juce::var("```json\n" + body + "\n```")) + "}";
+    };
+    auto parsed = ai::parseMelodyResponse(envelope("{\"start\":0,\"duration\":480,\"pitch\":60,\"velocity\":100},"
+                                                   "{\"start\":480,\"duration\":480,\"pitch\":64,\"velocity\":90}"));
+    require(parsed.ok() && parsed.pattern.count == 2 && parsed.pattern.valid() && parsed.title == "Hook",
+            "structured melody not parsed");
+    parsed = ai::parseMelodyResponse(envelope("{\"start\":0,\"duration\":480,\"pitch\":67,\"velocity\":100}", false));
+    require(parsed.ok() && parsed.pattern.count == 1, "fenced text melody not parsed");
+    parsed = ai::parseMelodyResponse("{\"is_error\":true,\"result\":\"Not logged in. Please run /login\"}");
+    require(!parsed.ok() && parsed.error.contains("/login"), "CLI error not surfaced");
+    require(!ai::parseMelodyResponse("garbage").ok(), "garbage accepted");
+    require(!ai::parseMelodyResponse(envelope("")).ok(), "empty melody accepted");
+    parsed = ai::parseMelodyResponse(envelope(
+        "{\"start\":-50,\"duration\":99999,\"pitch\":84,\"velocity\":400},"   // clamp + fold 84 -> 60
+        "{\"start\":960,\"duration\":480,\"pitch\":60,\"velocity\":80},"      // overlaps the first on C4
+        "{\"start\":960,\"duration\":240,\"pitch\":60,\"velocity\":70},"      // exact duplicate start
+        "{\"start\":2000,\"duration\":100,\"pitch\":30,\"velocity\":0},"      // fold 30 -> 54, vel -> 1
+        "{\"start\":\"x\",\"duration\":1,\"pitch\":60,\"velocity\":1}"));    // non-numeric dropped
+    require(parsed.ok() && parsed.pattern.valid() && parsed.pattern.count == 3, "untrusted notes not sanitized");
+    require(parsed.pattern.notes[0].pitch == 60 && parsed.pattern.notes[0].start == 0
+            && parsed.pattern.notes[0].duration == 960 && parsed.pattern.notes[0].velocity == 127,
+            "overlap trim/clamp wrong");
+    require(parsed.pattern.notes[2].pitch == 54 && parsed.pattern.notes[2].velocity == 1, "pitch fold wrong");
+    juce::String many;
+    for (int i = 0; i < 400; ++i)
+        many << (i ? "," : "") << "{\"start\":" << (i * 30) % 15000 << ",\"duration\":30,\"pitch\":" << 48 + i % 24
+             << ",\"velocity\":100}";
+    parsed = ai::parseMelodyResponse(envelope(many));
+    require(parsed.ok() && parsed.pattern.count <= sonora::Pattern::capacity && parsed.pattern.valid(), "capacity not capped");
+
+    // End to end with a fake `claude` that checks it was sandboxed.
+    const auto fake = script("claude",
+        "case \"$*\" in *--strict-mcp-config*) ;; *) echo '{\"is_error\":true,\"result\":\"unsandboxed\"}'; exit 0;; esac\n"
+        "[ -z \"$ANTHROPIC_API_KEY\" ] || { echo '{\"is_error\":true,\"result\":\"key leaked\"}'; exit 0; }\n"
+        "[ -z \"$(ls -A .)\" ] || { echo '{\"is_error\":true,\"result\":\"cwd not empty\"}'; exit 0; }\n"
+        "grep -q 'bouncy' || { echo '{\"is_error\":true,\"result\":\"no prompt\"}'; exit 0; }\n"
+        "echo '" + envelope("{\"start\":0,\"duration\":960,\"pitch\":62,\"velocity\":100}").replace("'", "") + "'\n");
+    setenv("SONORA_CLAUDE_PATH", fake.getFullPathName().toRawUTF8(), 1);
+    setenv("ANTHROPIC_API_KEY", "sk-should-not-leak", 1);
+    require(ai::findClaudeExecutable() == fake, "SONORA_CLAUDE_PATH ignored");
+    const auto generated = ai::generateMelody(request, nullptr, 10000);
+    require(generated.ok() && generated.pattern.count == 1 && generated.pattern.notes[0].pitch == 62,
+            ("fake end-to-end generation failed: " + generated.error).toRawUTF8());
+    setenv("SONORA_CLAUDE_PATH", "relative/claude", 1);
+    require(!ai::findClaudeExecutable().getFullPathName().endsWith("relative/claude"), "relative CLI path trusted");
+    unsetenv("SONORA_CLAUDE_PATH");
+    unsetenv("ANTHROPIC_API_KEY");
+    require(dir.deleteRecursively(), "AI test cleanup failed");
+
+    // Opt-in: one real generation through the installed, signed-in Claude
+    // Code CLI (uses the subscription). Never runs in normal test passes.
+    if (juce::SystemStats::getEnvironmentVariable("SONORA_LIVE_CLAUDE", {}) == "1")
+    {
+        request.prompt = "A catchy, syncopated counter-melody that answers the other parts, mostly eighth notes.";
+        const auto started = juce::Time::getMillisecondCounterHiRes();
+        const auto live = ai::generateMelody(request, nullptr);
+        std::cout << "LIVE claude: " << (live.ok() ? "ok" : live.error) << " in "
+                  << juce::String((juce::Time::getMillisecondCounterHiRes() - started) / 1000.0, 1) << " s, "
+                  << live.pattern.count << " notes, title=\"" << live.title << "\"\n  " << live.explanation << "\n";
+        for (int i = 0; i < std::min(live.pattern.count, 12); ++i)
+        {
+            const auto& n = live.pattern.notes[static_cast<std::size_t>(i)];
+            std::cout << "    start=" << n.start << " dur=" << n.duration << " pitch=" << n.pitch << " vel=" << n.velocity << "\n";
+        }
+        require(live.ok() && live.pattern.valid() && live.pattern.count >= 4, "live Claude generation failed");
+    }
+}
+
+void testMiniLabDisplay()
+{
+    namespace ml = sonora::minilab;
+    using B = ml::Bytes;
+    // Byte-exact against the hardware-verified reference profile.
+    require(ml::deviceInquiry() == B { 0xF0, 0x7E, 0x7F, 0x06, 0x01, 0xF7 }, "device inquiry bytes");
+    require(ml::connectDaw() == B { 0xF0, 0x00, 0x20, 0x6B, 0x7F, 0x42, 0x02, 0x02, 0x40, 0x6A, 0x21, 0xF7 }, "DAW connect bytes");
+    require(ml::disconnectDaw() == B { 0xF0, 0x00, 0x20, 0x6B, 0x7F, 0x42, 0x02, 0x02, 0x40, 0x6A, 0x20, 0xF7 }, "DAW disconnect bytes");
+    require(ml::requestMode() == B { 0xF0, 0x00, 0x20, 0x6B, 0x7F, 0x42, 0x01, 0x00, 0x40, 0x01, 0xF7 }, "mode request bytes");
+    require(ml::requestPadBank() == B { 0xF0, 0x00, 0x20, 0x6B, 0x7F, 0x42, 0x01, 0x00, 0x40, 0x03, 0xF7 }, "pad bank request bytes");
+    B screen { 0xF0, 0x00, 0x20, 0x6B, 0x7F, 0x42, 0x04, 0x02, 0x60, 0x1F, 0x07, 0x01, 0x00, 0x00, 0x01, 0x00,
+               0x01, 'C', 'O', 'D', 'E', 'X', 0x00, 0x02 };
+    for (char c : juce::String("Connected").toStdString())
+        screen.push_back(static_cast<std::uint8_t>(c));
+    screen.insert(screen.end(), { 0x00, 0xF7 });
+    require(ml::screenMessage("CODEX", "Connected") == screen, "screen message bytes");
+
+    // Lines are truncated to 10/18 chars and non-ASCII becomes '?'; every
+    // data byte stays 7-bit so the SysEx is always well-formed.
+    const auto long1 = ml::screenMessage("DISTORTION AND MORE", juce::String::fromUTF8("42% caf\xc3\xa9 overdriven guitar"));
+    require(ml::asciiLine("DISTORTION AND MORE", ml::line1Chars).size() == 10, "line 1 not truncated");
+    require(ml::asciiLine(juce::String::fromUTF8("caf\xc3\xa9"), 18) == B { 'c', 'a', 'f', '?' }, "non-ASCII not replaced");
+    for (std::size_t i = 1; i + 1 < long1.size(); ++i)
+        require(long1[i] < 0x80, "screen SysEx has a non-7-bit byte");
+    require(long1.front() == 0xF0 && long1.back() == 0xF7, "screen SysEx framing");
+
+    // Pads: 8 x 7-bit RGB, scaled by brightness, for the requested bank.
+    const auto pads = ml::padBankMessage(ml::padBankB, 0xFF8000u, 0.5f);
+    require(pads.size() == 6 + 4 + 24 + 1 && pads[9] == 0x40, "pad bank message shape");
+    require(pads[10] == 64 && pads[11] == 32 && pads[12] == 0 && pads[31] == 64, "pad colour scaling");
+    for (std::size_t i = 1; i + 1 < pads.size(); ++i)
+        require(pads[i] < 0x80, "pad SysEx has a non-7-bit byte");
+
+    // Replies from the device.
+    auto kind = [](const B& bytes) { return ml::classify(bytes.data(), static_cast<int>(bytes.size())); };
+    require(kind({ 0xF0, 0x7E, 0x7F, 0x06, 0x02, 0x00, 0x20, 0x6B, 0x02, 0x00, 0x04, 0x02, 0x01, 0x00, 0x00, 0x00, 0xF7 })
+            == ml::Reply::DeviceIdentity, "device identity not recognised");
+    require(kind(ml::arturia({ 0x02, 0x00, 0x40, 0x01, 0x01 })) == ml::Reply::DawMode, "DAW mode reply");
+    require(kind(ml::arturia({ 0x02, 0x00, 0x40, 0x01, 0x00 })) == ml::Reply::ArturiaMode, "Arturia mode reply");
+    require(kind({ 0xF0, 0x00, 0x20, 0x6B, 0x7F, 0x42, 0x02, 0x00, 0x40, 0x62, 0x02, 0xF7 }) == ml::Reply::DawModeChanged,
+            "DAW mode change announcement");
+    require(kind(ml::arturia({ 0x02, 0x00, 0x40, 0x62, 0x01 })) == ml::Reply::ArturiaModeChanged, "Arturia mode change");
+    require(kind(ml::arturia({ 0x02, 0x00, 0x40, 0x63, 0x01 })) == ml::Reply::PadBankB, "pad bank B reply");
+    // Replies captured from the connected MiniLab 3 (amidi, Arturia program).
+    require(kind({ 0xF0, 0x7E, 0x7F, 0x06, 0x02, 0x00, 0x20, 0x6B, 0x02, 0x00, 0x04, 0x04, 0x49, 0x06, 0x00, 0x01, 0xF7 })
+            == ml::Reply::DeviceIdentity, "captured identity reply");
+    require(kind({ 0xF0, 0x00, 0x20, 0x6B, 0x7F, 0x42, 0x02, 0x00, 0x40, 0x01, 0x00, 0xF7 }) == ml::Reply::ArturiaMode,
+            "captured mode reply");
+    require(kind({ 0xF0, 0x00, 0x20, 0x6B, 0x7F, 0x42, 0x02, 0x00, 0x40, 0x03, 0x00, 0xF7 }) == ml::Reply::PadBankA,
+            "captured pad bank reply");
+    require(kind({ 0xF0, 0x43, 0x10, 0xF7 }) == ml::Reply::None && kind({}) == ml::Reply::None, "foreign SysEx misread");
+
+    // What the screen says: the track at rest, the knob while turning.
+    auto project = fixture();
+    auto guitar = project.tracks[0];
+    guitar.instrumentPreset = 8;
+    guitar.setTrackName("Overdriven Guitar");
+    sonora::applyKnob(guitar, sonora::KnobTarget::Drive, 0.42f);
+    const auto turning = ml::knobScreen(guitar, 0);
+    require(turning.first == "DISTORTION" && turning.second.startsWith("42%  Overdriven"), "knob screen text");
+    require(turning.second.length() <= ml::line2Chars, "knob screen line 2 too long");
+    require(ml::knobScreen(guitar, 7).first == "REVERB", "reverb knob screen");
+    const auto rest = ml::trackScreen(guitar);
+    require(rest.first == "OVERDRIVEN GUITAR" && rest.second == "Overdriven Guitar", "track screen text");
+    require(ml::trackScreen(project.tracks[1]).second == "Drum kit", "drum track screen");
+    require(ml::trackScreen(project.tracks[0]).second == "Sonora Synth", "synth track screen");
+}
+
+void testSongComposition()
+{
+    using sonora::SongPart;
+    // Section editing moves whole columns (part, slots, on/off) together.
+    sonora::Arrangement song;
+    song.sections = 3;
+    for (int s = 0; s < 3; ++s)
+    {
+        song.parts[static_cast<std::size_t>(s)] = static_cast<SongPart>(s + 1); // Intro, Verse, Pre-Chorus
+        song.slots[static_cast<std::size_t>(s)][0] = static_cast<std::uint8_t>(s);
+        song.trackOn[static_cast<std::size_t>(s)][1] = s != 1;
+    }
+    auto check = [&](int s, SongPart part, int slot, bool drumsOn, const char* what) {
+        require(song.parts[static_cast<std::size_t>(s)] == part && song.slots[static_cast<std::size_t>(s)][0] == slot
+                && song.trackOn[static_cast<std::size_t>(s)][1] == drumsOn, what);
+    };
+    require(song.duplicateSection(1) && song.sections == 4, "duplicate failed");
+    check(1, SongPart::Verse, 1, false, "duplicate source moved");
+    check(2, SongPart::Verse, 1, false, "duplicate is not a copy");
+    check(3, SongPart::PreChorus, 2, true, "later section not shifted");
+    require(song.moveSection(3, 0), "move failed");
+    check(0, SongPart::PreChorus, 2, true, "moved section wrong");
+    check(1, SongPart::Intro, 0, true, "move did not shift others");
+    require(song.removeSection(0) && song.sections == 3, "remove failed");
+    check(0, SongPart::Intro, 0, true, "remove did not close the gap");
+    require(song.insertSection(3) && song.sections == 4 && song.parts[3] == SongPart::Section
+            && song.trackOn[3][0] && song.trackOn[3][1], "empty insert not a fresh, playing section");
+    require(!song.moveSection(0, 9) && !song.removeSection(7) && !song.insertSection(9), "out-of-range edit accepted");
+    sonora::Arrangement single;
+    single.sections = 1;
+    require(!single.removeSection(0), "last section removed");
+    sonora::Arrangement full;
+    full.sections = sonora::maxSections;
+    require(!full.duplicateSection(0) && full.sections == sonora::maxSections, "section overflow");
+    require(song.valid() && full.valid(), "edited arrangement invalid");
+
+    // Templates: named parts, drums out of intros/outros, and slot fallback
+    // so a project with only pattern A still plays everywhere.
+    auto project = fixture();
+    for (int t = 0; t < static_cast<int>(sonora::SongTemplate::numTemplates); ++t)
+    {
+        const auto tpl = static_cast<sonora::SongTemplate>(t);
+        const auto built = sonora::buildSongFromTemplate(project, tpl);
+        const auto parts = sonora::songTemplateParts(tpl);
+        require(built.valid() && built.sections == static_cast<int>(parts.size()), "template section count");
+        for (int s = 0; s < built.sections; ++s)
+        {
+            const auto part = built.parts[static_cast<std::size_t>(s)];
+            require(part == parts[static_cast<std::size_t>(s)], "template part order");
+            require(built.slots[static_cast<std::size_t>(s)][0] == 0 && built.slots[static_cast<std::size_t>(s)][1] == 0,
+                    "template picked an empty pattern");
+            const bool drumless = part == SongPart::Intro || part == SongPart::Outro || part == SongPart::Break;
+            require(built.trackOn[static_cast<std::size_t>(s)][1] == !drumless && built.trackOn[static_cast<std::size_t>(s)][0],
+                    "template track gating");
+        }
+    }
+    auto withChorus = project;
+    withChorus.tracks[0].melodies[1] = withChorus.tracks[0].melodies[0];
+    const auto pop = sonora::buildSongFromTemplate(withChorus, sonora::SongTemplate::Pop);
+    require(pop.parts[3] == SongPart::Chorus && pop.slots[3][0] == 1 && pop.slots[1][0] == 0,
+            "choruses should use pattern B when it exists");
+
+    // v13 saves 16 parts with names; v12 files (8 rows) still open.
+    auto saved = project;
+    saved.song = pop;
+    saved.song.insertSection(pop.sections, 0);
+    const auto json = sonora::ProjectIO::encode(saved);
+    sonora::ProjectState loaded;
+    require(json.contains("\"version\": 13"), "song projects must save as v13");
+    require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "song parts round-trip failed");
+    auto big = project;
+    big.song.sections = sonora::maxSections;
+    require(sonora::ProjectIO::decode(sonora::ProjectIO::encode(big), loaded).wasOk() && loaded.song.sections == 16,
+            "16-part song round-trip failed");
+    auto legacy = juce::JSON::parse(sonora::ProjectIO::encode(project));
+    legacy.getDynamicObject()->setProperty("version", 12);
+    toPreV13Song(legacy);
+    require(sonora::ProjectIO::decode(juce::JSON::toString(legacy), loaded).wasOk()
+            && loaded.song.parts[0] == SongPart::Section, "v12 song did not open");
+    auto badPart = juce::JSON::parse(json);
+    badPart.getDynamicObject()->getProperty("song").getDynamicObject()->getProperty("parts").getArray()->set(0, 42);
+    require(sonora::ProjectIO::decode(juce::JSON::toString(badPart), loaded).failed(), "unknown part accepted");
+    auto shortRows = juce::JSON::parse(json);
+    toPreV13Song(shortRows);
+    require(sonora::ProjectIO::decode(juce::JSON::toString(shortRows), loaded).failed(), "v13 with 8 rows accepted");
+
+    // Play from a part: only part 3 has the melody switched on.
+    auto songProject = project;
+    songProject.tracks[1].drumPatterns[0] = {};
+    songProject.songMode = true;
+    songProject.song.sections = 3;
+    for (int s = 0; s < 3; ++s)
+        songProject.song.trackOn[static_cast<std::size_t>(s)][0] = s == 2;
+    auto firstBlocks = [&](int startSection, unsigned mask, const sonora::ProjectState& state) {
+        sonora::AudioEngine engine;
+        engine.prepare(48000.0);
+        engine.setSongStartSection(startSection);
+        engine.setLoopTrackMask(mask);
+        require(engine.submit(state), "song project rejected");
+        engine.setPlaying(true);
+        juce::AudioBuffer<float> buffer(2, 512);
+        float peak = 0.0f;
+        for (int i = 0; i < 20; ++i)
+        {
+            engine.process({ &buffer, 0, 512 });
+            peak = std::max(peak, buffer.getMagnitude(0, 512));
+        }
+        return peak;
+    };
+    require(firstBlocks(0, ~0u, songProject) < 1.0e-6f, "song started in the wrong place");
+    require(firstBlocks(2, ~0u, songProject) > 0.01f, "play-from-part did not start at the part");
+    // Loop preview of a part silences tracks switched off in it.
+    auto loopProject = songProject;
+    loopProject.songMode = false;
+    require(firstBlocks(0, ~0u, loopProject) > 0.01f, "loop preview silent");
+    require(firstBlocks(0, ~0u & ~1u, loopProject) < 1.0e-6f, "gated track still sounds in part preview");
+}
+
+void testAiAssistant()
+{
+    namespace ai = sonora::ai;
+    auto project = fixture();
+    project.tracks[2].id = 3;
+    project.tracks[2].kind = sonora::TrackKind::Synth;
+    project.tracks[2].instrumentPreset = 10;
+    project.tracks[2].setTrackName("Bass");
+    project.tracks[2].melodies[1].count = 1;
+    project.tracks[2].melodies[1].notes[0] = { 1, 0, 960, 50, 100 };
+    project.song = sonora::buildSongFromTemplate(project, sonora::SongTemplate::Simple);
+    project.song.slots[2][1] = 1;       // chorus drums use loop B
+    project.song.slots[2][2] = 1;       // chorus bass uses loop B
+    project.song.trackOn[2][0] = false; // lead is silent in the chorus
+    project.tracks[1].drumPatterns[1].steps[1][4] = 90;
+
+    // Working on the chorus, targeting the drums.
+    ai::AssistantRequest request;
+    request.project = project;
+    request.track = 1;
+    request.part = 2;
+    request.message = "Add a snare fill in bar 4";
+    for (int i = 0; i < 20; ++i)
+        request.history.push_back({ i % 2 == 0, "turn " + juce::String(i) });
+    require(ai::assistantTargetSlot(request) == 1, "target slot should follow the part");
+    auto message = ai::buildAssistantMessage(request);
+    require(message.contains("Working on part 3, Chorus (bars 9-12)") && message.contains("3 Chorus (current)"),
+            "part context missing");
+    require(message.contains("\"Sine Keys\"") && message.contains("silent in this part"), "silent track not marked");
+    require(message.contains("pitch=50 (D3)"), "other track should use the part's loop");
+    require(message.contains("loop B. Its current pattern:") && message.contains("Snare on sixteenth steps: 4"),
+            "target's current beat missing (needed for edits)");
+    require(message.contains("Producer: turn 8") && !message.contains("Producer: turn 6"),
+            "history not limited to the most recent turns");
+    require(message.contains("Add a snare fill in bar 4"), "user message missing");
+    // A free loop uses the preview slots instead.
+    request.part = -1;
+    request.drumSlots[1] = 3;
+    require(ai::assistantTargetSlot(request) == 3 && ai::buildAssistantMessage(request).contains("free 4-bar loop"),
+            "free-loop context wrong");
+
+    // Hardened CLI arguments and per-kind schemas.
+    for (bool drums : { false, true })
+    {
+        const auto args = ai::assistantArguments(drums);
+        const auto tools = args.indexOf("--tools");
+        require(tools >= 0 && args[tools + 1].isEmpty() && args.contains("--strict-mcp-config")
+                && args.contains("--no-session-persistence"), "assistant not sandboxed");
+        const auto schema = juce::JSON::parse(ai::assistantSchema(drums));
+        require(schema.getDynamicObject() != nullptr, "assistant schema not JSON");
+        require(ai::assistantSchema(drums).contains(drums ? "\"hits\"" : "\"notes\""), "schema kind wrong");
+    }
+    require(ai::assistantSystemPrompt(true).contains("0 = Kick") && ai::assistantSystemPrompt(true).contains("7 = Shaker"),
+            "drum prompt missing pad map");
+
+    // Parsing: reply-only, melody edit, drum edit with untrusted hits, clear.
+    auto wrap = [](const juce::String& body) {
+        return "{\"is_error\":false,\"result\":\"\",\"structured_output\":" + body + "}";
+    };
+    auto talk = ai::parseAssistantResponse(wrap("{\"reply\":\"Sounds good!\",\"change\":false,\"notes\":[]}"), false);
+    require(talk.ok() && !talk.changed && talk.reply == "Sounds good!", "reply-only turn wrong");
+    auto melody = ai::parseAssistantResponse(wrap("{\"reply\":\"Simpler now.\",\"change\":true,\"notes\":["
+                                                  "{\"start\":0,\"duration\":960,\"pitch\":84,\"velocity\":100}]}"), false);
+    require(melody.ok() && melody.changed && melody.pattern.count == 1 && melody.pattern.notes[0].pitch == 60,
+            "melody edit not sanitized");
+    auto beat = ai::parseAssistantResponse(wrap("{\"reply\":\"Fill added.\",\"change\":true,\"hits\":["
+                                                "{\"pad\":0,\"step\":0,\"velocity\":120},"
+                                                "{\"pad\":0,\"step\":0,\"velocity\":80},"   // duplicate: keep loudest
+                                                "{\"pad\":1,\"step\":60,\"velocity\":300}," // velocity clamped
+                                                "{\"pad\":9,\"step\":4,\"velocity\":100},"  // unknown pad dropped
+                                                "{\"pad\":2,\"step\":64,\"velocity\":100}," // past the loop dropped
+                                                "{\"pad\":\"x\",\"step\":1,\"velocity\":1}]}"), true);
+    require(beat.ok() && beat.changed && beat.drums && beat.drumPattern.hitCount() == 2
+            && beat.drumPattern.steps[0][0] == 120 && beat.drumPattern.steps[1][60] == 127 && beat.drumPattern.valid(),
+            "drum hits not sanitized");
+    auto cleared = ai::parseAssistantResponse(wrap("{\"reply\":\"Cleared.\",\"change\":true,\"hits\":[]}"), true);
+    require(cleared.ok() && cleared.changed && cleared.count() == 0, "clearing a beat rejected");
+    require(!ai::parseAssistantResponse(wrap("{\"reply\":\"x\",\"change\":true,\"hits\":[{\"pad\":42,\"step\":0,\"velocity\":1}]}"), true).ok(),
+            "all-invalid hits accepted");
+    require(!ai::parseAssistantResponse(wrap("{\"reply\":\"x\",\"change\":true}"), false).ok(), "change without notes accepted");
+    require(!ai::parseAssistantResponse("{\"is_error\":true,\"result\":\"Not logged in\"}", true).ok(), "CLI error hidden");
+
+    // End to end with a fake CLI that checks the sandbox and the drum schema.
+    const auto dir = juce::File::getSpecialLocation(juce::File::tempDirectory).getNonexistentChildFile("sonora-assist", "");
+    require(dir.createDirectory(), "assistant test dir failed");
+    const auto fake = dir.getChildFile("claude");
+    const auto answer = wrap("{\"reply\":\"Here is a beat.\",\"change\":true,\"hits\":[{\"pad\":0,\"step\":0,\"velocity\":110},"
+                             "{\"pad\":1,\"step\":4,\"velocity\":100}]}");
+    require(fake.replaceWithText("#!/bin/sh\n"
+        "case \"$*\" in *--strict-mcp-config*hits*) ;; *) echo '{\"is_error\":true,\"result\":\"bad args\"}'; exit 0;; esac\n"
+        "[ -z \"$ANTHROPIC_API_KEY\" ] || { echo '{\"is_error\":true,\"result\":\"key leaked\"}'; exit 0; }\n"
+        "grep -q 'snare fill' || { echo '{\"is_error\":true,\"result\":\"no message\"}'; exit 0; }\n"
+        "echo '" + answer + "'\n", false, false, "\n") && fake.setExecutePermission(true), "fake CLI write failed");
+    setenv("SONORA_CLAUDE_PATH", fake.getFullPathName().toRawUTF8(), 1);
+    setenv("ANTHROPIC_API_KEY", "sk-should-not-leak", 1);
+    request.part = 2;
+    request.message = "Give it a snare fill";
+    const auto result = ai::runAssistant(request, nullptr, 10000);
+    unsetenv("SONORA_CLAUDE_PATH");
+    unsetenv("ANTHROPIC_API_KEY");
+    require(result.ok() && result.changed && result.drums && result.drumPattern.hitCount() == 2,
+            ("assistant end-to-end failed: " + result.error).toRawUTF8());
+    require(dir.deleteRecursively(), "assistant test cleanup failed");
+
+    // Opt-in live check through the real, signed-in CLI.
+    if (juce::SystemStats::getEnvironmentVariable("SONORA_LIVE_CLAUDE", {}) == "1")
+    {
+        request.history.clear();
+        request.message = "Write a punchy beat for this chorus that locks with the bass.";
+        const auto started = juce::Time::getMillisecondCounterHiRes();
+        const auto live = ai::runAssistant(request, nullptr);
+        std::cout << "LIVE assistant (drums): " << (live.ok() ? "ok" : live.error) << " in "
+                  << juce::String((juce::Time::getMillisecondCounterHiRes() - started) / 1000.0, 1) << " s, changed="
+                  << live.changed << ", " << live.count() << " hits\n  reply: " << live.reply << "\n";
+        require(live.ok() && live.changed && live.count() >= 4, "live assistant beat failed");
+    }
+}
+
+void testSongComposer()
+{
+    namespace ai = sonora::ai;
+    auto project = fixture(); // track 0 synth (loop A), track 1 drums (loop A)
+    project.tracks[2].id = 3;
+    project.tracks[2].kind = sonora::TrackKind::Synth;
+    project.tracks[2].setTrackName("Bass");
+    project.tracks[2].melodies[0].count = 1;
+    project.tracks[2].melodies[0].notes[0] = { 1, 0, 960, 48, 100 };
+    project.song = sonora::buildSongFromTemplate(project, sonora::SongTemplate::Simple);
+
+    ai::SongRequest request;
+    request.project = project;
+    request.message = "Compose the full song with variation";
+    request.history = { { true, "earlier idea" }, { false, "earlier reply" } };
+    const auto message = ai::buildSongMessage(request);
+    require(message.contains("Track 0 \"Sine Keys\"") && message.contains("Track 2 \"Bass\"")
+            && message.contains("Track 1 \"Starter Drums\""), "tracks missing from song context");
+    require(message.contains("Loop B: (empty, free for a new loop)") && message.contains("pitch=48 (C3)")
+            && message.contains("Kick on sixteenth steps: 0,16,32,48"), "loop contents missing");
+    require(message.contains("Current arrangement (6 sections)") && message.contains("1. Intro: track 0 loop A, track 2 loop A")
+            && message.contains("2. Verse: track 0 loop A, track 1 loop A, track 2 loop A"), "current arrangement missing");
+    require(message.contains("Producer: earlier idea") && message.contains("Compose the full song"), "song chat missing");
+    const auto args = ai::songArguments();
+    require(args.indexOf("--tools") >= 0 && args[args.indexOf("--tools") + 1].isEmpty()
+            && args.contains("--strict-mcp-config") && args.contains("--no-session-persistence"), "composer not sandboxed");
+    require(juce::JSON::parse(ai::songSchema()).getDynamicObject() != nullptr, "song schema is not JSON");
+    require(ai::songSystemPrompt().contains("EMPTY loop slots only"), "empty-slot rule missing from prompt");
+
+    auto wrap = [](const juce::String& body) {
+        return "{\"is_error\":false,\"result\":\"\",\"structured_output\":" + body + "}";
+    };
+    const auto answer = wrap(R"({"reply":"Built a full song.","change":true,
+        "sections":[
+          {"part":"Intro","tracks":[{"track":0,"loop":"A"}]},
+          {"part":"verse","tracks":[{"track":0,"loop":"A"},{"track":1,"loop":"A"},{"track":2,"loop":"A"}]},
+          {"part":"Build","tracks":[{"track":1,"loop":"B"},{"track":2,"loop":"A"}]},
+          {"part":"Chorus","tracks":[{"track":0,"loop":"B"},{"track":1,"loop":"A"},{"track":2,"loop":"C"},{"track":5,"loop":"A"},{"track":0,"loop":"Z"}]},
+          {"part":"Space Jam","tracks":[]}],
+        "newLoops":[
+          {"track":1,"loop":"B","hits":[{"pad":1,"step":60,"velocity":110},{"pad":1,"step":62,"velocity":90}]},
+          {"track":0,"loop":"B","notes":[{"start":0,"duration":960,"pitch":72,"velocity":100}]},
+          {"track":0,"loop":"A","notes":[{"start":0,"duration":960,"pitch":64,"velocity":100}]},
+          {"track":2,"loop":"D","notes":[]},
+          {"track":7,"loop":"B","notes":[{"start":0,"duration":960,"pitch":60,"velocity":100}]}]})");
+    const auto result = ai::parseSongResponse(answer, project);
+    require(result.ok() && result.changed && result.song.sections == 5, "song arrangement not parsed");
+    using P = sonora::SongPart;
+    require(result.song.parts[0] == P::Intro && result.song.parts[1] == P::Verse && result.song.parts[2] == P::Build
+            && result.song.parts[3] == P::Chorus && result.song.parts[4] == P::Section, "part names not mapped");
+    require(result.writes.size() == 2, "wrong number of new loops (existing/empty/unknown targets must be refused)");
+    require(result.skipped.size() == 1 && result.skipped[0].contains("Sine Keys loop A"), "overwrite refusal not reported");
+    require(result.song.trackOn[0][0] && !result.song.trackOn[0][1] && !result.song.trackOn[0][2], "intro gating wrong");
+    require(result.song.trackOn[2][1] && result.song.slots[2][1] == 1, "build should use the new drum loop B");
+    require(result.song.trackOn[3][0] && result.song.slots[3][0] == 1, "chorus should use the new lead loop B");
+    require(!result.song.trackOn[3][2], "cell pointing at an empty loop should be off");
+    require(result.song.valid(), "composed arrangement invalid");
+
+    auto applied = project;
+    require(ai::applySongResult(applied, result), "apply failed");
+    require(applied.tracks[1].drumPatterns[1].steps[1][60] == 110 && applied.tracks[0].melodies[1].count == 1
+            && applied.tracks[0].melodies[1].notes[0].pitch == 60, "new loops not written (pitch folded)");
+    require(applied.tracks[0].melodies[0] == project.tracks[0].melodies[0], "existing loop A was overwritten");
+    require(applied.song == result.song && applied.valid(), "arrangement not applied");
+    auto busy = project;
+    busy.tracks[1].drumPatterns[1].steps[0][0] = 100; // producer filled the slot meanwhile
+    ai::applySongResult(busy, result);
+    require(busy.tracks[1].drumPatterns[1].hitCount() == 1, "apply overwrote a slot filled meanwhile");
+
+    auto question = ai::parseSongResponse(wrap(R"({"reply":"It's 6 sections now.","change":false,"sections":[],"newLoops":[]})"), project);
+    require(question.ok() && !question.changed, "question turn wrong");
+    auto untouched = project;
+    require(!ai::applySongResult(untouched, question) && untouched == project, "no-change result altered project");
+    require(!ai::parseSongResponse(wrap(R"({"reply":"x","change":true,"sections":[],"newLoops":[]})"), project).ok(),
+            "empty arrangement accepted");
+
+    // End to end with a fake CLI.
+    const auto dir = juce::File::getSpecialLocation(juce::File::tempDirectory).getNonexistentChildFile("sonora-song", "");
+    require(dir.createDirectory(), "song test dir failed");
+    const auto fake = dir.getChildFile("claude");
+    require(fake.replaceWithText("#!/bin/sh\n"
+        "case \"$*\" in *--strict-mcp-config*newLoops*) ;; *) echo '{\"is_error\":true,\"result\":\"bad args\"}'; exit 0;; esac\n"
+        "grep -q 'Current arrangement' || { echo '{\"is_error\":true,\"result\":\"no context\"}'; exit 0; }\n"
+        "echo '" + answer.replace("\n", " ") + "'\n", false, false, "\n") && fake.setExecutePermission(true),
+            "fake CLI write failed");
+    setenv("SONORA_CLAUDE_PATH", fake.getFullPathName().toRawUTF8(), 1);
+    const auto run = ai::runSongComposer(request, nullptr, 10000);
+    unsetenv("SONORA_CLAUDE_PATH");
+    require(run.ok() && run.song.sections == 5 && run.writes.size() == 2, ("composer end-to-end failed: " + run.error).toRawUTF8());
+    require(dir.deleteRecursively(), "song test cleanup failed");
+
+    if (juce::SystemStats::getEnvironmentVariable("SONORA_LIVE_CLAUDE", {}) == "1")
+    {
+        request.history.clear();
+        request.message = "Compose the full song with variation: write a drum fill loop and a lifted final-chorus melody.";
+        const auto started = juce::Time::getMillisecondCounterHiRes();
+        const auto live = ai::runSongComposer(request, nullptr);
+        std::cout << "LIVE composer: " << (live.ok() ? "ok" : live.error) << " in "
+                  << juce::String((juce::Time::getMillisecondCounterHiRes() - started) / 1000.0, 1) << " s, "
+                  << live.song.sections << " sections, " << live.writes.size() << " new loops\n  reply: " << live.reply << "\n  ";
+        for (int s = 0; s < live.song.sections; ++s)
+            std::cout << sonora::songPartName(live.song.parts[static_cast<std::size_t>(s)]) << (s + 1 < live.song.sections ? " > " : "\n");
+        for (const auto& write : live.writes)
+            std::cout << "  new: track " << write.track << " loop " << static_cast<char>('A' + write.slot) << " ("
+                      << (write.drums ? write.drumPattern.hitCount() : write.pattern.count) << (write.drums ? " hits)\n" : " notes)\n");
+        auto check = project;
+        require(live.ok() && live.changed && ai::applySongResult(check, live) && check.valid(), "live composition failed");
+    }
+}
+
 int main()
 {
     try
@@ -1945,6 +2981,14 @@ int main()
         testAudio(); std::cout << "PASS audible offline render, callback invariance, stop cleanup\n";
         testDrumAudio(); std::cout << "PASS sampled drums, hat choke, resampling, mute/solo, pad audition\n";
         testExport(); std::cout << "PASS loop/song bounce, live parity, normalize, cancel, WAV round-trip\n";
+        testInstruments(); std::cout << "PASS sampled instruments, panic, FX isolation, export, v10 presets\n";
+        testSynthEngine(); std::cout << "PASS synth patches, waves, filter, envelopes, chorus, live edits, v11\n";
+        testKnobs(); std::cout << "PASS MiniLab knob maps, CC sets, drive/chorus DSP, v12 fx\n";
+        testAiMelody(); std::cout << "PASS AI melody sandbox, context, parsing, sanitizing, fake CLI\n";
+        testMiniLabDisplay(); std::cout << "PASS MiniLab 3 screen/pad SysEx, replies, screen text\n";
+        testSongComposition(); std::cout << "PASS song parts, section edits, templates, v13, play-from-part, part preview\n";
+        testAiAssistant(); std::cout << "PASS AI assistant context, history, drum/melody edits, sandbox, fake CLI\n";
+        testSongComposer(); std::cout << "PASS song composer context, empty-slot rule, arrangement, apply, fake CLI\n";
         return 0;
     }
     catch (const std::exception& error)

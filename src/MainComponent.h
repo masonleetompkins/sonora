@@ -5,6 +5,11 @@
 #include "ProjectIO.h"
 #include "Export.h"
 #include "KitSamples.h"
+#include "KnobMaps.h"
+#include "ArrangementView.h"
+#include "AiSidebar.h"
+#include "MiniLabDisplay.h"
+#include "AiMelody.h"
 #include "NeonTheme.h"
 #include "PitchCorrect.h"
 #include <map>
@@ -56,10 +61,13 @@ private:
     void resetProject();
     void confirmDiscard(std::function<void()> action);
     void showError(const juce::String& message);
+    // Every prompt is hosted inside Sonora's own window. Separate desktop
+    // windows get tiled away from the app by tiling WMs (Hyprland) while
+    // still blocking input, which leaves the app looking frozen.
+    void showDialog(const juce::MessageBoxOptions& options, std::function<void(int)> callback = {});
+    void hostModal(juce::Component* dialog);
     void offerRecovery();
     void exportAudio();
-    void loadDemo();
-    void loadDrumDemo();
     void selectTrack(bool drums);
     void selectChannel(int channel);
     void selectPattern(int slot);
@@ -105,8 +113,23 @@ private:
     juce::TextButton audioTab { "Audio" };
     juce::TextButton mute { "Mute" }, solo { "Solo" }, repeatBar { "Repeat bar 1" };
     juce::TextButton kitButton { "Kit" };
-    juce::TextButton songMode { "Song" }, addSection { "+" }, removeSection { "-" };
-    std::array<juce::TextButton, maxSections> sectionButtons;
+    juce::ComboBox instrumentChoice;
+    juce::TextButton editSynth { "Edit sound" };
+    // LOOP edits 4-bar patterns; SONG shows the arrangement board. The view
+    // also sets playback (loop vs whole song).
+    juce::TextButton loopView { "LOOP" }, songView { "SONG" };
+    juce::ComboBox songTemplate, partChoice;
+    juce::TextButton partTrackOn { "Plays in this part" };
+    juce::Label partHint;
+    std::unique_ptr<ArrangementView> arrangement;
+    // editPart >= 0: LOOP view previews and edits that song part (all tracks
+    // use its loops; tracks silent in it are muted). songStartPart: where
+    // song playback starts.
+    int editPart = -1, songStartPart = 0;
+    void setSongView(bool song);
+    void refreshArrangement();
+    void handleArrangementAction(const ArrangementAction& action);
+    void updateSongControls();
     std::array<juce::TextButton, drumPads> padButtons;
     juce::Slider tempo, trackVolume;
     ui::NeonTheme theme;
@@ -118,6 +141,8 @@ private:
     struct AudioView;
     struct PitchWorker;
     struct KitPanel;
+    struct SynthPanel;
+    struct AssistantWorker;
     struct WaveCache
     {
         std::uint32_t takeId = 0;
@@ -129,8 +154,30 @@ private:
     std::unique_ptr<FxBar> fxBar;
     std::unique_ptr<AudioView> audioView;
     std::unique_ptr<KitPanel> kitPanel;
+    std::unique_ptr<SynthPanel> synthPanel;
+    // AI assistant sidebar (right edge). Docked beside the editor when the
+    // window is wide enough, otherwise it floats over the editor's right side.
+    static constexpr int sidebarWidth = 380;
+    std::unique_ptr<AiSidebar> aiSidebar;
+    std::unique_ptr<AssistantWorker> assistantWorker;
+    std::vector<ai::ChatTurn> chatHistory, songHistory; // track chat / song composer
+    static constexpr juce::uint32 songChatId = 0xFFFFFFFFu;
+    juce::uint32 assistantStartedAt = 0, chatTrackId = 0;
+    bool claudeAvailable = false;
+    bool sidebarOpen() const;
+    bool sidebarDocked() const { return getWidth() - sidebarWidth >= 1120; }
+    int contentWidth() const { return sidebarOpen() && sidebarDocked() ? getWidth() - sidebarWidth : getWidth(); }
+    void toggleAiSidebar();
+    void refreshAiSidebar();
+    void sendToAssistant(const juce::String& text);
+    void assistantFinished(const ai::AssistantResult& result, juce::uint32 trackId, int slot);
+    void songComposerFinished(const ai::SongResult& result, const std::array<juce::uint32, maxTracks>& ids);
+    void startAiJob(std::function<void(const std::atomic<bool>*)> job);
+    void finishAiJob();
     std::unique_ptr<PitchWorker> pitchWorker;
     void refreshKitPanel();
+    void refreshSynthPanel();
+    void applySynthPatch(int patch);
     void loadPadSample(int pad);
     void clearPadSample(int pad);
     void collectSamples(const juce::File& destination);
@@ -148,7 +195,7 @@ private:
                          double rate, const PitchContour& contour);
     void pitchFinished();
     const PreloadedTake* findLoadedTake(std::uint32_t id) const;
-    int fxTarget = 0, fxEffect = 0;
+    int fxTarget = 0, fxEffect = 1; // EQ tab (ids follow the signal chain)
     void refreshFxBar();
     float getFxParam(int slot) const;
     void setFxParam(int slot, float value);
@@ -156,7 +203,7 @@ private:
     void setFxEnabled(bool enabled);
     void exportFinished();
     std::unique_ptr<juce::FileChooser> chooser;
-    ProjectState project, savedProject, editStart;
+    ProjectState project = defaultProject(), savedProject = project, editStart;
     ExportJob pendingJob;
     std::vector<ProjectState> undoStack, redoStack;
     juce::File projectFile, recoveryFile;
@@ -189,6 +236,8 @@ private:
     // MEL/DRM effect targets follow the first synth/drum track.
     int fxTrackFor(bool drums) const
     {
+        if (!audioSelected)
+            return selectedTrack;
         for (int track = 0; track < maxTracks; ++track)
         {
             const auto kind = project.tracks[static_cast<std::size_t>(track)].kind;
@@ -231,6 +280,34 @@ private:
     juce::String midiStatusText;
     bool lastMiniLab = false;
     void autoConnectMidi();
+    // MiniLab knobs: the MIDI thread only stores the latest absolute value per
+    // knob; the UI timer applies them to the selected track's knob map, with
+    // one undo step per gesture (closed after a short idle).
+    std::array<std::atomic<int>, 8> knobValues;
+    std::array<int, 8> appliedKnobValues;
+    std::atomic<unsigned> knobSerial { 0 };
+    unsigned lastKnobSerial = 0;
+    bool knobGesture = false;
+    juce::uint32 knobIdleUntil = 0, knobHighlightUntil = 0;
+    int lastKnob = -1;
+    void applyKnobChanges();
+    void paintKnobStrip(juce::Graphics& g);
+    juce::Rectangle<int> knobStripArea() const;
+    // MiniLab 3 screen + pad feedback (DAW program only). Output is opened
+    // alongside the auto-connected inputs; replies arrive as SysEx.
+    enum class MiniLabMode { Unknown, Arturia, Daw };
+    std::unique_ptr<juce::MidiOutput> miniLabOut;
+    juce::String miniLabOutId;
+    MiniLabMode miniLabMode = MiniLabMode::Unknown;
+    std::uint8_t miniLabPadBank = minilab::padBankA;
+    juce::String miniLabTop, miniLabBottom;
+    std::uint32_t miniLabPadRgb = 0;
+    juce::uint32 miniLabRefreshedAt = 0, knobScreenUntil = 0;
+    bool miniLabHintShown = false;
+    void openMiniLabOutput();
+    void miniLabSend(const minilab::Bytes& bytes);
+    void handleMiniLabSysex(const minilab::Bytes& bytes);
+    void refreshMiniLabDisplay(bool force);
     bool lastRunning = false, lastSectionRunning = false, lastCanUndo = false, lastCanRedo = false;
     int lastSection = -1;
     float lastReductionDb = 0.0f;

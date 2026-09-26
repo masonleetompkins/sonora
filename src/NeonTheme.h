@@ -122,10 +122,11 @@ public:
             g.setColour(accent);
             g.drawRoundedRectangle(bounds.reduced(2), 6.0f, 1.0f);
         }
-        if (role == "track")
+        if (role == "track" || role == "trackCompact")
         {
             g.setColour(accent.withAlpha(active ? 1.0f : 0.32f));
-            g.fillRoundedRectangle(bounds.getX() + 1, bounds.getY() + 13, 3.0f, bounds.getHeight() - 26, 1.5f);
+            const float inset = role == "trackCompact" ? 5.0f : 13.0f;
+            g.fillRoundedRectangle(bounds.getX() + 1, bounds.getY() + inset, 3.0f, bounds.getHeight() - inset * 2, 1.5f);
         }
         if (role == "pad")
         {
@@ -144,7 +145,9 @@ public:
             : button.getToggleState() || down ? accent : text;
         g.setColour(colour.withAlpha(alpha));
         g.setFont(getTextButtonFont(button, button.getHeight()));
-        if (role == "track")
+        if (role == "trackCompact")
+            g.drawFittedText(button.getButtonText(), bounds.reduced(12, 2), juce::Justification::centredLeft, 1);
+        else if (role == "track")
         {
             g.drawText(button.getButtonText(), bounds.reduced(18, 0).withTrimmedBottom(18), juce::Justification::centredLeft);
             caption(g, button.getProperties()["detail"].toString(),

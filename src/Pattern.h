@@ -1,4 +1,6 @@
 #pragma once
+#include "Instruments.h"
+#include "SynthParams.h"
 #include "AudioTakes.h"
 #include "Fx.h"
 #include "Timing.h"
@@ -116,7 +118,8 @@ struct TrackMix
     bool operator==(const TrackMix&) const = default;
 };
 
-inline constexpr int maxSections = 8;
+inline constexpr int maxSections = 16;      // parts per song (4 bars each)
+inline constexpr int legacyMaxSections = 8; // files before v13 store 8 rows
 inline constexpr int numPatterns = 4;
 inline constexpr int sampleFileCapacity = 260;
 inline constexpr int numKitVariants = 3;
@@ -136,6 +139,8 @@ struct Track
     // custom icons never need a format change.
     std::uint8_t icon = 0;
     TrackKind kind = TrackKind::None;
+    int instrumentPreset = 0;
+    SynthParams synth;
     std::array<Pattern, numPatterns> melodies {};
     std::array<DrumPattern, numPatterns> drumPatterns {};
     std::array<std::array<char, sampleFileCapacity>, drumPads> padSamples {};
@@ -145,6 +150,8 @@ struct Track
     bool valid() const
     {
         // Empty slots carry no identity and their content is ignored.
+        if (!validInstrument(instrumentPreset) || !synth.valid())
+            return false;
         if (kind == TrackKind::None)
             return true;
         if (id == 0 || id > 2147483647u || name[0] == '\0')
@@ -165,15 +172,29 @@ struct Track
     juce::String trackName() const { return juce::String(name); }
     void setTrackName(const juce::String& value)
     {
-        const auto bytes = value.trim().toRawUTF8();
+        const auto trimmed = value.trim();
+        const auto bytes = trimmed.toRawUTF8();
         std::strncpy(name, bytes, trackNameCapacity - 1);
         name[trackNameCapacity - 1] = '\0';
     }
 };
 
+// What a section is for; drives its label and colour in the song view and
+// the pattern/track choices of song templates. Stable persisted ids.
+enum class SongPart : std::uint8_t { Section = 0, Intro, Verse, PreChorus, Chorus, Bridge, Break, Build, Drop, Outro, numParts };
+
+inline const char* songPartName(SongPart part)
+{
+    static constexpr const char* names[] { "Part", "Intro", "Verse", "Pre-Chorus", "Chorus", "Bridge",
+                                           "Break", "Build", "Drop", "Outro" };
+    const auto index = static_cast<int>(part);
+    return index >= 0 && index < static_cast<int>(SongPart::numParts) ? names[index] : "Part";
+}
+
 struct Arrangement
 {
     int sections = 2;
+    std::array<SongPart, maxSections> parts {};
     // Per section, per track: pattern slot + audible flag. Tracks are
     // addressed by index and never shift (deleting a track clears its cells),
     // so sections survive track edits without remapping.
@@ -188,6 +209,9 @@ struct Arrangement
     {
         if (sections < 1 || sections > maxSections)
             return false;
+        for (const auto part : parts)
+            if (part >= SongPart::numParts)
+                return false;
         for (const auto& row : slots)
             for (const auto slot : row)
                 if (slot >= numPatterns)
@@ -196,6 +220,67 @@ struct Arrangement
     }
     int songTicks() const { return sections * patternTicks; }
     bool operator==(const Arrangement&) const = default;
+
+    // Section editing. Each section is a column (part type, pattern slot per
+    // track, on/off per track) and moves as a unit. All return false and
+    // leave the arrangement untouched when the request is out of range.
+    bool insertSection(int at, int copyFrom = -1)
+    {
+        if (sections >= maxSections || at < 0 || at > sections)
+            return false;
+        Column column = copyFrom >= 0 && copyFrom < sections ? columnAt(copyFrom) : Column {};
+        if (copyFrom < 0 || copyFrom >= sections)
+            column.on.fill(true);
+        for (int s = sections; s > at; --s)
+            setColumn(s, columnAt(s - 1));
+        setColumn(at, column);
+        ++sections;
+        return true;
+    }
+    bool duplicateSection(int at) { return at >= 0 && at < sections && insertSection(at + 1, at); }
+    bool removeSection(int at)
+    {
+        if (sections <= 1 || at < 0 || at >= sections)
+            return false;
+        for (int s = at; s < sections - 1; ++s)
+            setColumn(s, columnAt(s + 1));
+        Column cleared {};
+        cleared.on.fill(true);
+        setColumn(sections - 1, cleared);
+        --sections;
+        return true;
+    }
+    bool moveSection(int from, int to)
+    {
+        if (from < 0 || from >= sections || to < 0 || to >= sections || from == to)
+            return false;
+        const auto moving = columnAt(from);
+        const int step = to > from ? 1 : -1;
+        for (int s = from; s != to; s += step)
+            setColumn(s, columnAt(s + step));
+        setColumn(to, moving);
+        return true;
+    }
+
+private:
+    struct Column
+    {
+        SongPart part = SongPart::Section;
+        std::array<std::uint8_t, maxTracks> slot {};
+        std::array<bool, maxTracks> on {};
+    };
+    Column columnAt(int s) const
+    {
+        const auto i = static_cast<std::size_t>(s);
+        return { parts[i], slots[i], trackOn[i] };
+    }
+    void setColumn(int s, const Column& column)
+    {
+        const auto i = static_cast<std::size_t>(s);
+        parts[i] = column.part;
+        slots[i] = column.slot;
+        trackOn[i] = column.on;
+    }
 };
 
 // Sections are instances: several sections may share one library slot, so one
@@ -379,5 +464,94 @@ inline bool moveTrackState(ProjectState& project, int from, int to)
         for (int i = from; i > to; --i)
             swapAdjacent(i, i - 1);
     return true;
+}
+
+// One-click song structures. Each part type prefers a pattern slot
+// (verses A, choruses/drops B, bridges/builds/pre-choruses C, breaks D) and
+// intros/outros/breaks drop the drums. A preferred slot that is empty on a
+// track falls back to slot A, then to that track's first non-empty slot, so a
+// project with only pattern A still yields a complete, audible song.
+enum class SongTemplate { Simple = 0, Pop, Edm, HipHop, numTemplates };
+
+inline const char* songTemplateName(SongTemplate tpl)
+{
+    switch (tpl)
+    {
+        case SongTemplate::Simple: return "Simple  (Intro Verse Chorus Verse Chorus Outro)";
+        case SongTemplate::Pop: return "Pop  (with pre-choruses and a bridge)";
+        case SongTemplate::Edm: return "EDM  (Intro Build Drop Break Build Drop Outro)";
+        case SongTemplate::HipHop: return "Hip-hop  (double verses and hooks)";
+        case SongTemplate::numTemplates: break;
+    }
+    return "Song";
+}
+
+inline std::vector<SongPart> songTemplateParts(SongTemplate tpl)
+{
+    using P = SongPart;
+    switch (tpl)
+    {
+        case SongTemplate::Simple: return { P::Intro, P::Verse, P::Chorus, P::Verse, P::Chorus, P::Outro };
+        case SongTemplate::Pop: return { P::Intro, P::Verse, P::PreChorus, P::Chorus, P::Verse, P::PreChorus,
+                                         P::Chorus, P::Bridge, P::Chorus, P::Outro };
+        case SongTemplate::Edm: return { P::Intro, P::Build, P::Drop, P::Break, P::Build, P::Drop, P::Outro };
+        case SongTemplate::HipHop: return { P::Intro, P::Verse, P::Verse, P::Chorus, P::Verse, P::Verse,
+                                            P::Chorus, P::Outro };
+        case SongTemplate::numTemplates: break;
+    }
+    return { P::Verse };
+}
+
+inline bool trackSlotHasContent(const Track& track, int slot)
+{
+    const auto i = static_cast<std::size_t>(std::clamp(slot, 0, numPatterns - 1));
+    return track.kind == TrackKind::Drums ? track.drumPatterns[i].hitCount() > 0 : track.melodies[i].count > 0;
+}
+
+inline int preferredSlot(SongPart part)
+{
+    switch (part)
+    {
+        case SongPart::Chorus: case SongPart::Drop: return 1;
+        case SongPart::PreChorus: case SongPart::Bridge: case SongPart::Build: return 2;
+        case SongPart::Break: return 3;
+        case SongPart::Section: case SongPart::Intro: case SongPart::Verse: case SongPart::Outro:
+        case SongPart::numParts: break;
+    }
+    return 0;
+}
+
+inline Arrangement buildSongFromTemplate(const ProjectState& project, SongTemplate tpl)
+{
+    Arrangement song;
+    const auto parts = songTemplateParts(tpl);
+    song.sections = std::clamp(static_cast<int>(parts.size()), 1, maxSections);
+    for (int s = 0; s < song.sections; ++s)
+    {
+        const auto part = parts[static_cast<std::size_t>(s)];
+        song.parts[static_cast<std::size_t>(s)] = part;
+        const bool drumless = part == SongPart::Intro || part == SongPart::Outro || part == SongPart::Break;
+        for (int t = 0; t < maxTracks; ++t)
+        {
+            const auto& track = project.tracks[static_cast<std::size_t>(t)];
+            int slot = preferredSlot(part);
+            if (!trackSlotHasContent(track, slot))
+            {
+                if (trackSlotHasContent(track, 0))
+                    slot = 0;
+                else
+                    for (int candidate = 0; candidate < numPatterns; ++candidate)
+                        if (trackSlotHasContent(track, candidate))
+                        {
+                            slot = candidate;
+                            break;
+                        }
+            }
+            song.slots[static_cast<std::size_t>(s)][static_cast<std::size_t>(t)] = static_cast<std::uint8_t>(slot);
+            song.trackOn[static_cast<std::size_t>(s)][static_cast<std::size_t>(t)]
+                = !(drumless && track.kind == TrackKind::Drums);
+        }
+    }
+    return song;
 }
 }

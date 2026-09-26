@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(Sonora VERSION 0.17.0 LANGUAGES C CXX)
+project(Sonora VERSION 0.19.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -13,7 +13,7 @@ FetchContent_MakeAvailable(JUCE)
 juce_add_gui_app(Sonora PRODUCT_NAME "Sonora" COMPANY_NAME "Sonora"
     BUNDLE_ID "org.sonora.Sonora")
 target_sources(Sonora PRIVATE src/Main.cpp src/MainComponent.cpp src/AudioEngine.cpp
-    src/PianoRoll.cpp src/ProjectIO.cpp src/DrumSampler.cpp src/DrumSequencer.cpp src/Export.cpp src/Fx.cpp src/AudioTakes.cpp src/PitchCorrect.cpp src/KitSamples.cpp)
+    src/PianoRoll.cpp src/ProjectIO.cpp src/DrumSampler.cpp src/DrumSequencer.cpp src/Export.cpp src/Fx.cpp src/AudioTakes.cpp src/PitchCorrect.cpp src/KitSamples.cpp src/ArrangementView.cpp src/AiSidebar.cpp)
 target_compile_definitions(Sonora PRIVATE
     JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_JACK=1
     JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:Sonora,JUCE_PRODUCT_NAME>"
@@ -25,6 +25,9 @@ install(FILES packaging/sonora.desktop DESTINATION share/applications)
 install(FILES assets/sonora.svg DESTINATION share/icons/hicolor/scalable/apps)
 install(FILES packaging/org.sonora.Sonora.metainfo.xml DESTINATION share/metainfo)
 install(FILES LICENSE README.md DESTINATION share/doc/sonora)
+install(FILES assets/GeneralUser-GS.sf2 DESTINATION share/sonora)
+install(FILES assets/GeneralUser-GS-LICENSE.txt third_party/TinySoundFont-LICENSE
+    DESTINATION share/licenses/sonora)
 
 include(CTest)
 if(BUILD_TESTING)
@@ -34,6 +37,22 @@ if(BUILD_TESTING)
     target_compile_definitions(SonoraTests PRIVATE JUCE_USE_CURL=0 JUCE_JACK=1)
     target_link_libraries(SonoraTests PRIVATE juce::juce_audio_devices juce::juce_audio_formats
         juce::juce_recommended_config_flags)
+    # Offscreen UI renders for visual review (not run by ctest).
+    juce_add_console_app(SonoraUiSnapshot PRODUCT_NAME "Sonora UI Snapshot")
+    target_sources(SonoraUiSnapshot PRIVATE tests/UiSnapshot.cpp src/ArrangementView.cpp src/AiSidebar.cpp)
+    target_include_directories(SonoraUiSnapshot PRIVATE src)
+    target_compile_definitions(SonoraUiSnapshot PRIVATE JUCE_USE_CURL=0 JUCE_WEB_BROWSER=0)
+    target_link_libraries(SonoraUiSnapshot PRIVATE juce::juce_gui_basics juce::juce_audio_basics
+        juce::juce_recommended_config_flags)
     add_test(NAME sonora_core COMMAND SonoraTests)
     set_tests_properties(sonora_core PROPERTIES TIMEOUT 120)
 endif()
+
+foreach(target Sonora SonoraTests)
+    if(TARGET ${target})
+        target_sources(${target} PRIVATE src/SampledInstrument.cpp src/AiMelody.cpp)
+        target_include_directories(${target} SYSTEM PRIVATE third_party)
+        target_compile_definitions(${target} PRIVATE
+            SONORA_SOUNDFONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/assets/GeneralUser-GS.sf2")
+    endif()
+endforeach()

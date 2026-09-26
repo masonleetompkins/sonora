@@ -95,7 +95,7 @@ inline AutoConnectResult midiAutoConnect(const std::vector<MidiPort>& available,
 inline juce::String midiStatusText(const std::vector<MidiPort>& enabled)
 {
     if (enabled.empty())
-        return "no MIDI controller (plug one in — inputs auto-enable)";
+        return "no MIDI controller (plug one in; inputs auto-enable)";
     juce::String text;
     int shown = 0, musical = 0;
     for (const auto& port : enabled)

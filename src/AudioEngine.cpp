@@ -7,7 +7,7 @@ AudioEngine::AudioEngine()
     for (auto& unit : units)
     {
         for (int i = 0; i < 16; ++i)
-            unit.synth.addVoice(new Voice());
+            unit.synth.addVoice(new Voice(&unit.voiceParams));
         unit.synth.addSound(new Sound());
         unit.synth.setNoteStealingEnabled(false);
         // JUCE defaults to coalescing nearby MIDI events. Strict subdivision
@@ -16,6 +16,7 @@ AudioEngine::AudioEngine()
         unit.events.ensureSize(8192);
     }
     midi.ensureSize(65536);
+    renderEvents.ensureSize(65536);
 }
 
 bool AudioEngine::audible(int track, const ProjectState& state) const
@@ -62,6 +63,8 @@ void AudioEngine::prepare(double sampleRate)
     for (auto& unit : units)
     {
         unit.synth.setCurrentPlaybackSampleRate(rate);
+        unit.sampled.prepare(rate);
+        unit.chorus.prepare(rate);
         unit.drums.prepare(rate);
         unit.chain.prepare(rate);
         unit.gain.reset(rate, 0.01);
@@ -96,7 +99,16 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
             break;
     }
     const bool tempoChanged = std::abs(incoming.bpm - active.bpm) > 1.0e-9;
-    const bool tracksChanged = !(incoming.tracks == active.tracks);
+    // Only musical edits (notes, patterns, instrument, track kind) restart
+    // voices. Synth, FX, and mixer tweaks apply live to held notes.
+    bool tracksChanged = false;
+    for (int track = 0; track < maxTracks && !tracksChanged; ++track)
+    {
+        const auto& a = incoming.tracks[static_cast<std::size_t>(track)];
+        const auto& b = active.tracks[static_cast<std::size_t>(track)];
+        tracksChanged = a.kind != b.kind || a.instrumentPreset != b.instrumentPreset
+            || !(a.melodies == b.melodies) || !(a.drumPatterns == b.drumPatterns);
+    }
     const bool songToggled = incoming.songMode != active.songMode;
     bool audibilityChanged = false;
     for (int track = 0; track < maxTracks; ++track)
@@ -116,18 +128,41 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
     const bool running = playing.load();
     const bool panicNow = panicRequested.exchange(false);
     if (reset || (!wasPlaying && running))
+    {
         scheduler.rewind();
+        if (active.songMode)
+            scheduler.seekTicks(std::clamp(songStartSection.load(), 0, active.song.sections - 1) * patternTicks);
+    }
+    // Tracks gated out of a loop-previewed part stop at once (their note-offs
+    // will never be scheduled while gated).
+    const unsigned loopMask = active.songMode ? ~0u : loopTrackMask.load();
+    if (loopMask != activeLoopMask)
+    {
+        for (int track = 0; track < maxTracks; ++track)
+            if ((activeLoopMask >> track & 1u) && !(loopMask >> track & 1u))
+            {
+                units[static_cast<std::size_t>(track)].synth.allNotesOff(0, true);
+                units[static_cast<std::size_t>(track)].sampled.stop();
+            }
+        activeLoopMask = loopMask;
+    }
     const bool voicesChanged = tracksChanged || tempoChanged || reset || panicNow || running != wasPlaying;
     if (voicesChanged || songToggled)
         for (auto& unit : units)
+        {
             unit.synth.allNotesOff(0, false);
+            unit.sampled.stop();
+        }
     if (reset || panicNow || running != wasPlaying || audibilityChanged || songToggled)
         for (auto& unit : units)
             unit.drums.stop();
     // Effect tails belong to the notes that made them; clear them with voices.
     if (voicesChanged || songToggled)
         for (auto& unit : units)
+        {
             unit.chain.reset();
+            unit.chorus.reset();
+        }
     if (reset || panicNow)
         master.reset();
     for (int track = 0; track < maxTracks; ++track)
@@ -137,6 +172,18 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
         {
             unit.chain.setParams(incoming.tracks[static_cast<std::size_t>(track)].fx);
             unit.activeFx = incoming.tracks[static_cast<std::size_t>(track)].fx;
+        }
+    }
+    for (int track = 0; track < maxTracks; ++track)
+    {
+        auto& unit = units[static_cast<std::size_t>(track)];
+        const auto& synthParams = incoming.tracks[static_cast<std::size_t>(track)].synth;
+        if (!(synthParams == unit.voiceParams))
+        {
+            unit.voiceParams = synthParams;
+            for (int voice = 0; voice < unit.synth.getNumVoices(); ++voice)
+                if (auto* v = dynamic_cast<Voice*>(unit.synth.getVoice(voice)))
+                    v->updateEnvelopes();
         }
     }
     if (!(incoming.master == activeMaster))
@@ -261,7 +308,7 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
             for (int track = 0; track < maxTracks; ++track)
             {
                 const auto kind = active.tracks[static_cast<std::size_t>(track)].kind;
-                if (kind == TrackKind::None || !audible(track, active))
+                if (kind == TrackKind::None || !audible(track, active) || !(loopMask >> track & 1u))
                     continue;
                 const auto trackIndex = static_cast<std::size_t>(track);
                 const int loopMelody = std::clamp(
@@ -299,25 +346,39 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
         const auto kind = active.tracks[static_cast<std::size_t>(track)].kind;
         if (kind == TrackKind::None)
             continue;
-        if (kind == TrackKind::Synth)
-            unit.synth.renderNextBlock(*block.buffer, unit.events, block.startSample, block.numSamples);
-        else
-            unit.drums.render(*block.buffer, block.startSample, block.numSamples, unit.events,
-                              audible(track, active)
-                                  ? active.tracks[static_cast<std::size_t>(track)].mix.volume
-                                  : 0.0f);
-        unit.chain.process(*block.buffer, block.startSample, block.numSamples);
-        // The drum sampler applies its own track volume; the synth fader is
-        // smoothed here. Muted tracks were already gated at event time, but
-        // the fader still silences tails on mute toggles.
+        unit.sampled.select(active.tracks[static_cast<std::size_t>(track)].instrumentPreset);
+        // Render into an isolated, preallocated stereo buffer. Applying an
+        // insert or fader to the master buffer would alter earlier tracks.
         const float target = kind == TrackKind::Synth && audible(track, active)
             ? active.tracks[static_cast<std::size_t>(track)].mix.volume : 0.0f;
         unit.gain.setTargetValue(kind == TrackKind::Drums ? 1.0f : target);
-        for (int frame = block.startSample; frame < block.startSample + block.numSamples; ++frame)
+        for (int offset = 0; offset < block.numSamples; offset += 512)
         {
-            const auto gain = unit.gain.getNextValue();
-            for (int channel = 0; channel < block.buffer->getNumChannels(); ++channel)
-                block.buffer->getWritePointer(channel)[frame] *= gain;
+            const int count = std::min(512, block.numSamples - offset);
+            const int start = block.startSample + offset;
+            trackBuffer.clear();
+            renderEvents.clear();
+            renderEvents.addEvents(unit.events, start, count, -start);
+            if (kind == TrackKind::Synth)
+            {
+                if (active.tracks[static_cast<std::size_t>(track)].instrumentPreset == 0)
+                {
+                    unit.synth.renderNextBlock(trackBuffer, renderEvents, 0, count);
+                    unit.chorus.process(trackBuffer, count, unit.voiceParams.chorus);
+                }
+                else
+                    unit.sampled.render(trackBuffer, 0, count, renderEvents);
+            }
+            else
+                unit.drums.render(trackBuffer, 0, count, renderEvents,
+                    audible(track, active) ? active.tracks[static_cast<std::size_t>(track)].mix.volume : 0.0f);
+            unit.chain.process(trackBuffer, 0, count);
+            for (int frame = 0; frame < count; ++frame)
+            {
+                const auto gain = unit.gain.getNextValue();
+                for (int channel = 0; channel < block.buffer->getNumChannels(); ++channel)
+                    block.buffer->addSample(channel, start + frame, trackBuffer.getSample(channel % 2, frame) * gain);
+            }
         }
     }
     // Recorded takes play in song mode from their punch-in position. Takes are
@@ -363,6 +424,7 @@ void AudioEngine::release()
     for (auto& unit : units)
     {
         unit.synth.allNotesOff(0, false);
+        unit.sampled.stop();
         unit.drums.stop();
         unit.chain.reset();
     }

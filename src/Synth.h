@@ -1,6 +1,8 @@
 #pragma once
+#include "SynthParams.h"
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <cmath>
+#include <vector>
 
 namespace sonora
 {
@@ -11,10 +13,15 @@ public:
     bool appliesToChannel(int) override { return true; }
 };
 
-// A deliberately small, allocation-free sine voice for the first audio milestone.
+// Allocation-free subtractive voice: two oscillators (polyBLEP saw/square),
+// drive, TPT state-variable low-pass with its own envelope, amp envelope, and
+// an LFO for vibrato/filter wobble. Parameters are read from the owning
+// track's shared SynthParams, which the audio thread updates between blocks.
+// With default parameters this renders exactly like the original sine voice.
 class Voice final : public juce::SynthesiserVoice
 {
 public:
+    explicit Voice(const SynthParams* shared = nullptr) : params(shared != nullptr ? shared : &fallback) {}
     using juce::SynthesiserVoice::renderNextBlock;
     bool canPlaySound(juce::SynthesiserSound* sound) override
     {
@@ -23,36 +30,53 @@ public:
 
     void startNote(int note, float velocity, juce::SynthesiserSound*, int) override
     {
+        const auto rate = getSampleRate();
         phase = 0.0;
+        phase2 = 0.0;
         lfoPhase = 0.0;
-        lfoIncrement = juce::MathConstants<double>::twoPi * 5.5 / getSampleRate();
-        increment = juce::MathConstants<double>::twoPi
-            * juce::MidiMessage::getMidiNoteInHertz(note) / getSampleRate();
+        synthLfoPhase = 0.0;
+        ic1 = ic2 = 0.0f;
+        coefficientCountdown = 0;
+        lfoIncrement = juce::MathConstants<double>::twoPi * 5.5 / rate;
+        noteHz = juce::MidiMessage::getMidiNoteInHertz(note);
+        increment = juce::MathConstants<double>::twoPi * noteHz / rate;
         amplitude = velocity * 0.12f;
-        envelope.setSampleRate(getSampleRate());
-        envelope.setParameters({ 0.01f, 0.12f, 0.7f, 0.25f });
+        envelope.setSampleRate(rate);
+        filterEnvelope.setSampleRate(rate);
+        updateEnvelopes();
         envelope.noteOn();
+        filterEnvelope.noteOn();
     }
 
     void stopNote(float, bool allowTail) override
     {
         if (allowTail)
+        {
             envelope.noteOff();
+            filterEnvelope.noteOff();
+        }
         else
         {
             envelope.reset();
+            filterEnvelope.reset();
             clearCurrentNote();
         }
     }
+
+    // Re-read envelope times after a live edit; held notes keep sounding.
+    void updateEnvelopes()
+    {
+        const auto& p = *params;
+        envelope.setParameters({ p.attack, p.decay, p.sustain, p.release });
+        filterEnvelope.setParameters({ p.filterAttack, p.filterDecay, p.filterSustain, p.filterRelease });
+    }
+
     // MiniLab pitch strip: 14-bit wheel centered on 8192 bends +/-2 semitones.
-    // Only voices already playing on the wheel's channel are affected (JUCE
-    // core routing), so sequenced patterns never detune.
     void pitchWheelMoved(int newValue) override
     {
         bendSemis = (static_cast<float>(newValue) - 8192.0f) / 8192.0f * 2.0f;
     }
     // MiniLab mod strip (CC1): 5.5 Hz vibrato up to +/-0.5 semitones.
-    // Sustain (CC64) is held by the JUCE Synthesiser core, not here.
     void controllerMoved(int number, int value) override
     {
         if (number == 1)
@@ -61,17 +85,69 @@ public:
 
     void renderNextBlock(juce::AudioBuffer<float>& buffer, int start, int count) override
     {
-        // Bend is a static multiplier; vibrato modulates around it.
+        const auto& p = *params;
+        const auto rate = getSampleRate();
         const auto bendMult = std::pow(2.0f, bendSemis / 12.0f);
+        const bool useOsc2 = p.mix2 > 0.0f;
+        const bool useFilter = p.filterActive();
+        const bool useLfo = p.lfoPitch > 0.0f || p.lfoFilter > 0.0f;
+        const double ratio2 = std::pow(2.0, (p.semis2 + p.detune2 / 100.0) / 12.0);
+        const double synthLfoIncrement = juce::MathConstants<double>::twoPi * p.lfoRate / rate;
+        const float driveGain = 1.0f + p.drive * 24.0f;
+        const float driveNorm = 1.0f / std::pow(driveGain, 0.6f);
+        const float damping = 2.0f - 2.0f * p.resonance;
         for (int i = 0; i < count; ++i)
         {
             lfoPhase += lfoIncrement;
             if (lfoPhase >= juce::MathConstants<double>::twoPi)
                 lfoPhase -= juce::MathConstants<double>::twoPi;
-            const auto vibrato = 1.0f + modDepth * 0.029f * static_cast<float>(std::sin(lfoPhase));
-            const auto sample = static_cast<float>(std::sin(phase))
-                * amplitude * envelope.getNextSample();
-            phase += increment * bendMult * vibrato;
+            float pitchMult = 1.0f + modDepth * 0.029f * static_cast<float>(std::sin(lfoPhase));
+            float lfoValue = 0.0f;
+            if (useLfo)
+            {
+                synthLfoPhase += synthLfoIncrement;
+                if (synthLfoPhase >= juce::MathConstants<double>::twoPi)
+                    synthLfoPhase -= juce::MathConstants<double>::twoPi;
+                lfoValue = static_cast<float>(std::sin(synthLfoPhase));
+                if (p.lfoPitch > 0.0f)
+                    pitchMult *= std::pow(2.0f, p.lfoPitch * lfoValue / 12.0f);
+            }
+            const auto step = increment * bendMult * pitchMult;
+            float sample = oscillator(p.wave, phase, step);
+            if (useOsc2)
+            {
+                sample += p.mix2 * oscillator(p.wave2, phase2, step * ratio2);
+                phase2 += step * ratio2;
+                if (phase2 >= juce::MathConstants<double>::twoPi)
+                    phase2 = std::fmod(phase2, juce::MathConstants<double>::twoPi);
+            }
+            if (p.drive > 0.0f)
+                sample = std::tanh(sample * driveGain) * driveNorm;
+            if (useFilter)
+            {
+                const float filterEnv = filterEnvelope.getNextSample();
+                if (--coefficientCountdown <= 0)
+                {
+                    coefficientCountdown = 8;
+                    const float octaves = p.envAmount * filterEnv + p.lfoFilter * lfoValue;
+                    const float cutoff = juce::jlimit(20.0f, static_cast<float>(rate) * 0.45f,
+                                                      p.cutoff * std::pow(2.0f, octaves));
+                    const float g = std::tan(juce::MathConstants<float>::pi * cutoff / static_cast<float>(rate));
+                    a1 = 1.0f / (1.0f + g * (g + damping));
+                    a2 = g * a1;
+                    a3 = g * a2;
+                }
+                const float v3 = sample - ic2;
+                const float v1 = a1 * ic1 + a2 * v3;
+                const float v2 = ic2 + a2 * ic1 + a3 * v3;
+                ic1 = 2.0f * v1 - ic1;
+                ic2 = 2.0f * v2 - ic2;
+                sample = v2;
+            }
+            sample = sample * amplitude * envelope.getNextSample();
+            if (p.level < 1.0f || p.level > 1.0f)
+                sample *= p.level;
+            phase += step;
             if (phase >= juce::MathConstants<double>::twoPi)
                 phase = std::fmod(phase, juce::MathConstants<double>::twoPi);
             for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
@@ -85,8 +161,104 @@ public:
     }
 
 private:
-    juce::ADSR envelope;
-    double phase = 0.0, increment = 0.0, lfoPhase = 0.0, lfoIncrement = 0.0;
+    static float polyBlep(double t, double dt)
+    {
+        if (t < dt)
+        {
+            t /= dt;
+            return static_cast<float>(t + t - t * t - 1.0);
+        }
+        if (t > 1.0 - dt)
+        {
+            t = (t - 1.0) / dt;
+            return static_cast<float>(t * t + t + t + 1.0);
+        }
+        return 0.0f;
+    }
+
+    // phase in radians [0, 2pi); step in radians per sample.
+    static float oscillator(int wave, double phaseRadians, double step)
+    {
+        if (wave == WaveSine)
+            return static_cast<float>(std::sin(phaseRadians));
+        const double t = phaseRadians / juce::MathConstants<double>::twoPi;
+        const double dt = juce::jlimit(1.0e-9, 0.5, step / juce::MathConstants<double>::twoPi);
+        switch (wave)
+        {
+            case WaveTriangle: return static_cast<float>(4.0 * std::abs(t - 0.5) - 1.0);
+            case WaveSaw: return 0.8f * (static_cast<float>(2.0 * t - 1.0) - polyBlep(t, dt));
+            default:
+            {
+                float square = t < 0.5 ? 1.0f : -1.0f;
+                square += polyBlep(t, dt);
+                square -= polyBlep(std::fmod(t + 0.5, 1.0), dt);
+                return 0.6f * square;
+            }
+        }
+    }
+
+    static inline const SynthParams fallback {};
+    const SynthParams* params;
+    juce::ADSR envelope, filterEnvelope;
+    double phase = 0.0, phase2 = 0.0, increment = 0.0, lfoPhase = 0.0, lfoIncrement = 0.0;
+    double synthLfoPhase = 0.0, noteHz = 440.0;
     float amplitude = 0.0f, bendSemis = 0.0f, modDepth = 0.0f;
+    float ic1 = 0.0f, ic2 = 0.0f, a1 = 1.0f, a2 = 0.0f, a3 = 0.0f;
+    int coefficientCountdown = 0;
+};
+
+// Stereo chorus for the synth track: two modulated delay taps, 90 degrees
+// apart. prepare() allocates; process() does not. Bypassed at mix 0.
+class Chorus
+{
+public:
+    void prepare(double sampleRate)
+    {
+        rate = sampleRate;
+        line.assign(static_cast<std::size_t>(sampleRate * 0.05) + 4, 0.0f);
+        reset();
+    }
+    void reset()
+    {
+        std::fill(line.begin(), line.end(), 0.0f);
+        write = 0;
+        lfo = 0.0;
+    }
+    void process(juce::AudioBuffer<float>& buffer, int count, float mix)
+    {
+        if (mix <= 0.0f || line.empty() || buffer.getNumChannels() < 2)
+            return;
+        const auto size = static_cast<int>(line.size());
+        const double increment = juce::MathConstants<double>::twoPi * 0.7 / rate;
+        auto* left = buffer.getWritePointer(0);
+        auto* right = buffer.getWritePointer(1);
+        for (int i = 0; i < count; ++i)
+        {
+            const float dry = 0.5f * (left[i] + right[i]);
+            line[static_cast<std::size_t>(write)] = dry;
+            auto tap = [&](double offset) {
+                const double delay = rate * (0.012 + 0.004 * std::sin(lfo + offset));
+                double read = write - delay;
+                while (read < 0.0)
+                    read += size;
+                const int a = static_cast<int>(read) % size;
+                const int b = (a + 1) % size;
+                const float frac = static_cast<float>(read - std::floor(read));
+                return line[static_cast<std::size_t>(a)] * (1.0f - frac) + line[static_cast<std::size_t>(b)] * frac;
+            };
+            const float wetLeft = tap(0.0), wetRight = tap(juce::MathConstants<double>::halfPi);
+            left[i] = left[i] * (1.0f - 0.5f * mix) + wetLeft * 0.7f * mix;
+            right[i] = right[i] * (1.0f - 0.5f * mix) + wetRight * 0.7f * mix;
+            write = (write + 1) % size;
+            lfo += increment;
+            if (lfo >= juce::MathConstants<double>::twoPi)
+                lfo -= juce::MathConstants<double>::twoPi;
+        }
+    }
+
+private:
+    std::vector<float> line;
+    double rate = 48000.0, lfo = 0.0;
+    int write = 0;
 };
 }
