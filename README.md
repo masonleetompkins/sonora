@@ -125,6 +125,16 @@ a fallback or for direct hardware access.
   writes new variation loops (fills, half-time grooves, lifted final-chorus
   melodies) into empty loop slots only, never rewriting your loops. One Undo
   restores the previous song. See "AI melody and privacy" below.
+- **Idea REC**, separate from normal audio-take REC: on a selected instrument
+  or drum track, press Idea REC or MiniLab 3 Shift+Record (Shift+Pad 7), play
+  an idea, then press Idea REC or Shift+Stop (Shift+Pad 5). Keys and pads are
+  captured without starting song playback or creating an audio take; on a
+  synth track you can also hum a single-note melody into an available mic.
+  Sonora quantizes/fits the phrase to four bars and asks the local Claude
+  assistant to develop it with the other tracks in mind. If Claude is
+  unavailable, the quantized idea is still saved to the selected loop.
+  Ctrl+Z restores its previous contents. On-screen REC continues to record
+  regular song audio takes; MiniLab's Shift+Record is reserved for ideas.
 - Editable synth (Sine Keys, "Edit sound"): two oscillators (sine/triangle/
   saw/square, blend, semitone, fine), resonant low-pass filter with its own
   ADSR, amp ADSR, LFO vibrato/filter wobble, drive, stereo chorus, output

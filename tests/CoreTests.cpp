@@ -5,6 +5,8 @@
 #include "KitSamples.h"
 #include "KnobMaps.h"
 #include "AiMelody.h"
+#include "AiDictation.h"
+#include "IdeaCapture.h"
 #include "MiniLabDisplay.h"
 #include "OmarchyTheme.h"
 #include "PitchCorrect.h"
@@ -1790,6 +1792,16 @@ void testInstances()
     const auto shared = sonora::sectionsSharingSlot(song, 0, 0);
     require(shared.size() == 2 && shared[0] == 1 && shared[1] == 5, "sharing query wrong");
     require(sonora::sectionsSharingSlot(song, 1, 3).empty(), "unused slot reports sharers");
+    // Repeated clicks cycle A > B > C > D > empty; an off cell always starts on A.
+    auto cell = sonora::nextArrangementCell(0, false);
+    require(cell.first == 0 && cell.second, "off cell did not start on A");
+    for (std::uint8_t slot = 0; slot < sonora::numPatterns - 1; ++slot)
+    {
+        cell = sonora::nextArrangementCell(slot, true);
+        require(cell.first == slot + 1 && cell.second, "cell did not advance to next loop");
+    }
+    cell = sonora::nextArrangementCell(sonora::numPatterns - 1, true);
+    require(cell.first == 0 && !cell.second, "last loop did not cycle back to empty");
 }
 
 void testAcceptance()
@@ -2952,6 +2964,67 @@ void testSongComposer()
     }
 }
 
+void testIdeaCapture()
+{
+    using sonora::IdeaEvent;
+    // Leading silence is removed, rhythm is quantized, and held keys acquire
+    // actual note lengths instead of being copied as raw transport audio.
+    const std::vector<IdeaEvent> keys {
+        { 1.0, 60, 108, 1, true }, { 1.5, 60, 0, 1, false },
+        { 1.5, 64, 90, 1, true }, { 2.0, 64, 0, 1, false },
+        { 2.0, 67, 95, 1, true }, { 2.5, 67, 0, 1, false }
+    };
+    const auto melody = sonora::interpretIdea(keys, sonora::TrackKind::Synth, 120.0, 3.0);
+    require(melody.melody.valid() && melody.melody.count == 3, "idea lost played keys");
+    require(melody.melody.notes[0].start == 0 && melody.melody.notes[0].duration == 960
+            && melody.melody.notes[1].start == 960 && melody.melody.notes[2].start == 1920,
+            "idea timing/leading-silence wrong");
+    const auto octave = sonora::interpretIdea({ { 0, 84, 100, 1, true }, { 0.5, 84, 0, 1, false } },
+                                              sonora::TrackKind::Synth, 120, 1);
+    require(octave.melody.count == 1 && octave.melody.notes[0].pitch == 60, "idea pitch not folded to editor");
+    std::vector<IdeaEvent> longIdea { { 0, 60, 100, 1, true }, { 0.5, 60, 0, 1, false },
+                                      { 18, 67, 100, 1, true }, { 18.5, 67, 0, 1, false } };
+    const auto fitted = sonora::interpretIdea(longIdea, sonora::TrackKind::Synth, 120, 20);
+    require(fitted.melody.valid() && fitted.melody.count == 2
+            && fitted.melody.notes[1].start < sonora::patternTicks,
+            "long idea did not fit into four bars");
+    const auto drums = sonora::interpretIdea({ { 0, 36, 110, 10, true }, { 0.25, 37, 100, 10, true },
+                                               { 0.25, 37, 70, 10, true }, { 0.5, 46, 90, 10, true },
+                                               { 0.75, 88, 90, 10, true } },
+                                             sonora::TrackKind::Drums, 120, 1.5);
+    require(drums.drums.valid() && drums.drums.hitCount() == 3
+            && drums.drums.steps[0][0] == 110 && drums.drums.steps[1][2] == 100,
+            "pad idea lost hits or duplicate velocity");
+    require(sonora::interpretIdea({}, sonora::TrackKind::Synth, 120, 1).melody.count == 0,
+            "empty idea manufactured notes");
+    // Local mic fallback: a steady sung A4 becomes a note without needing a
+    // network call, or creating a recorded take in the project.
+    std::vector<float> hum(48000);
+    for (int i = 0; i < 48000; ++i)
+        hum[static_cast<std::size_t>(i)] = 0.4f * std::sin(juce::MathConstants<double>::twoPi * 440 * i / 48000.0);
+    const auto vocal = sonora::interpretAudioIdea(hum.data(), static_cast<int>(hum.size()), 48000, 120);
+    require(vocal.fromAudio && vocal.melody.valid() && vocal.melody.count > 0
+            && vocal.melody.notes[0].pitch == 69, "hummed idea not detected");
+    std::fill(hum.begin(), hum.end(), 0.0f);
+    require(sonora::interpretAudioIdea(hum.data(), static_cast<int>(hum.size()), 48000, 120).melody.count == 0,
+            "silence became an idea");
+}
+
+void testAiDictation()
+{
+    // Voxtype prints progress lines, then the final transcript alone.
+    require(sonora::ai::parseVoxtypeOutput("Loading audio file: \"/tmp/x.wav\"\nAudio format: 16000 Hz\nProcessing 16000 samples (1.00s)...\n\nAdd a snare fill\n")
+                == "Add a snare fill", "dictation transcript not extracted");
+    require(sonora::ai::parseVoxtypeOutput("Loading audio file: \"/tmp/x.wav\"\nAudio format: 16000 Hz\n").isEmpty(),
+            "progress-only output accepted as dictation");
+    require(sonora::ai::parseVoxtypeOutput("").isEmpty(), "empty dictation accepted");
+    // A missing WAV can never become text.
+    const auto missing = juce::File::getSpecialLocation(juce::File::tempDirectory).getNonexistentChildFile("sonora-missing", ".wav");
+    std::atomic<bool> cancel { false };
+    const auto result = sonora::ai::transcribeDictation(missing, &cancel);
+    require(!result.ok() && result.error.isNotEmpty(), "missing dictation WAV accepted");
+}
+
 int main()
 {
     try
@@ -2989,6 +3062,8 @@ int main()
         testSongComposition(); std::cout << "PASS song parts, section edits, templates, v13, play-from-part, part preview\n";
         testAiAssistant(); std::cout << "PASS AI assistant context, history, drum/melody edits, sandbox, fake CLI\n";
         testSongComposer(); std::cout << "PASS song composer context, empty-slot rule, arrangement, apply, fake CLI\n";
+        testIdeaCapture(); std::cout << "PASS idea capture MIDI pads/keys, four-bar timing, humming, silence\n";
+        testAiDictation(); std::cout << "PASS local dictation transcript parsing, missing WAV rejection\n";
         return 0;
     }
     catch (const std::exception& error)

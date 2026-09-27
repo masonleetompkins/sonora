@@ -8,6 +8,8 @@
 #include "KnobMaps.h"
 #include "ArrangementView.h"
 #include "AiSidebar.h"
+#include "IdeaCapture.h"
+#include "AiDictation.h"
 #include "MiniLabDisplay.h"
 #include "AiMelody.h"
 #include "NeonTheme.h"
@@ -102,7 +104,7 @@ private:
     DrumSequencer drumSequencer;
     juce::Label title, subtitle, description, status, position, outputMeter;
     juce::TextButton audioSettings { "Audio / MIDI" }, panic { "Panic" };
-    juce::TextButton play { "Play" }, stop { "Stop" }, record { "REC" }, undo { "Undo" }, redo { "Redo" };
+    juce::TextButton play { "Play" }, stop { "Stop" }, record { "REC" }, ideaButton { "Idea REC" }, undo { "Undo" }, redo { "Redo" };
     juce::TextButton newProject { "New" }, open { "Open" }, save { "Save" }, saveAs { "Save as" };
     juce::TextButton exportButton { "Export" };
     juce::TextButton clear { "Clear" }, demo { "Demo melody" };
@@ -160,6 +162,7 @@ private:
     static constexpr int sidebarWidth = 380;
     std::unique_ptr<AiSidebar> aiSidebar;
     std::unique_ptr<AssistantWorker> assistantWorker;
+    bool transcribing = false;
     std::vector<ai::ChatTurn> chatHistory, songHistory; // track chat / song composer
     static constexpr juce::uint32 songChatId = 0xFFFFFFFFu;
     juce::uint32 assistantStartedAt = 0, chatTrackId = 0;
@@ -174,6 +177,10 @@ private:
     void songComposerFinished(const ai::SongResult& result, const std::array<juce::uint32, maxTracks>& ids);
     void startAiJob(std::function<void(const std::atomic<bool>*)> job);
     void finishAiJob();
+    void toggleIdeaRecord();
+    void finishIdeaRecord();
+    void ideaFinished(IdeaResult raw, ai::AssistantResult refined, std::uint32_t trackId, int slot);
+    void toggleDictation();
     std::unique_ptr<PitchWorker> pitchWorker;
     void refreshKitPanel();
     void refreshSynthPanel();
@@ -255,14 +262,28 @@ private:
     // Recording state (message thread owns transitions; audio thread only
     // pushes into the recorder FIFO and reads atomics).
     TakeRecorder recorder;
+    TakeRecorder ideaRecorder;
+    TakeRecorder dictationRecorder;
+    std::atomic<bool> dictationRecording { false };
+    juce::File dictationFile;
+    double dictationStarted = 0.0;
+    std::atomic<bool> ideaRecording { false };
+    juce::CriticalSection ideaMutex;
+    std::vector<IdeaEvent> ideaEvents;
+    double ideaStarted = 0.0, ideaRate = 48000.0;
+    juce::File ideaFile;
+    std::uint32_t ideaTrackId = 0;
+    int ideaSlot = 0;
+    TrackKind ideaKind = TrackKind::None;
+    bool ideaHasAudio = false;
     bool recording = false, monitorInputs = false;
     std::atomic<std::int64_t> lastMidiMillis { 0 };
     int inputMode = 0, recordChannels = 1, recordStartTick = 0;
     juce::File recordFile;
     std::atomic<float> inputPeak { 0.0f };
     std::unique_ptr<const TakeSet> takeStorage;
-    std::unique_ptr<const SampleBank> bankStorage;
-    juce::String lastBankSignature;
+    std::array<std::unique_ptr<const SampleBank>, maxTracks> bankStorage;
+    std::array<juce::String, maxTracks> lastBankSignature;
     std::uint64_t takesRevision = 0;
     double takesRate = 0.0;
     std::uint32_t selectedTake = 0, nextTakeId = 1;

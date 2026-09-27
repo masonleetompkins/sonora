@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include "OmarchyTheme.h"
 #include <juce_gui_basics/juce_gui_basics.h>
 
@@ -30,7 +31,7 @@ inline void applyPalette(const omarchy::Palette& palette)
 
 inline juce::Font font(float size, bool bold = false, float tracking = 0.0f)
 {
-    return juce::Font(juce::FontOptions(size, bold ? juce::Font::bold : juce::Font::plain))
+    return juce::Font(juce::FontOptions(std::max(10.5f, size * 1.08f), bold ? juce::Font::bold : juce::Font::plain))
         .withExtraKerningFactor(tracking);
 }
 
@@ -39,7 +40,7 @@ inline void caption(juce::Graphics& g, const juce::String& value, juce::Rectangl
 {
     g.setFont(font(size, true, 0.13f));
     g.setColour(colour);
-    g.drawText(value, area, juce::Justification::centredLeft);
+    g.drawFittedText(value, area, juce::Justification::centredLeft, 1, 0.75f);
 }
 
 inline void surface(juce::Graphics& g, juce::Rectangle<float> bounds, float radius = 12.0f)
@@ -92,7 +93,7 @@ public:
 
     juce::Font getTextButtonFont(juce::TextButton&, int height) override
     {
-        return font(height < 28 ? 10.5f : 12.0f, true, 0.025f);
+        return font(height < 28 ? 12.0f : 13.0f, true, 0.025f);
     }
 
     void drawButtonBackground(juce::Graphics& g, juce::Button& button, const juce::Colour&,
@@ -157,7 +158,7 @@ public:
         {
             caption(g, button.getProperties()["shortcut"].toString(), { 14, 10, 30, 18 }, accent);
             g.setColour(colour.withAlpha(alpha));
-            g.setFont(font(11.0f, true));
+            g.setFont(font(12.0f, true));
             g.drawFittedText(button.getButtonText(), bounds.reduced(12, 0).withTrimmedTop(18).withTrimmedBottom(13),
                              juce::Justification::centredLeft, 2);
         }
@@ -170,7 +171,7 @@ public:
     {
         const auto accent = slider.findColour(juce::Slider::thumbColourId);
         auto bounds = juce::Rectangle<float>(static_cast<float>(x), static_cast<float>(y),
-            static_cast<float>(width), static_cast<float>(height)).reduced(12);
+            static_cast<float>(width), static_cast<float>(height)).reduced(9);
         const auto radius = std::min(bounds.getWidth(), bounds.getHeight()) * 0.5f;
         const auto centre = bounds.getCentre();
         juce::Path arc, filled;

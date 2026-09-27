@@ -141,11 +141,11 @@ void ArrangementView::paint(juce::Graphics& g)
             ? (narrow ? juce::String("P") : juce::String("PART ")) + juce::String(s + 1)
             : narrow ? juce::String(shortNames[static_cast<int>(part)]) : juce::String(songPartName(part)).toUpperCase();
         g.setColour(ui::text);
-        g.setFont(ui::font(narrow ? 9.5f : 11.0f, true, 0.06f));
+        g.setFont(ui::font(narrow ? 10.5f : 12.5f, true, 0.06f));
         g.drawFittedText(name, area.reduced(5.0f, 4.0f).withTrimmedBottom(16.0f).toNearestInt(),
                          juce::Justification::centredLeft, 1, 0.6f);
         g.setColour(ui::muted);
-        g.setFont(ui::font(9.0f));
+        g.setFont(ui::font(10.5f));
         g.drawText(juce::String(s * 4 + 1) + (area.getWidth() > 50.0f ? "-" + juce::String(s * 4 + 4) : juce::String()),
                    area.reduced(5.0f, 4.0f).withTrimmedTop(26.0f).withTrimmedLeft(s == state.selected ? 10.0f : 0.0f)
                        .toNearestInt(),
@@ -177,7 +177,7 @@ void ArrangementView::paint(juce::Graphics& g)
         g.setColour(colour);
         g.fillRoundedRectangle(8.0f, y + 6.0f, 3.0f, l.rowHeight - 17.0f, 1.5f);
         g.setColour(ui::text);
-        g.setFont(ui::font(12.0f, true));
+        g.setFont(ui::font(14.0f, true));
         const float chipsLeft = chipBounds(static_cast<int>(row), 0).getX();
         g.drawFittedText(state.names[t], juce::Rectangle<float>(18.0f, y, chipsLeft - 24.0f, l.rowHeight - 5.0f).toNearestInt(),
                          juce::Justification::centredLeft, 1, 0.7f);
@@ -191,7 +191,7 @@ void ArrangementView::paint(juce::Graphics& g)
             g.setColour(content ? colour : ui::border);
             g.drawRoundedRectangle(chip.reduced(0.5f), 5.0f, 1.0f);
             g.setColour(content ? ui::text : ui::muted);
-            g.setFont(ui::font(11.0f, true));
+            g.setFont(ui::font(12.0f, true));
             g.drawText(slotLetter(slot), chip.toNearestInt(), juce::Justification::centred);
         }
         for (int s = 0; s < song.sections; ++s)
@@ -209,7 +209,7 @@ void ArrangementView::paint(juce::Graphics& g)
                 g.setColour(content ? colour : colour.withAlpha(0.6f));
                 g.drawRoundedRectangle(cell.reduced(0.5f), 5.0f, 1.0f);
                 g.setColour(content ? ui::text : ui::muted);
-                g.setFont(ui::font(12.0f, true));
+                g.setFont(ui::font(14.0f, true));
                 g.drawText(content ? slotLetter(slot) : slotLetter(slot) + (cell.getWidth() > 60.0f ? " (empty)" : ""),
                            cell.toNearestInt(), juce::Justification::centred);
             }
@@ -249,9 +249,9 @@ void ArrangementView::paint(juce::Graphics& g)
     }
 
     g.setColour(ui::muted);
-    g.setFont(ui::font(11.0f));
+    g.setFont(ui::font(12.0f));
     g.drawText(rowList.empty() ? juce::String("Add an instrument track to start arranging.")
-                               : juce::String("Drag a loop chip onto parts  |  Click a cell: on/off, drag across to paint  |  "
+                                : juce::String("Drag a loop chip onto parts  |  Click: A > B > C > D > empty; drag to paint  |  "
                                               "Scroll or right-click a cell: pick loop  |  Click a part: play from it, "
                                               "drag to reorder, double-click to edit it"),
                juce::Rectangle<float>(8.0f, static_cast<float>(getHeight()) - footerHeight, static_cast<float>(getWidth()) - 16.0f,
@@ -301,8 +301,9 @@ void ArrangementView::mouseDown(const juce::MouseEvent& event)
         }
         const auto si = static_cast<std::size_t>(hit.section);
         const auto t = static_cast<std::size_t>(track);
-        paintOn = !state.song.trackOn[si][t];
-        dragSlot = state.song.slots[si][t];
+        const auto [slot, on] = nextArrangementCell(state.song.slots[si][t], state.song.trackOn[si][t]);
+        paintOn = on;
+        dragSlot = slot;
         dragTrack = track;
         drag = Drag::Paint;
         lastPainted = hit.section;
@@ -374,13 +375,8 @@ void ArrangementView::mouseDoubleClick(const juce::MouseEvent& event)
     const auto hit = locate(event.position);
     if (hit.area == Hit::Area::Header)
         emit({ ArrangementAction::Kind::EditPart, hit.section });
-    else if (hit.area == Hit::Area::Cell)
-    {
-        // The two clicks toggled the cell off and back on; now open its loop.
-        const int track = rows()[static_cast<std::size_t>(hit.row)];
-        emit({ ArrangementAction::Kind::EditLoop, hit.section, track,
-               state.song.slots[static_cast<std::size_t>(hit.section)][static_cast<std::size_t>(track)] });
-    }
+    // Double-clicking a cell advances twice; right-click -> Edit this loop
+    // still opens the piano roll or sequencer.
 }
 
 void ArrangementView::mouseWheelMove(const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel)

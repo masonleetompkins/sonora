@@ -17,13 +17,15 @@ public:
 
     enum class Mode { Melody, Drums, Song };
     std::function<void(const juce::String&)> onSend;
-    std::function<void()> onCancel, onClose, onNewChat;
+    std::function<void()> onCancel, onClose, onNewChat, onVoice;
 
     AiSidebar();
     // title: target track; detail: part + loop; canChat false greys the input.
     void setContext(const juce::String& title, const juce::String& detail, Mode mode, bool canChat,
                     const juce::String& unavailableReason = {});
     void setBusy(bool busy);
+    void setVoiceRecording(bool recording);
+    void appendDictation(const juce::String& text);
     void setStatus(const juce::String& text);
     void addMessage(Message message);
     void clearMessages();
@@ -49,7 +51,7 @@ private:
     Transcript transcript;
     juce::Viewport viewport;
     juce::TextEditor input;
-    juce::TextButton send { "Send" }, stop { "Stop" }, close { "X" }, newChat { "New chat" };
+    juce::TextButton send { "Send" }, stop { "Stop" }, mic { "Mic" }, close { "X" }, newChat { "New chat" };
     std::array<juce::TextButton, 4> chips;
     juce::Label status;
     juce::String title, detail, unavailable;

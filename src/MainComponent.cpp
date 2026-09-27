@@ -94,7 +94,7 @@ struct MainComponent::FxBar final : public juce::Component
                     onSet(i, static_cast<float>(knobs[static_cast<std::size_t>(i)].getValue()));
                 refreshValues();
             };
-            label.setFont(ui::font(9.0f, true, 0.08f));
+            label.setFont(ui::font(11.0f, true, 0.08f));
             label.setColour(juce::Label::textColourId, ui::muted);
             label.setJustificationType(juce::Justification::centred);
         }
@@ -175,7 +175,7 @@ struct MainComponent::FxBar final : public juce::Component
     void resized() override
     {
         auto row = getLocalBounds().reduced(10, 8);
-        auto tabs = row.removeFromLeft(248);
+        auto tabs = row.removeFromLeft(266);
         tabs.removeFromTop(2);
         auto targetRow = tabs.removeFromTop(26);
         for (int i = 0; i < 3; ++i)
@@ -185,12 +185,12 @@ struct MainComponent::FxBar final : public juce::Component
             targetButtons[static_cast<std::size_t>(i)].setBounds(targetRow.removeFromLeft(112));
             targetRow.removeFromLeft(4);
         }
-        auto effectRow = tabs.removeFromTop(26);
+        auto effectRow = tabs.removeFromTop(28);
         for (int i = 0; i < numEffects; ++i)
         {
             if (effectButtons[static_cast<std::size_t>(i)].isVisible())
             {
-                effectButtons[static_cast<std::size_t>(i)].setBounds(effectRow.removeFromLeft(38));
+                effectButtons[static_cast<std::size_t>(i)].setBounds(effectRow.removeFromLeft(41));
                 effectRow.removeFromLeft(3);
             }
         }
@@ -492,7 +492,7 @@ struct MainComponent::SynthPanel final : public juce::Component
                 params.*layout()[i].field = static_cast<float>(knobs[i].slider->getValue());
                 publish();
             };
-            knob.label->setFont(ui::font(9.0f, true, 0.08f));
+            knob.label->setFont(ui::font(11.0f, true, 0.08f));
             knob.label->setColour(juce::Label::textColourId, ui::muted);
             knob.label->setJustificationType(juce::Justification::centred);
             knob.label->setInterceptsMouseClicks(false, false);
@@ -711,6 +711,13 @@ void MainComponent::toggleAiSidebar()
             if (panel != nullptr)
                 panel->setVisible(false);
     }
+    else if (dictationRecording.exchange(false))
+    {
+        dictationRecorder.stop();
+        dictationFile.deleteFile();
+        dictationFile = juce::File();
+        aiSidebar->setVoiceRecording(false);
+    }
     aiSidebar->setVisible(opening);
     demo.setToggleState(opening, juce::dontSendNotification);
     refreshAiSidebar();
@@ -786,6 +793,7 @@ void MainComponent::startAiJob(std::function<void(const std::atomic<bool>*)> job
 
 void MainComponent::finishAiJob()
 {
+    transcribing = false;
     if (assistantWorker != nullptr)
     {
         assistantWorker->stopThread(2000);
@@ -1134,16 +1142,22 @@ void MainComponent::refreshPadBank()
         files[static_cast<std::size_t>(pad)] = padSampleName(project.tracks[static_cast<std::size_t>(drumEditTrack())].padSamples[static_cast<std::size_t>(pad)]);
         signature += files[static_cast<std::size_t>(pad)] + ";";
     }
-    if (signature == lastBankSignature)
+    const auto trackIndex = static_cast<std::size_t>(drumEditTrack());
+    if (signature == lastBankSignature[trackIndex])
         return;
-    lastBankSignature = signature;
+    lastBankSignature[trackIndex] = signature;
     auto bank = loadSampleBank(files, media, rate, project.tracks[static_cast<std::size_t>(drumEditTrack())].kitVariant);
     if (bank == nullptr)
         return;
-    auto* retired = engine.retirePadBank(drumEditTrack(), bank.get());
-    bankStorage = std::move(bank);
+    auto* retired = engine.retirePadBank(static_cast<int>(trackIndex), bank.get());
+    // release() transfers ownership of the old bank to the grace-period
+    // callback. Assignment would destroy it before the audio thread lets go.
+    const auto* owned = bankStorage[trackIndex].release();
+    bankStorage[trackIndex] = std::move(bank);
     if (retired != nullptr)
         juce::Timer::callAfterDelay(600, [retired] { delete retired; });
+    else
+        delete owned;
 }
 
 
@@ -1489,7 +1503,7 @@ static int activeInputCount(juce::AudioDeviceManager& manager)
 
 void MainComponent::ensureAudioInputs()
 {
-    if (activeInputCount(deviceManager) > 0)
+    if (ideaKind == TrackKind::Synth && activeInputCount(deviceManager) > 0)
         return;
     setAudioChannels(2, 2);
 }
@@ -1512,7 +1526,7 @@ MainComponent::MainComponent()
     description.setColour(juce::Label::textColourId, ui::muted);
     for (auto* component : std::initializer_list<juce::Component*> {
              &title, &subtitle, &description, &status, &position, &audioSettings,
-             &panic, &keyboard, &pianoRoll, &play, &stop, &record, &undo, &redo, &newProject,
+             &panic, &keyboard, &pianoRoll, &play, &stop, &record, &ideaButton, &undo, &redo, &newProject,
              &open, &save, &saveAs, &exportButton, &clear, &demo, &tempo, &drumSequencer,
              &audioTab, &mute, &solo, &trackVolume, &repeatBar, &kitButton, &outputMeter,
              &loopView, &songView, &duplicatePattern })
@@ -1638,7 +1652,7 @@ MainComponent::MainComponent()
 
     // Keep transport shortcuts focused on the editor after toolbar clicks.
     for (auto* button : std::initializer_list<juce::Button*> {
-             &play, &stop, &record, &panic, &audioSettings, &undo, &redo,
+             &play, &stop, &record, &ideaButton, &panic, &audioSettings, &undo, &redo,
              &newProject, &open, &save, &saveAs, &exportButton, &clear, &demo, &duplicatePattern,
              &audioTab, &mute, &solo, &repeatBar, &kitButton,
              &loopView, &songView, &partTrackOn })
@@ -1761,6 +1775,11 @@ MainComponent::MainComponent()
     record.setColour(juce::TextButton::buttonOnColourId, ui::danger);
     record.setClickingTogglesState(true);
     record.setTooltip("Record: starts the song from the top (or punches in while playing). Press again to punch out, Stop to finish the take.");
+    ideaButton.setClickingTogglesState(true);
+    ideaButton.setColour(juce::TextButton::buttonOnColourId, ui::violet);
+    ideaButton.setTooltip("Capture an idea, not a take. Shift+Record (MiniLab: Shift+Pad 7) starts; "
+                          "Shift+Stop (Shift+Pad 5) finishes. Play keys/pads or hum into a mic; "
+                          "Sonora fits the idea to four bars with the AI assistant.");
     play.getProperties().set("role", "primary");
     save.getProperties().set("role", "primary");
     panic.setColour(juce::TextButton::buttonOnColourId, ui::danger);
@@ -1806,12 +1825,15 @@ MainComponent::MainComponent()
         engine.setPlaying(!engine.isPlaying());
     };
     stop.onClick = [this] {
+        if (ideaRecording.load())
+            finishIdeaRecord();
         if (recording)
             finalizeTake();
         engine.stop();
         engine.keyboardState.allNotesOff(0);
     };
     record.onClick = [this] { toggleRecord(); };
+    ideaButton.onClick = [this] { toggleIdeaRecord(); };
     panic.onClick = [this] { engine.stop(); engine.keyboardState.allNotesOff(0); engine.panic(); };
     audioSettings.onClick = [this] { openAudioSettings(); };
     undo.onClick = [this] { undoEdit(); };
@@ -1837,6 +1859,7 @@ MainComponent::MainComponent()
     aiSidebar = std::make_unique<AiSidebar>();
     addChildComponent(aiSidebar.get());
     aiSidebar->onSend = [this](const juce::String& text) { sendToAssistant(text); };
+    aiSidebar->onVoice = [this] { toggleDictation(); };
     aiSidebar->onCancel = [this] { if (assistantWorker != nullptr) assistantWorker->cancel.store(true); };
     aiSidebar->onClose = [this] { toggleAiSidebar(); };
     aiSidebar->onNewChat = [this] {
@@ -1957,6 +1980,12 @@ MainComponent::MainComponent()
 MainComponent::~MainComponent()
 {
     stopTimer();
+    if (dictationRecording.exchange(false))
+        dictationRecorder.stop();
+    dictationFile.deleteFile();
+    if (ideaRecording.exchange(false) && ideaHasAudio)
+        ideaRecorder.stop();
+    ideaFile.deleteFile();
     if (miniLabOut != nullptr)
         miniLabSend(minilab::disconnectDaw());
     miniLabOut.reset();
@@ -1979,7 +2008,8 @@ MainComponent::~MainComponent()
     takeStorage.reset();
     for (int track = 0; track < maxTracks; ++track)
         engine.retirePadBank(track, nullptr);
-    bankStorage.reset();
+    for (auto& bank : bankStorage)
+        bank.reset();
     setLookAndFeel(nullptr);
 }
 
@@ -2000,7 +2030,8 @@ void MainComponent::audioDeviceIOCallbackWithContext(const float* const* inputCh
     // outputs; this tap only observes inputs and optionally adds monitoring.
     const float* sources[2] = { nullptr, nullptr };
     int mapped = 0;
-    if (inputChannelData != nullptr && numInputChannels > 0 && (monitorInputs || recording))
+    if (inputChannelData != nullptr && numInputChannels > 0
+        && (monitorInputs || recording || ideaRecording.load() || dictationRecording.load()))
     {
         if (inputMode == 2 && numInputChannels > 1)
         {
@@ -2025,6 +2056,10 @@ void MainComponent::audioDeviceIOCallbackWithContext(const float* const* inputCh
         }
         if (recording)
             recorder.push(sources, mapped, numSamples);
+        if (ideaRecording.load(std::memory_order_relaxed) && ideaHasAudio)
+            ideaRecorder.push(sources, 1, numSamples);
+        if (dictationRecording.load(std::memory_order_relaxed))
+            dictationRecorder.push(sources, 1, numSamples);
     }
     else
     {
@@ -2066,12 +2101,19 @@ void MainComponent::handleIncomingMidiMessage(juce::MidiInput* source, const juc
                             safe->engine.setPlaying(true);
                         break;
                     case midi::McuAction::Stop:
+                        if (safe->ideaRecording.load())
+                        {
+                            safe->finishIdeaRecord();
+                            break;
+                        }
                         if (safe->recording)
                             safe->finalizeTake();
                         safe->engine.stop();
                         safe->engine.keyboardState.allNotesOff(0);
                         break;
-                    case midi::McuAction::Record: safe->toggleRecord(); break;
+                    // MiniLab transport Record is Shift+Pad 7: idea capture.
+                    // The on-screen REC button is deliberately independent.
+                    case midi::McuAction::Record: safe->toggleIdeaRecord(); break;
                     case midi::McuAction::ToggleLoop:
                         safe->setSongView(!safe->project.songMode);
                         break;
@@ -2088,6 +2130,17 @@ void MainComponent::handleIncomingMidiMessage(juce::MidiInput* source, const juc
                 safe->handleMiniLabSysex(bytes);
         });
         return;
+    }
+    if (ideaRecording.load(std::memory_order_acquire) && message.isNoteOnOrOff())
+    {
+        const auto seconds = juce::Time::getMillisecondCounterHiRes() / 1000.0 - ideaStarted;
+        if (seconds >= 0 && seconds <= 65.0)
+        {
+            const juce::ScopedLock lock(ideaMutex);
+            if (ideaEvents.size() < 4096)
+                ideaEvents.push_back({ seconds, message.getNoteNumber(), message.getVelocity(), message.getChannel(),
+                                       message.isNoteOn() && message.getVelocity() > 0 });
+        }
     }
     // MiniLab encoders drive the selected instrument's effect knobs instead
     // of reaching the synth (keeps CC 74/71 from also altering sampled voices).
@@ -2967,6 +3020,11 @@ int MainComponent::currentInputLatency() const
 
 void MainComponent::toggleRecord()
 {
+    if (ideaRecording.load() || assistantWorker != nullptr)
+    {
+        showError("Finish the idea first, then start an audio take.");
+        return;
+    }
     if (recording)
     {
         finalizeTake(); // punch out, keep playing
@@ -3016,6 +3074,229 @@ void MainComponent::toggleRecord()
     record.setToggleState(true, juce::dontSendNotification);
     record.setButtonText("STOP TAKE");
     refreshAudioView();
+}
+
+void MainComponent::toggleIdeaRecord()
+{
+    if (ideaRecording.load())
+    {
+        finishIdeaRecord();
+        return;
+    }
+    if (recording || assistantWorker != nullptr)
+    {
+        ideaButton.setToggleState(false, juce::dontSendNotification);
+        showError("Finish the audio take or AI request before capturing an idea.");
+        return;
+    }
+    if (audioSelected || project.tracks[static_cast<std::size_t>(selectedTrack)].kind == TrackKind::None)
+    {
+        ideaButton.setToggleState(false, juce::dontSendNotification);
+        showError("Select an instrument or drum track first.");
+        return;
+    }
+    const auto sel = static_cast<std::size_t>(selectedTrack);
+    ideaTrackId = project.tracks[sel].id;
+    ideaKind = project.tracks[sel].kind;
+    ideaSlot = project.songMode ? project.song.slots[static_cast<std::size_t>(songStartPart)][sel]
+                  : editPart >= 0 ? project.song.slots[static_cast<std::size_t>(editPart)][sel]
+                                  : (drumsSelected ? trackDrumSlot[sel] : trackMelodySlot[sel]);
+    {
+        const juce::ScopedLock lock(ideaMutex);
+        ideaEvents.clear();
+    }
+    // Opening the mic is intentional here; merely playing Sonora still keeps
+    // inputs off to avoid changing a Bluetooth headset's audio profile.
+    if (ideaKind == TrackKind::Synth)
+        ensureAudioInputs();
+    ideaRate = currentRate();
+    ideaHasAudio = false;
+    if (ideaKind == TrackKind::Synth && activeInputCount(deviceManager) > 0)
+    {
+        ideaFile = sessionDir().getNonexistentChildFile("idea", ".wav");
+        ideaHasAudio = ideaRecorder.start(ideaFile, ideaRate, 1);
+    }
+    ideaStarted = juce::Time::getMillisecondCounterHiRes() / 1000.0;
+    ideaRecording.store(true, std::memory_order_release);
+    ideaButton.setToggleState(true, juce::dontSendNotification);
+    ideaButton.setButtonText("STOP IDEA");
+    status.setText("Capturing an idea for loop "
+        + juce::String::charToString(static_cast<juce::juce_wchar>('A' + ideaSlot))
+        + (ideaKind == TrackKind::Drums ? "... play pads." : "... play keys or hum into the mic.")
+        + " Shift+Stop to turn it into a four-bar loop.", juce::dontSendNotification);
+}
+
+void MainComponent::finishIdeaRecord()
+{
+    if (!ideaRecording.exchange(false))
+        return;
+    ideaButton.setToggleState(false, juce::dontSendNotification);
+    ideaButton.setButtonText("Idea REC");
+    const double length = std::min(65.0, juce::Time::getMillisecondCounterHiRes() / 1000.0 - ideaStarted);
+    const int audioFrames = ideaHasAudio ? ideaRecorder.stop() : 0;
+    std::vector<IdeaEvent> captured;
+    {
+        const juce::ScopedLock lock(ideaMutex);
+        captured.swap(ideaEvents);
+    }
+    const auto file = ideaFile;
+    ideaFile = juce::File();
+    const auto rate = ideaRate;
+    const auto state = project;
+    const auto trackId = ideaTrackId;
+    const auto slot = ideaSlot;
+    const auto kind = ideaKind;
+    const int track = selectedTrack;
+    if (length < 0.1)
+    {
+        file.deleteFile();
+        showError("Idea was too short. Try playing or humming for a moment.");
+        return;
+    }
+    status.setText("Shaping your idea into a four-bar loop...", juce::dontSendNotification);
+    auto safe = juce::Component::SafePointer<MainComponent>(this);
+    startAiJob([safe, captured = std::move(captured), state, trackId, slot, kind, track,
+                length, file, audioFrames, rate](const std::atomic<bool>* cancel) mutable {
+        auto raw = interpretIdea(captured, kind, state.bpm, length);
+        if (raw.count(kind) == 0 && kind == TrackKind::Synth && audioFrames >= 4096 && file.existsAsFile())
+        {
+            juce::AudioFormatManager formats;
+            formats.registerBasicFormats();
+            std::unique_ptr<juce::AudioFormatReader> reader(formats.createReaderFor(file));
+            if (reader != nullptr && reader->numChannels > 0)
+            {
+                const int frames = static_cast<int>(std::min<std::int64_t>(reader->lengthInSamples,
+                                             static_cast<std::int64_t>(rate * 65)));
+                juce::AudioBuffer<float> audio(1, frames);
+                if (reader->read(&audio, 0, frames, 0, true, false))
+                    raw = interpretAudioIdea(audio.getReadPointer(0), frames, reader->sampleRate, state.bpm);
+            }
+        }
+        file.deleteFile();
+        ai::AssistantResult refined;
+        if (raw.count(kind) > 0 && !cancel->load())
+        {
+            ai::AssistantRequest request;
+            request.project = state;
+            request.track = track;
+            request.melodySlots[static_cast<std::size_t>(track)] = slot;
+            request.drumSlots[static_cast<std::size_t>(track)] = slot;
+            request.part = -1;
+            auto& target = request.project.tracks[static_cast<std::size_t>(track)];
+            if (kind == TrackKind::Drums) target.drumPatterns[static_cast<std::size_t>(slot)] = raw.drums;
+            else target.melodies[static_cast<std::size_t>(slot)] = raw.melody;
+            request.message = "This is a short idea I just played or hummed, not a finished take. "
+                "The target's current pattern in the context is my captured idea. Preserve its recognizable "
+                "pitch contour and rhythm, quantize and develop it into a musical four-bar loop that fits the "
+                "other tracks. Return the complete edited pattern; do not ignore the idea.";
+            refined = ai::runAssistant(request, cancel);
+        }
+        juce::MessageManager::callAsync([safe, raw, refined, trackId, slot] {
+            if (safe != nullptr)
+                safe->ideaFinished(raw, refined, trackId, slot);
+        });
+    });
+}
+
+void MainComponent::ideaFinished(IdeaResult raw, ai::AssistantResult refined, std::uint32_t trackId, int slot)
+{
+    finishAiJob();
+    int track = -1;
+    for (int i = 0; i < maxTracks; ++i)
+        if (project.tracks[static_cast<std::size_t>(i)].id == trackId)
+            track = i;
+    if (track < 0)
+    {
+        status.setText("Idea capture finished, but its track was removed; nothing was changed.", juce::dontSendNotification);
+        return;
+    }
+    const auto kind = project.tracks[static_cast<std::size_t>(track)].kind;
+    if (kind != ideaKind)
+    {
+        status.setText("The idea's track changed instrument type; nothing was overwritten.", juce::dontSendNotification);
+        return;
+    }
+    if (raw.count(kind) == 0)
+    {
+        showError(kind == TrackKind::Drums
+            ? "No pad hits captured. Play the MiniLab pads during Idea REC."
+            : "No notes detected. Play the MiniLab keys or hum a clear single-note idea into the mic.");
+        return;
+    }
+    if (refined.ok() && refined.changed && refined.drums == (kind == TrackKind::Drums) && refined.count() > 0)
+    {
+        if (kind == TrackKind::Drums) raw.drums = refined.drumPattern;
+        else raw.melody = refined.pattern;
+    }
+    beginEdit();
+    auto& target = project.tracks[static_cast<std::size_t>(track)];
+    if (kind == TrackKind::Drums) target.drumPatterns[static_cast<std::size_t>(slot)] = raw.drums;
+    else target.melodies[static_cast<std::size_t>(slot)] = raw.melody;
+    projectChanged();
+    endEdit();
+    status.setText("Idea shaped into loop " + juce::String::charToString(static_cast<juce::juce_wchar>('A' + slot))
+        + ": " + juce::String(raw.count(kind)) + (kind == TrackKind::Drums ? " hits" : " notes")
+        + (refined.ok() && refined.changed ? " (AI arranged)." : " (quantized locally; AI unavailable).")
+        + " Undo restores the previous loop.", juce::dontSendNotification);
+}
+
+void MainComponent::toggleDictation()
+{
+    if (aiSidebar == nullptr || !sidebarOpen())
+        return;
+    if (dictationRecording.exchange(false))
+    {
+        aiSidebar->setVoiceRecording(false);
+        const int frames = dictationRecorder.stop();
+        const auto file = dictationFile;
+        dictationFile = juce::File();
+        if (frames <= 0)
+        {
+            file.deleteFile();
+            aiSidebar->setStatus("I didn't hear speech. Check your mic and try again.");
+            return;
+        }
+        auto safe = juce::Component::SafePointer<MainComponent>(this);
+        transcribing = true;
+        startAiJob([safe, file](const std::atomic<bool>* cancel) {
+            auto transcript = ai::transcribeDictation(file, cancel);
+            file.deleteFile();
+            juce::MessageManager::callAsync([safe, transcript] {
+                if (safe == nullptr)
+                    return;
+                safe->finishAiJob();
+                if (transcript.ok())
+                {
+                    safe->aiSidebar->appendDictation(transcript.text);
+                    safe->aiSidebar->setStatus("Dictated locally. Review the text, then press Send.");
+                }
+                else
+                    safe->aiSidebar->setStatus(transcript.error);
+            });
+        });
+        aiSidebar->setStatus("Transcribing locally with Voxtype...");
+        return;
+    }
+    if (assistantWorker != nullptr || recording || ideaRecording.load())
+    {
+        aiSidebar->setStatus("Finish the current recording or AI response before dictating.");
+        return;
+    }
+    ensureAudioInputs();
+    if (activeInputCount(deviceManager) <= 0)
+    {
+        aiSidebar->setStatus("No mic input available. Choose one in Audio / MIDI first.");
+        return;
+    }
+    dictationFile = sessionDir().getNonexistentChildFile("assistant-voice", ".wav");
+    if (!dictationRecorder.start(dictationFile, currentRate(), 1))
+    {
+        aiSidebar->setStatus("Could not start the microphone.");
+        return;
+    }
+    dictationStarted = juce::Time::getMillisecondCounterHiRes() / 1000.0;
+    dictationRecording.store(true, std::memory_order_release);
+    aiSidebar->setVoiceRecording(true);
 }
 
 void MainComponent::finalizeTake()
@@ -3125,9 +3406,12 @@ void MainComponent::refreshTakes()
     // it after a grace period on the message thread. Each installed set is
     // retired exactly once, so delayed deletes never overlap.
     auto* retired = engine.retireTakeSet(set.get());
+    const auto* owned = takeStorage.release();
     takeStorage = std::move(set);
     if (retired != nullptr)
         juce::Timer::callAfterDelay(600, [retired] { delete retired; });
+    else
+        delete owned;
     rebuildWaveCache();
 }
 
@@ -3846,9 +4130,14 @@ void MainComponent::openAudioSettings()
 
 void MainComponent::timerCallback()
 {
+    if (dictationRecording.load() && juce::Time::getMillisecondCounterHiRes() / 1000.0 - dictationStarted >= 60.0)
+        toggleDictation();
+    if (ideaRecording.load() && juce::Time::getMillisecondCounterHiRes() / 1000.0 - ideaStarted >= 60.0)
+        finishIdeaRecord();
     refreshMiniLabDisplay(false);
     if (assistantStartedAt != 0 && aiSidebar != nullptr && timerTicks % 15 == 0)
-        aiSidebar->setStatus((project.songMode ? "Composing the song...  " : "Thinking...  ")
+        aiSidebar->setStatus((transcribing ? "Transcribing locally...  "
+                             : project.songMode ? "Composing the song...  " : "Thinking...  ")
                              + juce::String((juce::Time::getMillisecondCounter() - assistantStartedAt) / 1000) + " s");
     {
         const auto serial = knobSerial.load(std::memory_order_acquire);
@@ -3970,7 +4259,13 @@ void MainComponent::timerCallback()
         const juce::String xrunText = xruns > 0 ? "   /   XRUN " + juce::String(xruns) : "";
         const bool midiLive = juce::Time::getMillisecondCounter() - lastMidiMillis.load() < 2000;
         const juce::String midiText = "MIDI: " + midiStatusText + (midiLive ? " ●" : "");
-        if (!audioErrorMessage.isEmpty())
+        if (ideaRecording.load())
+        {
+            status.setText("IDEA REC  " + juce::String(static_cast<int>(juce::Time::getMillisecondCounterHiRes() / 1000.0 - ideaStarted))
+                           + "s  /  Shift+Stop to shape into four bars  /  " + midiText, juce::dontSendNotification);
+            status.setColour(juce::Label::textColourId, ui::violet);
+        }
+        else if (!audioErrorMessage.isEmpty())
         {
             status.setText("AUDIO ERROR: " + audioErrorMessage + " — reopen Audio / MIDI to recover.",
                            juce::dontSendNotification);
@@ -4114,10 +4409,10 @@ void MainComponent::paint(juce::Graphics& g)
 
     ui::surface(g, { 20, 110, w - 40, 80 });
     ui::caption(g, "TRANSPORT", { 38, 118, 174, 15 }, ui::muted, 9.0f);
-    ui::caption(g, "TEMPO", { 276, 118, 120, 15 }, ui::muted, 9.0f);
-    ui::caption(g, "POSITION  /  BAR . BEAT . STEP", { 454, 118, 222, 15 }, ui::muted, 9.0f);
+    ui::caption(g, "TEMPO", { 358, 118, 120, 15 }, ui::muted, 9.0f);
+    ui::caption(g, "POSITION  /  BAR . BEAT . STEP", { 510, 118, 190, 15 }, ui::muted, 9.0f);
     ui::caption(g, "VIEW", { 704, 118, 160, 15 }, ui::muted, 9.0f);
-    for (float x : { 268.0f, 434.0f })
+    for (float x : { 354.0f, 496.0f })
     {
         g.setColour(ui::border);
         g.drawVerticalLine(static_cast<int>(x), 128, 173);
@@ -4182,8 +4477,9 @@ void MainComponent::resized()
     play.setBounds(38, 138, 92, 34);
     stop.setBounds(138, 138, 56, 34);
     record.setBounds(202, 138, 58, 34);
-    tempo.setBounds(274, 139, 144, 32);
-    position.setBounds(450, 134, 242, 42);
+    ideaButton.setBounds(266, 138, 80, 34);
+    tempo.setBounds(358, 139, 128, 32);
+    position.setBounds(506, 134, 186, 42);
     loopView.setBounds(704, 138, 58, 34);
     songView.setBounds(764, 138, 58, 34);
     undo.setBounds(contentWidth() - 174, 218, 62, 28);
@@ -4226,7 +4522,7 @@ void MainComponent::resized()
     if (audioView != nullptr)
         audioView->setBounds(254, 258, contentWidth() - 292, getHeight() - 444);
     if (fxBar != nullptr)
-        fxBar->setBounds(240, getHeight() - 268, contentWidth() - 264, 88);
+        fxBar->setBounds(240, getHeight() - 280, contentWidth() - 264, 100);
     keyboard.setBounds(256, getHeight() - 140, contentWidth() - 296, 68);
     keyboard.setKeyWidth(static_cast<float>(keyboard.getWidth()) / 21.0f);
     const auto padWidth = (contentWidth() - 288) / drumPads;

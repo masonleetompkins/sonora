@@ -35,13 +35,13 @@ AiSidebar::AiSidebar()
     addAndMakeVisible(input);
     input.setMultiLine(true, true);
     input.setReturnKeyStartsNewLine(false);
-    input.setFont(ui::font(13.0f));
+    input.setFont(ui::font(15.0f));
     input.setColour(juce::TextEditor::backgroundColourId, ui::background);
     input.setColour(juce::TextEditor::textColourId, ui::text);
     input.setColour(juce::TextEditor::outlineColourId, ui::border);
     input.setColour(juce::TextEditor::focusedOutlineColourId, ui::cyan);
     input.onReturnKey = [this] { submit(input.getText()); };
-    for (auto* button : { &send, &stop, &close, &newChat })
+    for (auto* button : { &send, &stop, &mic, &close, &newChat })
     {
         addAndMakeVisible(button);
         button->setWantsKeyboardFocus(false);
@@ -49,6 +49,8 @@ AiSidebar::AiSidebar()
     send.getProperties().set("role", "primary");
     send.onClick = [this] { submit(input.getText()); };
     stop.onClick = [this] { if (onCancel) onCancel(); };
+    mic.onClick = [this] { if (onVoice) onVoice(); };
+    mic.setTooltip("Record your request locally with Voxtype. Click again to transcribe; review the text before Send.");
     close.onClick = [this] { if (onClose) onClose(); };
     newChat.onClick = [this] { if (onNewChat) onNewChat(); };
     close.setTooltip("Close the AI sidebar (Ctrl+I)");
@@ -61,7 +63,7 @@ AiSidebar::AiSidebar()
         chip.onClick = [this, &chip] { submit(chip.getButtonText()); };
     }
     addAndMakeVisible(status);
-    status.setFont(ui::font(11.0f));
+    status.setFont(ui::font(12.0f));
     status.setColour(juce::Label::textColourId, ui::muted);
     updateChips();
 }
@@ -77,6 +79,7 @@ void AiSidebar::setContext(const juce::String& newTitle, const juce::String& new
     unavailable = unavailableReason;
     input.setEnabled(canChat && !busy);
     send.setEnabled(canChat && !busy);
+    mic.setEnabled(canChat && !busy);
     for (auto& chip : chips)
         chip.setEnabled(canChat && !busy);
     input.setTextToShowWhenEmpty(!canChat ? unavailable
@@ -114,11 +117,33 @@ void AiSidebar::setBusy(bool value)
     stop.setVisible(busy);
     send.setVisible(!busy);
     input.setEnabled(canChat && !busy);
+    mic.setEnabled(canChat && !busy);
     send.setEnabled(canChat && !busy);
     for (auto& chip : chips)
         chip.setEnabled(canChat && !busy);
     if (!busy)
         status.setText({}, juce::dontSendNotification);
+}
+
+void AiSidebar::setVoiceRecording(bool recording)
+{
+    mic.setButtonText(recording ? "Stop mic" : "Mic");
+    mic.setColour(juce::TextButton::buttonOnColourId, recording ? ui::danger : ui::cyan);
+    if (recording)
+        status.setText("Listening... click Stop mic when you're done", juce::dontSendNotification);
+    else if (!busy)
+        status.setText({}, juce::dontSendNotification);
+    resized();
+}
+
+void AiSidebar::appendDictation(const juce::String& text)
+{
+    if (text.trim().isEmpty())
+        return;
+    if (input.getText().isNotEmpty() && !input.getText().endsWithChar(' '))
+        input.insertTextAtCaret(" ");
+    input.insertTextAtCaret(text.trim() + " ");
+    input.grabKeyboardFocus();
 }
 
 void AiSidebar::setStatus(const juce::String& text) { status.setText(text, juce::dontSendNotification); }
@@ -159,7 +184,7 @@ int AiSidebar::Transcript::layoutFor(int width)
         const bool user = message.role == Message::Role::User;
         const float maxWidth = static_cast<float>(width) * (message.role == Message::Role::Info ? 1.0f : 0.86f) - 2.0f * bubblePad;
         juce::AttributedString text;
-        text.append(message.text, ui::font(message.role == Message::Role::Info ? 11.5f : 13.0f), textColour(message.role));
+        text.append(message.text, ui::font(message.role == Message::Role::Info ? 12.5f : 14.0f), textColour(message.role));
         text.setWordWrap(juce::AttributedString::byWord);
         juce::TextLayout layout;
         layout.createLayout(text, std::max(40.0f, maxWidth));
@@ -217,7 +242,7 @@ void AiSidebar::resized()
     header.removeFromRight(6);
     newChat.setBounds(header.removeFromRight(82).removeFromTop(28));
     area.removeFromTop(4);
-    auto bottom = area.removeFromBottom(172);
+    auto bottom = area.removeFromBottom(192);
     status.setBounds(bottom.removeFromTop(20));
     bottom.removeFromTop(2);
     auto chipArea = bottom.removeFromTop(62);
@@ -229,6 +254,8 @@ void AiSidebar::resized()
     auto buttons = bottom.removeFromBottom(32);
     send.setBounds(buttons.removeFromRight(88));
     stop.setBounds(send.getBounds());
+    buttons.removeFromRight(6);
+    mic.setBounds(buttons.removeFromRight(84));
     bottom.removeFromBottom(6);
     input.setBounds(bottom);
     viewport.setBounds(area);
@@ -241,11 +268,11 @@ void AiSidebar::paint(juce::Graphics& g)
     const auto area = getLocalBounds().reduced(14, 12);
     ui::caption(g, "AI ASSISTANT", { area.getX(), area.getY(), 200, 18 }, ui::cyan, 10.0f);
     g.setColour(ui::text);
-    g.setFont(ui::font(14.0f, true));
+    g.setFont(ui::font(16.0f, true));
     g.drawFittedText(title, juce::Rectangle<int>(area.getX(), area.getY() + 18, area.getWidth() - 124, 18),
                      juce::Justification::centredLeft, 1, 0.8f);
     g.setColour(ui::muted);
-    g.setFont(ui::font(11.0f));
+    g.setFont(ui::font(12.0f));
     g.drawFittedText(detail, juce::Rectangle<int>(area.getX(), area.getY() + 36, area.getWidth(), 16),
                      juce::Justification::centredLeft, 1, 0.8f);
     g.setColour(ui::border.withAlpha(0.7f));

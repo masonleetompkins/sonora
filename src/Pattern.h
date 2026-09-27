@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdint>
 #include <cmath>
+#include <utility>
 #include <vector>
 
 namespace sonora
@@ -282,6 +283,17 @@ private:
         trackOn[i] = column.on;
     }
 };
+
+// Repeated clicks on a song cell: empty -> A -> B -> C -> D -> empty.
+// An off cell always starts on A, regardless of its remembered slot.
+inline std::pair<std::uint8_t, bool> nextArrangementCell(std::uint8_t slot, bool on)
+{
+    if (!on)
+        return { 0, true };
+    if (slot + 1 < numPatterns)
+        return { static_cast<std::uint8_t>(slot + 1), true };
+    return { 0, false };
+}
 
 // Sections are instances: several sections may share one library slot, so one
 // edit changes them all. makeSectionUnique detaches a section by copying its
