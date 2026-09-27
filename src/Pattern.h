@@ -13,8 +13,8 @@
 
 namespace sonora
 {
-inline constexpr int lowestPitch = 48;
-inline constexpr int highestPitch = 71;
+inline constexpr int lowestPitch = 0;
+inline constexpr int highestPitch = 127;
 inline constexpr int drumPads = 8;
 inline constexpr int drumBaseNote = 36;
 inline constexpr std::uint32_t melodyTrackId = 1, drumTrackId = 2;

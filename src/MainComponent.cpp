@@ -1934,8 +1934,8 @@ MainComponent::MainComponent()
         [this] { analyzeTake(selectedTake); },
         [this] { applyPitch(); });
     addAndMakeVisible(audioView.get());
-    keyboard.setAvailableRange(lowestPitch, highestPitch + 12);
-    keyboard.setLowestVisibleKey(lowestPitch);
+    keyboard.setAvailableRange(lowestPitch, highestPitch);
+    keyboard.setLowestVisibleKey(36);
     keyboard.setKeyWidth(34.0f);
     refreshKeyboardColours();
     auto stateRoot = juce::SystemStats::getEnvironmentVariable("XDG_STATE_HOME", {});
@@ -4169,6 +4169,18 @@ void MainComponent::timerCallback()
     }
     pianoRoll.setPlayhead(std::fmod(engine.getTickPosition(), patternTicks), running);
     drumSequencer.setPlayhead(std::fmod(engine.getTickPosition(), patternTicks), running);
+    // Highlight keys held on the MiniLab (or virtual keyboard) in the roll.
+    {
+        std::vector<int> held;
+        for (int pitch = 0; pitch < 128; ++pitch)
+            for (int channel = 1; channel <= 16; ++channel)
+                if (engine.keyboardState.isNoteOn(channel, pitch))
+                {
+                    held.push_back(pitch);
+                    break;
+                }
+        pianoRoll.setLiveNotes(held);
+    }
     const auto tick = static_cast<int>(engine.getTickPosition());
     const auto currentSection = juce::jlimit(0, maxSections - 1, tick / patternTicks);
     if (arrangement != nullptr && arrangement->isVisible()
@@ -4334,6 +4346,11 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
     {
         deleteTake(selectedTake);
         return true;
+    }
+    if (!audioSelected && pianoRoll.isVisible())
+    {
+        if (key.getKeyCode() == '[') { pianoRoll.setViewBase(pianoRoll.getViewBase() - 12); return true; }
+        if (key.getKeyCode() == ']') { pianoRoll.setViewBase(pianoRoll.getViewBase() + 12); return true; }
     }
     if (key.getModifiers().isAltDown()
         && (key.getKeyCode() == juce::KeyPress::upKey || key.getKeyCode() == juce::KeyPress::downKey)

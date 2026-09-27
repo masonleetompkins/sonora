@@ -82,14 +82,10 @@ juce::String describeDrums(const DrumPattern& drums)
     return out.isEmpty() ? juce::String("    (empty)\n") : out;
 }
 
-// Folds a pitch into the editor's range by octaves (keeps pitch class).
+// Clamps a pitch into the full MIDI range (the piano roll covers 0-127).
 int foldPitch(int pitch)
 {
-    while (pitch < lowestPitch)
-        pitch += 12;
-    while (pitch > highestPitch)
-        pitch -= 12;
-    return pitch;
+    return std::clamp(pitch, lowestPitch, highestPitch);
 }
 }
 
@@ -325,7 +321,7 @@ juce::String systemPrompt()
            "Timing: 960 ticks per quarter note, 4/4, one sixteenth = 240 ticks, one bar = 3840 ticks, "
            "loop length = 15360 ticks. Every note needs start >= 0, duration >= 60, and "
            "start + duration <= 15360. Prefer starts and durations on a 120-tick grid.\n"
-           "Pitch: MIDI numbers 48 (C3) to 71 (B4) only; 60 is middle C (C4).\n"
+           "Pitch: full MIDI range 0 to 127; 60 is middle C (C4). Prefer the C2-C6 area unless asked otherwise.\n"
            "Notes on the same pitch must not overlap in time. Velocity 1-127; use dynamics musically.\n"
            "Use between 4 and 128 notes. Chords are allowed (several pitches at once).\n"
            "Reply only with the structured result: a short title, one sentence explaining how the part "
@@ -340,7 +336,7 @@ juce::String responseSchema()
            R"("required":["start","duration","pitch","velocity"],"properties":{)"
            R"("start":{"type":"integer","minimum":0,"maximum":15359},)"
            R"("duration":{"type":"integer","minimum":1,"maximum":15360},)"
-           R"("pitch":{"type":"integer","minimum":48,"maximum":71},)"
+           R"("pitch":{"type":"integer","minimum":0,"maximum":127},)"
            R"("velocity":{"type":"integer","minimum":1,"maximum":127}}}}}})";
 }
 
@@ -611,14 +607,14 @@ juce::String melodyRulesText()
 {
     return "Melodic timing: 960 ticks per quarter note, one sixteenth = 240 ticks, one bar = 3840 ticks, loop "
            "length = 15360 ticks. Every note needs start >= 0, duration >= 60, start + duration <= 15360; prefer a "
-           "120-tick grid. Pitch: MIDI 48 (C3) to 71 (B4) only; 60 is middle C. Notes on the same pitch must not "
+           "120-tick grid. Pitch: full MIDI range 0 to 127; 60 is middle C. Notes on the same pitch must not "
            "overlap. Velocity 1-127. Chords are allowed.";
 }
 
 const juce::String noteItemSchema =
     R"({"type":"object","additionalProperties":false,"required":["start","duration","pitch","velocity"],"properties":{)"
     R"("start":{"type":"integer","minimum":0,"maximum":15359},"duration":{"type":"integer","minimum":1,"maximum":15360},)"
-    R"("pitch":{"type":"integer","minimum":48,"maximum":71},"velocity":{"type":"integer","minimum":1,"maximum":127}}})";
+    R"("pitch":{"type":"integer","minimum":0,"maximum":127},"velocity":{"type":"integer","minimum":1,"maximum":127}}})";
 const juce::String hitItemSchema =
     R"({"type":"object","additionalProperties":false,"required":["pad","step","velocity"],"properties":{)"
     R"("pad":{"type":"integer","minimum":0,"maximum":7},"step":{"type":"integer","minimum":0,"maximum":63},)"

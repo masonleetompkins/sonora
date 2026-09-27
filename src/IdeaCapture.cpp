@@ -14,9 +14,7 @@ int snap(double ticks)
 
 int fitPitch(int pitch)
 {
-    while (pitch < lowestPitch) pitch += 12;
-    while (pitch > highestPitch) pitch -= 12;
-    return pitch;
+    return std::clamp(pitch, lowestPitch, highestPitch);
 }
 }
 

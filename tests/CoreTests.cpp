@@ -2495,16 +2495,16 @@ void testAiMelody()
     require(!ai::parseMelodyResponse("garbage").ok(), "garbage accepted");
     require(!ai::parseMelodyResponse(envelope("")).ok(), "empty melody accepted");
     parsed = ai::parseMelodyResponse(envelope(
-        "{\"start\":-50,\"duration\":99999,\"pitch\":84,\"velocity\":400},"   // clamp + fold 84 -> 60
-        "{\"start\":960,\"duration\":480,\"pitch\":60,\"velocity\":80},"      // overlaps the first on C4
+        "{\"start\":-50,\"duration\":99999,\"pitch\":84,\"velocity\":400},"   // clamped; 84 kept (full range)
+        "{\"start\":960,\"duration\":480,\"pitch\":60,\"velocity\":80},"
         "{\"start\":960,\"duration\":240,\"pitch\":60,\"velocity\":70},"      // exact duplicate start
-        "{\"start\":2000,\"duration\":100,\"pitch\":30,\"velocity\":0},"      // fold 30 -> 54, vel -> 1
+        "{\"start\":2000,\"duration\":100,\"pitch\":30,\"velocity\":0},"      // 30 kept, vel -> 1
         "{\"start\":\"x\",\"duration\":1,\"pitch\":60,\"velocity\":1}"));    // non-numeric dropped
     require(parsed.ok() && parsed.pattern.valid() && parsed.pattern.count == 3, "untrusted notes not sanitized");
-    require(parsed.pattern.notes[0].pitch == 60 && parsed.pattern.notes[0].start == 0
-            && parsed.pattern.notes[0].duration == 960 && parsed.pattern.notes[0].velocity == 127,
+    require(parsed.pattern.notes[0].pitch == 84 && parsed.pattern.notes[0].start == 0
+            && parsed.pattern.notes[0].duration == sonora::patternTicks && parsed.pattern.notes[0].velocity == 127,
             "overlap trim/clamp wrong");
-    require(parsed.pattern.notes[2].pitch == 54 && parsed.pattern.notes[2].velocity == 1, "pitch fold wrong");
+    require(parsed.pattern.notes[2].pitch == 30 && parsed.pattern.notes[2].velocity == 1, "pitch clamp wrong");
     juce::String many;
     for (int i = 0; i < 400; ++i)
         many << (i ? "," : "") << "{\"start\":" << (i * 30) % 15000 << ",\"duration\":30,\"pitch\":" << 48 + i % 24
@@ -2799,7 +2799,7 @@ void testAiAssistant()
     require(talk.ok() && !talk.changed && talk.reply == "Sounds good!", "reply-only turn wrong");
     auto melody = ai::parseAssistantResponse(wrap("{\"reply\":\"Simpler now.\",\"change\":true,\"notes\":["
                                                   "{\"start\":0,\"duration\":960,\"pitch\":84,\"velocity\":100}]}"), false);
-    require(melody.ok() && melody.changed && melody.pattern.count == 1 && melody.pattern.notes[0].pitch == 60,
+    require(melody.ok() && melody.changed && melody.pattern.count == 1 && melody.pattern.notes[0].pitch == 84,
             "melody edit not sanitized");
     auto beat = ai::parseAssistantResponse(wrap("{\"reply\":\"Fill added.\",\"change\":true,\"hits\":["
                                                 "{\"pad\":0,\"step\":0,\"velocity\":120},"
@@ -2915,7 +2915,7 @@ void testSongComposer()
     auto applied = project;
     require(ai::applySongResult(applied, result), "apply failed");
     require(applied.tracks[1].drumPatterns[1].steps[1][60] == 110 && applied.tracks[0].melodies[1].count == 1
-            && applied.tracks[0].melodies[1].notes[0].pitch == 60, "new loops not written (pitch folded)");
+            && applied.tracks[0].melodies[1].notes[0].pitch == 72, "new loops not written");
     require(applied.tracks[0].melodies[0] == project.tracks[0].melodies[0], "existing loop A was overwritten");
     require(applied.song == result.song && applied.valid(), "arrangement not applied");
     auto busy = project;
@@ -2981,7 +2981,7 @@ void testIdeaCapture()
             "idea timing/leading-silence wrong");
     const auto octave = sonora::interpretIdea({ { 0, 84, 100, 1, true }, { 0.5, 84, 0, 1, false } },
                                               sonora::TrackKind::Synth, 120, 1);
-    require(octave.melody.count == 1 && octave.melody.notes[0].pitch == 60, "idea pitch not folded to editor");
+    require(octave.melody.count == 1 && octave.melody.notes[0].pitch == 84, "idea pitch not preserved");
     std::vector<IdeaEvent> longIdea { { 0, 60, 100, 1, true }, { 0.5, 60, 0, 1, false },
                                       { 18, 67, 100, 1, true }, { 18.5, 67, 0, 1, false } };
     const auto fitted = sonora::interpretIdea(longIdea, sonora::TrackKind::Synth, 120, 20);

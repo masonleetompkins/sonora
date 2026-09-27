@@ -1,5 +1,6 @@
 #include "PianoRoll.h"
 #include "NeonTheme.h"
+#include <algorithm>
 
 namespace sonora
 {
@@ -7,6 +8,66 @@ PianoRoll::PianoRoll()
 {
     setMouseCursor(juce::MouseCursor::CrosshairCursor);
     setWantsKeyboardFocus(true);
+    for (auto* button : { &octaveDown, &octaveUp })
+    {
+        addAndMakeVisible(button);
+        button->setWantsKeyboardFocus(false);
+        button->setColour(juce::TextButton::buttonOnColourId, ui::cyan);
+    }
+    octaveDown.setTooltip("Show the octave below ( [ )");
+    octaveUp.setTooltip("Show the octave above ( ] )");
+    octaveDown.onClick = [this] { setViewBase(viewBase - 12); };
+    octaveUp.onClick = [this] { setViewBase(viewBase + 12); };
+}
+
+void PianoRoll::resized()
+{
+    octaveDown.setBounds(getWidth() - 116, 2, 54, 24);
+    octaveUp.setBounds(getWidth() - 58, 2, 54, 24);
+}
+
+void PianoRoll::setViewBase(int pitch)
+{
+    const int next = juce::jlimit(0, 127 - windowRows + 1, pitch - pitch % 12);
+    if (next == viewBase)
+        return;
+    viewBase = next;
+    repaint();
+}
+
+void PianoRoll::setLiveNotes(const std::vector<int>& notes)
+{
+    if (notes == liveNotes)
+        return;
+    liveNotes = notes;
+    // Keep played notes on screen: follow MiniLab octave switches.
+    for (int pitch : liveNotes)
+    {
+        if (pitch < viewBase)
+            setViewBase(pitch - pitch % 12);
+        else if (pitch > viewTop())
+            setViewBase(pitch - pitch % 12 - windowRows + 12);
+    }
+    repaint();
+}
+
+void PianoRoll::setPattern(const Pattern& value)
+{
+    pattern = value;
+    // Jump the window to the music when nothing is visible (e.g. pattern or
+    // track switch); live playing re-follows via setLiveNotes.
+    bool anyVisible = pattern.count == 0;
+    for (int i = 0; i < pattern.count && !anyVisible; ++i)
+    {
+        const int pitch = pattern.notes[static_cast<std::size_t>(i)].pitch;
+        anyVisible = pitch >= viewBase && pitch <= viewTop();
+    }
+    if (!anyVisible && pattern.count > 0)
+    {
+        const int pitch = pattern.notes[0].pitch;
+        viewBase = juce::jlimit(0, 127 - windowRows + 1, pitch - pitch % 12);
+    }
+    repaint();
 }
 
 juce::Rectangle<float> PianoRoll::grid() const
@@ -17,16 +78,16 @@ juce::Rectangle<float> PianoRoll::grid() const
 juce::Rectangle<float> PianoRoll::noteBounds(const Note& n) const
 {
     const auto area = grid();
-    const float row = area.getHeight() / 24.0f;
+    const float row = area.getHeight() / windowRows;
     return { area.getX() + area.getWidth() * static_cast<float>(n.start) / patternTicks,
-             area.getY() + static_cast<float>(highestPitch - n.pitch) * row,
+             area.getY() + static_cast<float>(viewTop() - n.pitch) * row,
              area.getWidth() * static_cast<float>(n.duration) / patternTicks, row };
 }
 
 int PianoRoll::pitchAt(float y) const
 {
-    return juce::jlimit(lowestPitch, highestPitch,
-        highestPitch - static_cast<int>((y - grid().getY()) / (grid().getHeight() / 24.0f)));
+    return juce::jlimit(viewBase, viewTop(),
+        viewTop() - static_cast<int>((y - grid().getY()) / (grid().getHeight() / windowRows)));
 }
 
 int PianoRoll::stepAt(float x) const
@@ -38,14 +99,14 @@ int PianoRoll::stepAt(float x) const
 void PianoRoll::paint(juce::Graphics& g)
 {
     const auto area = grid();
-    const auto row = area.getHeight() / 24.0f;
+    const auto row = area.getHeight() / windowRows;
     g.fillAll(juce::Colour(0xff0c111b));
     ui::caption(g, "KEY", { 5, 4, 44, 22 }, ui::muted, 9.0f);
-    for (int pitch = lowestPitch; pitch <= highestPitch; ++pitch)
+    for (int pitch = viewBase; pitch <= viewTop(); ++pitch)
     {
         const int key = pitch % 12;
         const bool black = key == 1 || key == 3 || key == 6 || key == 8 || key == 10;
-        const auto y = area.getY() + static_cast<float>(highestPitch - pitch) * row;
+        const auto y = area.getY() + static_cast<float>(viewTop() - pitch) * row;
         g.setColour(juce::Colour(black ? 0xff0c1420 : 0xff111c29));
         g.fillRect(area.getX(), y, area.getWidth(), row - 1.0f);
         g.setColour(black ? ui::background : ui::raised);
@@ -55,11 +116,22 @@ void PianoRoll::paint(juce::Graphics& g)
             g.setColour(ui::cyan.withAlpha(0.14f));
             g.drawHorizontalLine(static_cast<int>(y + row - 1), area.getX(), area.getRight());
         }
-        g.setColour(key == 0 ? ui::cyan : ui::muted);
+        const bool live = std::find(liveNotes.begin(), liveNotes.end(), pitch) != liveNotes.end();
+        if (live)
+        {
+            g.setColour(ui::cyan.withAlpha(0.35f));
+            g.fillRect(area.getX(), y, area.getWidth(), row - 1.0f);
+            g.setColour(ui::cyan);
+            g.fillRoundedRectangle(2, y + 0.5f, 45.0f, row - 1.0f, 2);
+        }
+        g.setColour(key == 0 ? ui::cyan : live ? ui::text : ui::muted);
         const auto label = juce::MidiMessage::getMidiNoteName(pitch, true, true, 4);
         g.setFont(ui::font(10.0f, key == 0));
         g.drawText(label, 2, static_cast<int>(y), 42, static_cast<int>(row), juce::Justification::centred);
     }
+    ui::caption(g, juce::MidiMessage::getMidiNoteName(viewBase + windowRows - 1, true, true, 4) + " - "
+                   + juce::MidiMessage::getMidiNoteName(viewBase, true, true, 4),
+                { getWidth() - 240, 4, 120, 22 }, ui::muted, 9.0f);
     for (int step = 0; step <= gridSteps; ++step)
     {
         const auto x = area.getX() + static_cast<float>(step) * area.getWidth() / gridSteps;
@@ -76,6 +148,8 @@ void PianoRoll::paint(juce::Graphics& g)
     for (int i = 0; i < pattern.count; ++i)
     {
         const auto& n = pattern.notes[static_cast<std::size_t>(i)];
+        if (n.pitch < viewBase || n.pitch > viewTop())
+            continue;
         const auto rect = noteBounds(n).reduced(1.2f);
         const bool sounding = playhead >= n.start && playhead < n.start + n.duration;
         const auto colour = sounding ? ui::cyan.brighter(0.45f)
@@ -201,7 +275,7 @@ void PianoRoll::mouseDrag(const juce::MouseEvent& event)
     {
         n.start = juce::jlimit(0, patternTicks - n.duration,
                               anchor.start + (stepAt(event.position.x) - anchorStep) * stepTicks);
-        n.pitch = juce::jlimit(lowestPitch, highestPitch, anchor.pitch + pitchAt(event.position.y) - anchorPitch);
+        n.pitch = juce::jlimit(0, 127, anchor.pitch + pitchAt(event.position.y) - anchorPitch);
     }
     if (candidate.valid())
     {
