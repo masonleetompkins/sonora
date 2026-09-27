@@ -23,5 +23,6 @@ private:
     void message(const juce::MidiMessage& midi);
     tsf* synth = nullptr;
     int selected = -1;
+    int rangeLo = 0, rangeHi = 127;
 };
 }

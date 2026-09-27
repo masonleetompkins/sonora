@@ -1,6 +1,8 @@
 #include "SampledInstrument.h"
 #include "Instruments.h"
+#include <algorithm>
 #include <mutex>
+#include <utility>
 #define TSF_IMPLEMENTATION
 #include "tsf.h"
 
@@ -27,6 +29,39 @@ struct Bank
     ~Bank() { tsf_close(data); }
 };
 Bank& bank() { static Bank value; return value; }
+
+// SoundFont presets only span their sampled key range; keys outside it get
+// no voice and go silent. Transpose by octaves into range so every sampled
+// instrument plays the full piano roll (pitch class preserved). Pure function
+// of the key, so matching note-offs transpose identically.
+std::pair<int, int> presetKeyRange(tsf* synth, int program)
+{
+    int lo = 127, hi = 0;
+    const int index = synth != nullptr ? tsf_get_presetindex(synth, 0, program) : -1;
+    if (synth == nullptr || index < 0 || index >= synth->presetNum)
+        return { 0, 127 };
+    const auto& preset = synth->presets[index];
+    for (int i = 0; i < preset.regionNum; ++i)
+    {
+        lo = std::min(lo, static_cast<int>(preset.regions[i].lokey));
+        hi = std::max(hi, static_cast<int>(preset.regions[i].hikey));
+    }
+    if (hi < lo)
+        return { 0, 127 };
+    return { lo, hi };
+}
+
+int fitKey(int key, int lo, int hi)
+{
+    key = std::clamp(key, 0, 127);
+    if (hi - lo < 12) // narrower than an octave: nearest edge, no oscillation
+        return std::clamp(key, lo, hi);
+    while (key > hi)
+        key -= 12;
+    while (key < lo)
+        key += 12;
+    return key;
+}
 }
 
 SampledInstrument::SampledInstrument()
@@ -84,8 +119,20 @@ void SampledInstrument::select(int preset)
     stop();
     selected = preset;
     if (synth != nullptr && instruments[static_cast<std::size_t>(preset)].program >= 0)
+    {
+        const int program = instruments[static_cast<std::size_t>(preset)].program;
         for (int channel = 0; channel < 16; ++channel)
-            tsf_channel_set_bank_preset(synth, channel, 0, instruments[static_cast<std::size_t>(preset)].program);
+            tsf_channel_set_bank_preset(synth, channel, 0, program);
+        const auto range = presetKeyRange(synth, program);
+        rangeLo = range.first;
+        rangeHi = range.second;
+        if (program == 33) {
+            const int pi = tsf_get_presetindex(synth, 0, program);
+            for (int i = 0; i < synth->presets[pi].regionNum; ++i) {
+                const auto& r = synth->presets[pi].regions[i];
+            }
+        }
+    }
 }
 
 void SampledInstrument::message(const juce::MidiMessage& midi)
@@ -94,9 +141,10 @@ void SampledInstrument::message(const juce::MidiMessage& midi)
     if (channel < 0 || channel >= 16)
         return;
     if (midi.isNoteOn())
-        tsf_channel_note_on(synth, channel, midi.getNoteNumber(), midi.getFloatVelocity());
+        tsf_channel_note_on(synth, channel, fitKey(midi.getNoteNumber(), rangeLo, rangeHi),
+                            midi.getFloatVelocity());
     else if (midi.isNoteOff())
-        tsf_channel_note_off(synth, channel, midi.getNoteNumber());
+        tsf_channel_note_off(synth, channel, fitKey(midi.getNoteNumber(), rangeLo, rangeHi));
     else if (midi.isPitchWheel())
         tsf_channel_set_pitchwheel(synth, channel, midi.getPitchWheelValue());
     else if (midi.isController())

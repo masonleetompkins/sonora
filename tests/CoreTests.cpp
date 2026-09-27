@@ -1996,6 +1996,22 @@ void testInstruments()
     }
     require(audibleCount == static_cast<int>(sonora::instruments.size()) - 1, "a sampled preset is silent");
 
+    // Every sampled preset plays the full piano roll: SoundFont key ranges
+    // are octave-transposed into range instead of going silent.
+    for (int preset = 1; preset < static_cast<int>(sonora::instruments.size()); ++preset)
+        for (int pitch : { 0, 12, 21, 36, 60, 84, 96, 108, 120, 127 })
+        {
+            auto variant = project;
+            variant.tracks[0].instrumentPreset = preset;
+            variant.tracks[0].melodies[0].notes[0].pitch = pitch;
+            const auto level = peak(render(variant, 40));
+            // No digital silence anywhere on the roll. (Extremes on some
+            // instruments are quiet by nature of the samples, like the
+            // real thing — e.g. a fingered bass at the top MIDI octave.)
+            require(level > 0.001f, ("sampled preset silent out of range: preset "
+                + juce::String(preset) + " pitch " + juce::String(pitch)).toRawUTF8());
+        }
+
     // Panic cuts sampled voices at once; no release tail in the next block.
     {
         auto piano = project;
