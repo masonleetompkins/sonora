@@ -3945,7 +3945,9 @@ void MainComponent::finishTunedTake(const AudioTakeMeta& source, juce::AudioBuff
 void MainComponent::refreshKeyboardColours()
 {
     keyboard.setColour(juce::MidiKeyboardComponent::whiteNoteColourId, ui::raised.brighter(0.06f));
-    keyboard.setColour(juce::MidiKeyboardComponent::blackNoteColourId, ui::background);
+    // Black keys stay dark in both modes so the keyboard keeps its shape.
+    keyboard.setColour(juce::MidiKeyboardComponent::blackNoteColourId,
+                       ui::uiDark ? ui::background : juce::Colour(0xff2a2f3a));
     keyboard.setColour(juce::MidiKeyboardComponent::keySeparatorLineColourId, ui::background);
     keyboard.setColour(juce::MidiKeyboardComponent::keyDownOverlayColourId, ui::cyan.withAlpha(0.65f));
     keyboard.setColour(juce::MidiKeyboardComponent::mouseOverKeyOverlayColourId, ui::cyan.withAlpha(0.16f));

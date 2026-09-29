@@ -111,8 +111,14 @@ void PianoRoll::paint(juce::Graphics& g)
 {
     const auto area = grid();
     const auto row = area.getHeight() / windowRows;
-    g.setGradientFill(juce::ColourGradient(juce::Colour(0xff111a2e), 0, 0,
-                                           juce::Colour(0xff0c111b), 0, static_cast<float>(getHeight()), false));
+    // The roll stays a dark inset in dark mode; in light mode it goes paper
+    // so key labels and grid lines stay readable.
+    if (ui::uiDark)
+        g.setGradientFill(juce::ColourGradient(juce::Colour(0xff111a2e), 0, 0,
+                                               juce::Colour(0xff0c111b), 0, static_cast<float>(getHeight()), false));
+    else
+        g.setGradientFill(juce::ColourGradient(juce::Colour(0xffffffff), 0, 0,
+                                               ui::background, 0, static_cast<float>(getHeight()), false));
     g.fillAll();
     ui::caption(g, "KEY", { 5, 4, 44, 22 }, ui::muted, 9.0f);
     for (int pitch = viewBase; pitch <= viewTop(); ++pitch)
@@ -120,9 +126,10 @@ void PianoRoll::paint(juce::Graphics& g)
         const int key = pitch % 12;
         const bool black = key == 1 || key == 3 || key == 6 || key == 8 || key == 10;
         const auto y = area.getY() + static_cast<float>(viewTop() - pitch) * row;
-        g.setColour(juce::Colour(black ? 0xff0c1420 : 0xff111c29));
+        g.setColour(ui::uiDark ? juce::Colour(black ? 0xff0c1420 : 0xff111c29)
+                               : juce::Colour(black ? 0xffe9e2d2 : 0xffffffff));
         g.fillRect(area.getX(), y, area.getWidth(), row - 1.0f);
-        g.setColour(black ? ui::background : ui::raised);
+        g.setColour(black ? ui::background.darker(ui::uiDark ? 0.0f : 0.12f) : ui::raised);
         g.fillRoundedRectangle(2, y + 0.5f, black ? 37.0f : 45.0f, row - 1.0f, 2);
         if (key == 0)
         {
@@ -159,7 +166,9 @@ void PianoRoll::paint(juce::Graphics& g)
     for (int step = 0; step <= gridSteps; ++step)
     {
         const auto x = area.getX() + static_cast<float>(step) * area.getWidth() / gridSteps;
-        g.setColour(juce::Colour(step % 16 == 0 ? 0xff3a5268 : step % 4 == 0 ? 0xff26374b : 0xff182737));
+        g.setColour(ui::uiDark ? juce::Colour(step % 16 == 0 ? 0xff3a5268 : step % 4 == 0 ? 0xff26374b : 0xff182737)
+                               : step % 16 == 0 ? ui::border.darker(0.25f)
+                                 : step % 4 == 0 ? ui::border : ui::border.withAlpha(0.45f));
         g.drawVerticalLine(static_cast<int>(x), area.getY(), area.getBottom());
         if (step < gridSteps && step % 4 == 0)
         {

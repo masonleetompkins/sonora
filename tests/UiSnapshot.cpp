@@ -3,6 +3,7 @@
 #include "AiSidebar.h"
 #include "ArrangementView.h"
 #include "NeonTheme.h"
+#include "DrumSequencer.h"
 #include "PianoRoll.h"
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <iostream>
@@ -120,6 +121,26 @@ int main(int argc, char** argv)
         theme.applyPalette();
         view.setState(sampleState(10, 3.5 * sonora::patternTicks));
         ok = render(view, 1600, 330, dir.getChildFile("arrangement-light.png")) && ok;
+        sonora::PianoRoll lightRoll;
+        sonora::Pattern lightPattern;
+        lightPattern.count = 3;
+        lightPattern.notes[0] = { 1, 0, 960, 60, 100 };
+        lightPattern.notes[1] = { 2, 1920, 480, 64, 110 };
+        lightPattern.notes[2] = { 3, 3840, 240, 67, 90 };
+        lightRoll.setPattern(lightPattern);
+        lightRoll.setViewBase(48);
+        lightRoll.setLiveNotes({ 60 });
+        lightRoll.setPlayhead(2000.0, true);
+        ok = render(lightRoll, 900, 420, dir.getChildFile("piano-roll-light.png")) && ok;
+        sonora::DrumSequencer lightDrums;
+        sonora::DrumPattern lightGrid;
+        lightGrid.steps[0][0] = 110;
+        lightGrid.steps[0][16] = 110;
+        lightGrid.steps[1][16] = 100;
+        lightGrid.steps[2][4] = 90;
+        lightDrums.setPattern(lightGrid);
+        lightDrums.setPlayhead(16 * sonora::stepTicks, true);
+        ok = render(lightDrums, 900, 300, dir.getChildFile("drums-light.png")) && ok;
     }
     juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
     std::cout << (ok ? "snapshots written to " : "snapshot failed: ") << dir.getFullPathName() << "\n";

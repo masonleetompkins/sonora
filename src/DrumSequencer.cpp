@@ -25,7 +25,16 @@ int DrumSequencer::stepAt(float x) const
 
 void DrumSequencer::paint(juce::Graphics& g)
 {
-    g.fillAll(juce::Colour(0xff0c111b));
+    if (ui::uiDark)
+    {
+        g.fillAll(juce::Colour(0xff0c111b));
+    }
+    else
+    {
+        g.setGradientFill(juce::ColourGradient(juce::Colour(0xffffffff), 0, 0,
+                                               ui::background, 0, static_cast<float>(getHeight()), false));
+        g.fillAll();
+    }
     ui::caption(g, "SOUND / PAD", { 8, 3, 104, 23 }, ui::muted, 9);
     const auto area = grid();
     const auto row = area.getHeight() / drumPads;
@@ -37,11 +46,14 @@ void DrumSequencer::paint(juce::Graphics& g)
         const auto accent = pad < 2 ? ui::violet : ui::blue;
         const bool firing = currentStep >= 0 && currentStep < gridSteps
             && pattern.steps[static_cast<std::size_t>(pad)][static_cast<std::size_t>(currentStep)] > 0;
-        g.setColour(firing ? accent.withMultipliedBrightness(0.25f) : ui::panel);
+        g.setColour(firing ? accent.withMultipliedBrightness(ui::uiDark ? 0.25f : 0.85f) : ui::panel);
         g.fillRoundedRectangle(4.0f, y + 3.0f, 104.0f, row - 6.0f, 5.0f);
         g.setColour(firing ? ui::background : ui::muted);
         g.fillEllipse(11, y + row / 2 - 2, 4, 4);
         g.setFont(ui::font(11.0f, true));
+        // Name keeps its own colour: when the pad fires the label row above
+        // shares the fill colour, which would make the name vanish into it.
+        g.setColour(firing ? (ui::uiDark ? ui::background : ui::text) : ui::muted);
         g.drawText(drumNames[static_cast<std::size_t>(pad)], 23, static_cast<int>(y), 82,
                    static_cast<int>(row), juce::Justification::centredLeft);
         for (int step = 0; step < gridSteps; ++step)
@@ -49,8 +61,9 @@ void DrumSequencer::paint(juce::Graphics& g)
             const auto x = area.getX() + static_cast<float>(step) * column;
             const auto velocity = pattern.steps[static_cast<std::size_t>(pad)][static_cast<std::size_t>(step)];
             const auto bounds = juce::Rectangle<float>(x + 1.5f, y + 5.0f, column - 3.0f, row - 10.0f);
-            auto colour = velocity > 0 ? accent.withMultipliedBrightness(0.48f + 0.52f * static_cast<float>(velocity) / 127.0f)
-                                        : juce::Colour((step / 4) % 2 == 0 ? 0xff1d293d : 0xff141f30);
+            auto colour = velocity > 0 ? accent.withMultipliedBrightness(ui::uiDark ? 0.48f + 0.52f * static_cast<float>(velocity) / 127.0f : 0.95f)
+                                        : ui::uiDark ? juce::Colour((step / 4) % 2 == 0 ? 0xff1d293d : 0xff141f30)
+                                                     : ui::background.darker((step / 4) % 2 == 0 ? 0.08f : 0.02f);
             if (step == currentStep && velocity > 0)
                 colour = colour.brighter(0.4f);
             if (velocity > 0)
