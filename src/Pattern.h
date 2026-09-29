@@ -520,17 +520,178 @@ inline bool trackSlotHasContent(const Track& track, int slot)
     return track.kind == TrackKind::Drums ? track.drumPatterns[i].hitCount() > 0 : track.melodies[i].count > 0;
 }
 
-inline int preferredSlot(SongPart part)
+// How busy/loud one loop is (0..~1): onset density blended with velocity.
+// Deterministic ranking fuel for orchestration, not an audible property.
+inline float loopEnergy(const Track& track, int slot)
 {
-    switch (part)
+    const auto i = static_cast<std::size_t>(std::clamp(slot, 0, numPatterns - 1));
+    if (track.kind == TrackKind::Drums)
     {
-        case SongPart::Chorus: case SongPart::Drop: return 1;
-        case SongPart::PreChorus: case SongPart::Bridge: case SongPart::Build: return 2;
-        case SongPart::Break: return 3;
-        case SongPart::Section: case SongPart::Intro: case SongPart::Verse: case SongPart::Outro:
-        case SongPart::numParts: break;
+        const auto& grid = track.drumPatterns[i];
+        int hits = 0, vel = 0;
+        for (const auto& row : grid.steps)
+            for (const auto velocity : row)
+                if (velocity > 0)
+                {
+                    ++hits;
+                    vel += velocity;
+                }
+        if (hits == 0)
+            return 0.0f;
+        return std::min(1.0f, static_cast<float>(hits) / 64.0f) * 0.7f
+            + (static_cast<float>(vel) / static_cast<float>(hits) / 127.0f) * 0.3f;
     }
-    return 0;
+    const auto& pattern = track.melodies[i];
+    if (pattern.count == 0)
+        return 0.0f;
+    bool steps[gridSteps] = {};
+    int vel = 0;
+    for (int n = 0; n < pattern.count; ++n)
+    {
+        const auto& note = pattern.notes[static_cast<std::size_t>(n)];
+        vel += note.velocity;
+        for (int step = note.start / stepTicks; step <= (note.start + note.duration - 1) / stepTicks && step < gridSteps; ++step)
+            if (step >= 0)
+                steps[step] = true;
+    }
+    int active = 0;
+    for (bool on : steps)
+        active += on ? 1 : 0;
+    // Onsets dominate: sixteen staccato 16ths outrank a few long notes.
+    return std::min(1.0f, static_cast<float>(pattern.count) / 32.0f) * 0.5f
+        + static_cast<float>(active) / static_cast<float>(gridSteps) * 0.3f
+        + (static_cast<float>(vel) / static_cast<float>(pattern.count) / 127.0f) * 0.2f;
+}
+
+// One-line character sketch of a loop, e.g. "driving 16ths, 24 notes" or
+// "four-on-the-floor, backbeat, 40 hits". Empty loops report "empty".
+// Shown in the song UI and read by the AI so it can tell verse material
+// from chorus material without renaming the A-D loops.
+inline juce::String describeLoopRole(const Track& track, int slot)
+{
+    const auto i = static_cast<std::size_t>(std::clamp(slot, 0, numPatterns - 1));
+    if (!trackSlotHasContent(track, slot))
+        return "empty";
+    if (track.kind == TrackKind::Drums)
+    {
+        const auto& grid = track.drumPatterns[i];
+        int hits = 0;
+        for (const auto& row : grid.steps)
+            for (const auto velocity : row)
+                hits += velocity > 0 ? 1 : 0;
+        juce::StringArray tags;
+        const auto& kick = grid.steps[0];
+        if (kick[0] > 0 && kick[16] > 0 && kick[32] > 0 && kick[48] > 0)
+            tags.add("four-on-the-floor kick");
+        const auto& snare = grid.steps[1];
+        if (snare[16] > 0 && snare[48] > 0)
+            tags.add("backbeat snare");
+        int hats = 0;
+        for (int step = 0; step < gridSteps; ++step)
+            hats += grid.steps[2][static_cast<std::size_t>(step)] > 0 ? 1 : 0;
+        if (hats >= 32)
+            tags.add("driving hats");
+        else if (hats >= 12)
+            tags.add("steady hats");
+        int lastBar = 0, earlier = 0;
+        for (int pad = 0; pad < drumPads; ++pad)
+            for (int step = 0; step < gridSteps; ++step)
+                if (grid.steps[static_cast<std::size_t>(pad)][static_cast<std::size_t>(step)] > 0)
+                    (step >= 48 ? lastBar : earlier)++;
+        if (lastBar > earlier / 3 + 2)
+            tags.add("fill into bar 4");
+        if (tags.isEmpty())
+            tags.add(hits < 12 ? "sparse" : "busy");
+        return juce::String(hits) + " hits, " + tags.joinIntoString(", ");
+    }
+    const auto& pattern = track.melodies[i];
+    bool steps[gridSteps] = {};
+    int lo = 127, hi = 0, dur = 0;
+    for (int n = 0; n < pattern.count; ++n)
+    {
+        const auto& note = pattern.notes[static_cast<std::size_t>(n)];
+        lo = std::min(lo, note.pitch);
+        hi = std::max(hi, note.pitch);
+        dur += note.duration;
+        for (int step = note.start / stepTicks; step <= (note.start + note.duration - 1) / stepTicks && step < gridSteps; ++step)
+            if (step >= 0)
+                steps[step] = true;
+    }
+    int active = 0;
+    for (bool on : steps)
+        active += on ? 1 : 0;
+    juce::String feel;
+    if (dur / pattern.count >= 1440)
+        feel = "sustained chords";
+    else if (active >= 48)
+        feel = "driving 16ths";
+    else if (active >= 24)
+        feel = "steady groove";
+    else if (pattern.count <= 6)
+        feel = "sparse motif";
+    else
+        feel = "laid-back groove";
+    const int octaves = (hi - lo + 12) / 12;
+    return juce::String(pattern.count) + " notes, " + feel + ", "
+        + juce::String(octaves) + "-octave range";
+}
+
+// Which loop of a track fits a song part, judged by measured character:
+// choruses/drops take the biggest loop, verses/intros/outros the smallest,
+// builds and bridges the runner-up, so templates follow the actual music
+// instead of fixed letters. Ties prefer higher letters for big parts and
+// lower letters for small parts (so a copied B still beats A in a chorus).
+// A track with nothing written keeps the old fixed default for the part.
+inline int suggestSlotForPart(const Track& track, SongPart part)
+{
+    int filled[numPatterns], count = 0;
+    for (int slot = 0; slot < numPatterns; ++slot)
+        if (trackSlotHasContent(track, slot))
+            filled[count++] = slot;
+    if (count == 0)
+    {
+        switch (part)
+        {
+            case SongPart::Chorus: case SongPart::Drop: return 1;
+            case SongPart::PreChorus: case SongPart::Bridge: case SongPart::Build: return 2;
+            case SongPart::Break: return 3;
+            case SongPart::Section: case SongPart::Intro: case SongPart::Verse: case SongPart::Outro:
+            case SongPart::numParts: break;
+        }
+        return 0;
+    }
+    const bool big = part == SongPart::Chorus || part == SongPart::Drop;
+    const bool middle = part == SongPart::PreChorus || part == SongPart::Bridge || part == SongPart::Build;
+    int best = filled[0];
+    if (middle && count > 1)
+    {
+        // Runner-up by energy (ties: higher letter), so builds rise toward
+        // the peak instead of jumping straight to it.
+        int order[numPatterns];
+        for (int k = 0; k < count; ++k)
+            order[k] = filled[k];
+        for (int a = 0; a < count; ++a)
+            for (int b = a + 1; b < count; ++b)
+            {
+                const float ea = loopEnergy(track, order[a]), eb = loopEnergy(track, order[b]);
+                if (eb > ea + 1.0e-6f || (std::abs(eb - ea) < 1.0e-6f && order[b] > order[a]))
+                    std::swap(order[a], order[b]);
+            }
+        best = order[1];
+    }
+    else
+    {
+        for (int k = 1; k < count; ++k)
+        {
+            const int slot = filled[k];
+            const float energy = loopEnergy(track, slot), bestEnergy = loopEnergy(track, best);
+            const bool tied = std::abs(energy - bestEnergy) < 1.0e-6f;
+            if (big ? (energy > bestEnergy + 1.0e-6f || (tied && slot > best))
+                    : (energy < bestEnergy - 1.0e-6f || (tied && slot < best)))
+                best = slot;
+        }
+    }
+    return best;
 }
 
 inline Arrangement buildSongFromTemplate(const ProjectState& project, SongTemplate tpl)
@@ -546,19 +707,7 @@ inline Arrangement buildSongFromTemplate(const ProjectState& project, SongTempla
         for (int t = 0; t < maxTracks; ++t)
         {
             const auto& track = project.tracks[static_cast<std::size_t>(t)];
-            int slot = preferredSlot(part);
-            if (!trackSlotHasContent(track, slot))
-            {
-                if (trackSlotHasContent(track, 0))
-                    slot = 0;
-                else
-                    for (int candidate = 0; candidate < numPatterns; ++candidate)
-                        if (trackSlotHasContent(track, candidate))
-                        {
-                            slot = candidate;
-                            break;
-                        }
-            }
+            const int slot = suggestSlotForPart(track, part);
             song.slots[static_cast<std::size_t>(s)][static_cast<std::size_t>(t)] = static_cast<std::uint8_t>(slot);
             song.trackOn[static_cast<std::size_t>(s)][static_cast<std::size_t>(t)]
                 = !(drumless && track.kind == TrackKind::Drums);

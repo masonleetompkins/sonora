@@ -26,9 +26,20 @@ void PianoRoll::resized()
     octaveUp.setBounds(getWidth() - 58, 2, 54, 24);
 }
 
+juce::Rectangle<float> PianoRoll::scrollTrack() const
+{
+    const auto area = grid();
+    return { area.getRight() + 4.0f, area.getY(), 12.0f, area.getHeight() };
+}
+
+float PianoRoll::scrollThumbH() const
+{
+    return std::max(30.0f, scrollTrack().getHeight() * windowRows / 128.0f);
+}
+
 void PianoRoll::setViewBase(int pitch)
 {
-    const int next = juce::jlimit(0, 127 - windowRows + 1, pitch - pitch % 12);
+    const int next = juce::jlimit(0, 127 - windowRows + 1, pitch);
     if (next == viewBase)
         return;
     viewBase = next;
@@ -72,7 +83,7 @@ void PianoRoll::setPattern(const Pattern& value)
 
 juce::Rectangle<float> PianoRoll::grid() const
 {
-    return { 52.0f, 32.0f, static_cast<float>(getWidth() - 54), static_cast<float>(getHeight() - 34) };
+    return { 52.0f, 32.0f, static_cast<float>(getWidth() - 54 - 16), static_cast<float>(getHeight() - 34) };
 }
 
 juce::Rectangle<float> PianoRoll::noteBounds(const Note& n) const
@@ -100,7 +111,9 @@ void PianoRoll::paint(juce::Graphics& g)
 {
     const auto area = grid();
     const auto row = area.getHeight() / windowRows;
-    g.fillAll(juce::Colour(0xff0c111b));
+    g.setGradientFill(juce::ColourGradient(juce::Colour(0xff111a2e), 0, 0,
+                                           juce::Colour(0xff0c111b), 0, static_cast<float>(getHeight()), false));
+    g.fillAll();
     ui::caption(g, "KEY", { 5, 4, 44, 22 }, ui::muted, 9.0f);
     for (int pitch = viewBase; pitch <= viewTop(); ++pitch)
     {
@@ -131,7 +144,18 @@ void PianoRoll::paint(juce::Graphics& g)
     }
     ui::caption(g, juce::MidiMessage::getMidiNoteName(viewBase + windowRows - 1, true, true, 4) + " - "
                    + juce::MidiMessage::getMidiNoteName(viewBase, true, true, 4),
-                { getWidth() - 240, 4, 120, 22 }, ui::muted, 9.0f);
+                 { getWidth() - 240, 4, 120, 22 }, ui::muted, 9.0f);
+    // Slim scrollbar: thumb position mirrors the octave window.
+    {
+        const auto track = scrollTrack();
+        const float thumbH = scrollThumbH();
+        const float travel = track.getHeight() - thumbH;
+        const float thumbY = track.getY() + (1.0f - static_cast<float>(viewBase) / (127 - windowRows + 1)) * travel;
+        g.setColour(ui::raised);
+        g.fillRoundedRectangle(track, 6.0f);
+        g.setColour((scrollDragging ? ui::cyan : ui::cyan.withAlpha(0.55f)));
+        g.fillRoundedRectangle(juce::Rectangle<float>(track.getX(), thumbY, track.getWidth(), thumbH), 6.0f);
+    }
     for (int step = 0; step <= gridSteps; ++step)
     {
         const auto x = area.getX() + static_cast<float>(step) * area.getWidth() / gridSteps;
@@ -175,7 +199,8 @@ void PianoRoll::paint(juce::Graphics& g)
         g.setGradientFill(juce::ColourGradient(ui::cyan.withAlpha(0.0f), x - 18, 0,
                                               ui::cyan.withAlpha(0.13f), x, 0, false));
         g.fillRect(x - 18, area.getY(), 18.0f, area.getHeight());
-        g.setColour(ui::cyan.brighter(0.5f));
+        g.setGradientFill(juce::ColourGradient(ui::cyan.brighter(0.5f), x, area.getY(),
+                                               ui::violet.brighter(0.4f), x, area.getBottom(), false));
         g.fillRect(x, area.getY(), 1.5f, area.getHeight());
         juce::Path marker;
         marker.addTriangle(x - 4, area.getY() - 7, x + 5, area.getY() - 7, x + 0.5f, area.getY());
@@ -224,6 +249,18 @@ void PianoRoll::publish()
 
 void PianoRoll::mouseDown(const juce::MouseEvent& event)
 {
+    if (scrollTrack().expanded(3.0f, 0.0f).contains(event.position))
+    {
+        // Grab the thumb where pressed so it doesn't jump.
+        const float thumbH = scrollThumbH();
+        const float travel = scrollTrack().getHeight() - thumbH;
+        const float thumbY = scrollTrack().getY()
+            + (1.0f - static_cast<float>(viewBase) / (127 - windowRows + 1)) * travel;
+        scrollGrab = event.position.y - thumbY;
+        scrollDragging = true;
+        repaint();
+        return;
+    }
     if (!grid().contains(event.position))
         return;
     grabKeyboardFocus();
@@ -264,6 +301,15 @@ void PianoRoll::mouseDown(const juce::MouseEvent& event)
 
 void PianoRoll::mouseDrag(const juce::MouseEvent& event)
 {
+    if (scrollDragging)
+    {
+        const float thumbH = scrollThumbH();
+        const float travel = scrollTrack().getHeight() - thumbH;
+        const float ratio = travel > 0.0f
+            ? 1.0f - (event.position.y - scrollGrab - scrollTrack().getY()) / travel : 1.0f;
+        setViewBase(static_cast<int>(std::round(juce::jlimit(0.0f, 1.0f, ratio) * (127 - windowRows + 1))));
+        return;
+    }
     if (!gesture || selected < 0)
         return;
     auto candidate = original;
@@ -286,6 +332,12 @@ void PianoRoll::mouseDrag(const juce::MouseEvent& event)
 
 void PianoRoll::mouseUp(const juce::MouseEvent&)
 {
+    if (scrollDragging)
+    {
+        scrollDragging = false;
+        repaint();
+        return;
+    }
     if (gesture && onGestureEnd)
         onGestureEnd();
     gesture = false;
@@ -298,7 +350,11 @@ void PianoRoll::mouseWheelMove(const juce::MouseEvent& event, const juce::MouseW
         return;
     const auto index = pattern.noteAt(pitchAt(event.position.y), stepAt(event.position.x) * stepTicks);
     if (index < 0)
+    {
+        // Empty grid scrolls vertically (wheel up reveals higher notes).
+        setViewBase(viewBase + (wheel.deltaY > 0 ? 4 : -4));
         return;
+    }
     if (onGestureBegin)
         onGestureBegin();
     auto& n = pattern.notes[static_cast<std::size_t>(index)];

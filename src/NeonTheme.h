@@ -13,6 +13,10 @@ inline juce::Colour border { 0xff263346 }, text { 0xffe7f0fc }, muted { 0xff8b9d
 inline juce::Colour cyan { 0xff57efd5 }, violet { 0xffb19aff }, blue { 0xff62aaff }, danger { 0xffff7c93 };
 inline juce::Colour warn { 0xffffb86b };
 
+// True when the live palette is dark; adaptive rendering (glass edges,
+// toggle text, highlights) keys off this instead of assuming darkness.
+inline bool uiDark = true;
+
 inline void applyPalette(const omarchy::Palette& palette)
 {
     background = juce::Colour(palette.background);
@@ -21,6 +25,7 @@ inline void applyPalette(const omarchy::Palette& palette)
     border = juce::Colour(palette.border);
     text = juce::Colour(palette.text);
     muted = juce::Colour(palette.muted);
+    uiDark = palette.dark;
     cyan = juce::Colour(palette.accent);
     violet = juce::Colour(palette.drums);
     // Melody follows the accent; drums/audio/danger track their theme hues.
@@ -29,9 +34,15 @@ inline void applyPalette(const omarchy::Palette& palette)
     warn = juce::Colour(palette.warn);
 }
 
+// Global UI text scale, following the display scale (Omarchy monitor scale).
+// Re-applied on every theme pass so display changes take effect live; every
+// caption, button, label and editor in the app sizes through font(), so one
+// factor scales all text.
+inline float uiScale = 1.0f;
+inline void setScale(float scale) { uiScale = std::clamp(scale, 1.0f, 2.0f); }
 inline juce::Font font(float size, bool bold = false, float tracking = 0.0f)
 {
-    return juce::Font(juce::FontOptions(std::max(10.5f, size * 1.08f), bold ? juce::Font::bold : juce::Font::plain))
+    return juce::Font(juce::FontOptions(std::max(10.5f, size * 1.08f * uiScale), bold ? juce::Font::bold : juce::Font::plain))
         .withExtraKerningFactor(tracking);
 }
 
@@ -43,13 +54,27 @@ inline void caption(juce::Graphics& g, const juce::String& value, juce::Rectangl
     g.drawFittedText(value, area, juce::Justification::centredLeft, 1, 0.75f);
 }
 
+// Soft outer glow used for hovered/pressed controls and selections. The
+// colour always comes from the live palette so Omarchy themes keep working.
+inline void glow(juce::Graphics& g, juce::Rectangle<float> bounds, juce::Colour colour,
+                 float radius = 8.0f, float alpha = 0.22f)
+{
+    g.setColour(colour.withAlpha(alpha));
+    g.fillRoundedRectangle(bounds.expanded(3.0f), radius + 2.0f);
+    g.setColour(colour.withAlpha(alpha * 0.45f));
+    g.fillRoundedRectangle(bounds.expanded(6.0f), radius + 4.0f);
+}
+
 inline void surface(juce::Graphics& g, juce::Rectangle<float> bounds, float radius = 12.0f)
 {
     g.setColour(juce::Colours::black.withAlpha(0.25f));
     g.fillRoundedRectangle(bounds.translated(0, 3), radius);
-    g.setGradientFill(juce::ColourGradient(panel.brighter(0.045f), bounds.getTopLeft(),
-                                          panel.darker(0.13f), bounds.getBottomRight(), false));
+    g.setGradientFill(juce::ColourGradient(panel.brighter(0.075f), bounds.getTopLeft(),
+                                          panel.darker(0.16f), bounds.getBottomRight(), false));
     g.fillRoundedRectangle(bounds, radius);
+    // Glass top edge: a faint contrasting line catching the surface.
+    g.setColour((uiDark ? juce::Colours::white : juce::Colours::black).withAlpha(uiDark ? 0.06f : 0.10f));
+    g.drawLine(bounds.getX() + radius, bounds.getY() + 1.0f, bounds.getRight() - radius, bounds.getY() + 1.0f, 1.0f);
     g.setColour(border.withAlpha(0.8f));
     g.drawRoundedRectangle(bounds.reduced(0.5f), radius, 1.0f);
 }
@@ -68,7 +93,7 @@ public:
         setColour(juce::TextButton::buttonColourId, raised);
         setColour(juce::TextButton::buttonOnColourId, cyan);
         setColour(juce::TextButton::textColourOffId, text);
-        setColour(juce::TextButton::textColourOnId, cyan);
+        setColour(juce::TextButton::textColourOnId, uiDark ? cyan : cyan.darker(0.45f));
         setColour(juce::Label::textColourId, text);
         setColour(juce::Slider::thumbColourId, cyan);
         setColour(juce::Slider::textBoxTextColourId, text);
@@ -84,8 +109,8 @@ public:
         setColour(juce::ComboBox::outlineColourId, border);
         setColour(juce::PopupMenu::backgroundColourId, panel);
         setColour(juce::PopupMenu::textColourId, text);
-        setColour(juce::PopupMenu::highlightedBackgroundColourId, cyan.withAlpha(0.15f));
-        setColour(juce::PopupMenu::highlightedTextColourId, cyan);
+        setColour(juce::PopupMenu::highlightedBackgroundColourId, cyan.withAlpha(uiDark ? 0.15f : 0.22f));
+        setColour(juce::PopupMenu::highlightedTextColourId, uiDark ? cyan : cyan.darker(0.45f));
         setColour(juce::TooltipWindow::backgroundColourId, raised);
         setColour(juce::TooltipWindow::textColourId, text);
         setColour(juce::TooltipWindow::outlineColourId, border);
@@ -108,6 +133,13 @@ public:
         if (role == "primary") fill = accent;
         if (hover) fill = fill.brighter(0.12f);
         if (down) fill = fill.darker(0.1f);
+        // Luminous edge: hovered, pressed, and selected controls bloom.
+        if (down)
+            glow(g, bounds, accent, 8.0f, 0.30f * alpha);
+        else if (active)
+            glow(g, bounds, accent, 8.0f, ((role == "track" || role == "trackCompact") ? 0.34f : 0.20f) * alpha);
+        else if (hover)
+            glow(g, bounds, accent, 8.0f, (role == "pad" ? 0.16f : 0.10f) * alpha);
         if (active || (hover && role == "pad"))
         {
             g.setColour(accent.withAlpha(0.09f * alpha));

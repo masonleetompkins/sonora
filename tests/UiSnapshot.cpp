@@ -3,6 +3,7 @@
 #include "AiSidebar.h"
 #include "ArrangementView.h"
 #include "NeonTheme.h"
+#include "PianoRoll.h"
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <iostream>
 
@@ -93,6 +94,32 @@ int main(int argc, char** argv)
         empty.setSize(380, 820);
         empty.setContext("Whole song", "10 parts  /  40 bars  /  4 tracks", sonora::AiSidebar::Mode::Song, true);
         ok = render(empty, 380, 820, dir.getChildFile("ai-sidebar-empty.png")) && ok;
+    }
+    {
+        // Piano roll at 1.25x (Omarchy monitor scale): notes spread over four
+        // octaves, C2 held live, scrollbar visible.
+        sonora::ui::setScale(1.25f);
+        sonora::PianoRoll roll;
+        sonora::Pattern pattern;
+        pattern.count = 5;
+        pattern.notes[0] = { 1, 0, 960, 36, 100 };
+        pattern.notes[1] = { 2, 1920, 480, 60, 110 };
+        pattern.notes[2] = { 3, 3840, 240, 72, 90 };
+        pattern.notes[3] = { 4, 5760, 1920, 84, 100 };
+        pattern.notes[4] = { 5, 9600, 480, 24, 80 };
+        roll.setPattern(pattern);
+        roll.setViewBase(48);
+        roll.setLiveNotes({ 36 });
+        roll.setPlayhead(2000.0, true);
+        ok = render(roll, 900, 420, dir.getChildFile("piano-roll.png")) && ok;
+        sonora::ui::setScale(1.0f);
+    }
+    {
+        // Daylight Paper mode: same boards under the light palette.
+        sonora::ui::applyPalette(sonora::omarchy::sonoraLightPalette());
+        theme.applyPalette();
+        view.setState(sampleState(10, 3.5 * sonora::patternTicks));
+        ok = render(view, 1600, 330, dir.getChildFile("arrangement-light.png")) && ok;
     }
     juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
     std::cout << (ok ? "snapshots written to " : "snapshot failed: ") << dir.getFullPathName() << "\n";

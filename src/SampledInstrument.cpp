@@ -126,12 +126,6 @@ void SampledInstrument::select(int preset)
         const auto range = presetKeyRange(synth, program);
         rangeLo = range.first;
         rangeHi = range.second;
-        if (program == 33) {
-            const int pi = tsf_get_presetindex(synth, 0, program);
-            for (int i = 0; i < synth->presets[pi].regionNum; ++i) {
-                const auto& r = synth->presets[pi].regions[i];
-            }
-        }
     }
 }
 

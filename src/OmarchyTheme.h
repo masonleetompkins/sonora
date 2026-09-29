@@ -174,4 +174,70 @@ inline Palette loadOmarchyPalette()
                                               : file.getParentDirectory().getFileName();
     return paletteFromMap(parseFlatToml(file.loadFileAsString()), name.isEmpty() ? "omarchy" : name);
 }
+
+// Built-in appearance modes for the header theme toggle. The dark one
+// refines the classic neon look; the light one is the Daylight Paper design
+// (warm paper, ink text, deep teal accent, dark piano-roll inset preserved).
+enum class ThemeMode { System, Light, Dark };
+
+inline const char* themeModeName(ThemeMode mode)
+{
+    switch (mode)
+    {
+        case ThemeMode::System: return "system";
+        case ThemeMode::Light: return "light";
+        case ThemeMode::Dark: return "dark";
+    }
+    return "system";
+}
+
+inline ThemeMode themeModeFromString(const juce::String& name)
+{
+    const auto lower = name.trim().toLowerCase();
+    if (lower == "light")
+        return ThemeMode::Light;
+    if (lower == "dark")
+        return ThemeMode::Dark;
+    return ThemeMode::System;
+}
+
+inline Palette sonoraDarkPalette()
+{
+    Palette palette;
+    palette.background = 0xff080b12;
+    palette.panel = 0xff101622;
+    palette.raised = 0xff192231;
+    palette.border = 0xff263346;
+    palette.text = 0xffe7f0fc;
+    palette.muted = 0xff8b9db7;
+    palette.accent = 0xff57efd5;
+    palette.melody = 0xff57efd5;
+    palette.drums = 0xffb19aff;
+    palette.audio = 0xff62aaff;
+    palette.danger = 0xffff7c93;
+    palette.warn = 0xffffb86b;
+    palette.dark = true;
+    palette.themeName = "sonora";
+    return palette;
+}
+
+inline Palette sonoraLightPalette()
+{
+    Palette palette;
+    palette.background = 0xfff3eee2;
+    palette.panel = 0xfffdfaf1;
+    palette.raised = 0xffffffff;
+    palette.border = 0xffd9d2c1;
+    palette.text = 0xff1c2433;
+    palette.muted = 0xff68738a;
+    palette.accent = 0xff0e7c7b;
+    palette.melody = 0xff0e7c7b;
+    palette.drums = 0xff7a4fd0;
+    palette.audio = 0xff2f6bde;
+    palette.danger = 0xffc23b4e;
+    palette.warn = 0xffa86a12;
+    palette.dark = false;
+    palette.themeName = "sonora-light";
+    return palette;
+}
 }

@@ -41,7 +41,7 @@ AiSidebar::AiSidebar()
     input.setColour(juce::TextEditor::outlineColourId, ui::border);
     input.setColour(juce::TextEditor::focusedOutlineColourId, ui::cyan);
     input.onReturnKey = [this] { submit(input.getText()); };
-    for (auto* button : { &send, &stop, &mic, &close, &newChat })
+    for (auto* button : { &send, &stop, &mic, &paste, &close, &newChat })
     {
         addAndMakeVisible(button);
         button->setWantsKeyboardFocus(false);
@@ -51,6 +51,15 @@ AiSidebar::AiSidebar()
     stop.onClick = [this] { if (onCancel) onCancel(); };
     mic.onClick = [this] { if (onVoice) onVoice(); };
     mic.setTooltip("Record your request locally with Voxtype. Click again to transcribe; review the text before Send.");
+    paste.onClick = [this] {
+        const auto text = juce::SystemClipboard::getTextFromClipboard().trim();
+        if (text.isEmpty())
+            setStatus("Clipboard is empty. Dictate with Caps Lock first (Voxtype falls back to clipboard).");
+        else
+            appendDictation(text);
+    };
+    paste.setTooltip("Insert clipboard text into the message box. Use this after Caps Lock dictation: "
+                     "simulated typing arrives garbled in this app, but Voxtype's clipboard fallback keeps the text intact.");
     close.onClick = [this] { if (onClose) onClose(); };
     newChat.onClick = [this] { if (onNewChat) onNewChat(); };
     close.setTooltip("Close the AI sidebar (Ctrl+I)");
@@ -80,6 +89,7 @@ void AiSidebar::setContext(const juce::String& newTitle, const juce::String& new
     input.setEnabled(canChat && !busy);
     send.setEnabled(canChat && !busy);
     mic.setEnabled(canChat && !busy);
+    paste.setEnabled(canChat && !busy);
     for (auto& chip : chips)
         chip.setEnabled(canChat && !busy);
     input.setTextToShowWhenEmpty(!canChat ? unavailable
@@ -118,6 +128,7 @@ void AiSidebar::setBusy(bool value)
     send.setVisible(!busy);
     input.setEnabled(canChat && !busy);
     mic.setEnabled(canChat && !busy);
+    paste.setEnabled(canChat && !busy);
     send.setEnabled(canChat && !busy);
     for (auto& chip : chips)
         chip.setEnabled(canChat && !busy);
@@ -256,6 +267,8 @@ void AiSidebar::resized()
     stop.setBounds(send.getBounds());
     buttons.removeFromRight(6);
     mic.setBounds(buttons.removeFromRight(84));
+    buttons.removeFromRight(6);
+    paste.setBounds(buttons.removeFromRight(84));
     bottom.removeFromBottom(6);
     input.setBounds(bottom);
     viewport.setBounds(area);

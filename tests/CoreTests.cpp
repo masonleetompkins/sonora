@@ -1940,6 +1940,20 @@ void testOmarchyTheme()
     const auto live = loadOmarchyPalette();
     require(live.background >> 24 == 0xff && live.text >> 24 == 0xff, "live palette not opaque");
     (void) themeFingerprint();
+    // Built-in appearance modes behind the header theme toggle.
+    require(themeModeFromString("light") == ThemeMode::Light, "light mode parse");
+    require(themeModeFromString("DARK") == ThemeMode::Dark, "dark mode parse case");
+    require(themeModeFromString("anything-else") == ThemeMode::System, "unknown mode must follow system");
+    require(juce::String(themeModeName(ThemeMode::Light)) == "light", "mode name wrong");
+    const auto light = sonoraLightPalette(), dark = sonoraDarkPalette();
+    require(!light.dark && dark.dark, "built-in mode flags wrong");
+    const auto brightness = [](std::uint32_t argb) {
+        const auto channel = [&](int shift) { return static_cast<float>((argb >> shift) & 0xff) / 255.0f; };
+        return 0.299f * channel(16) + 0.587f * channel(8) + 0.114f * channel(0);
+    };
+    require(brightness(light.background) > 0.7f && brightness(light.text) < 0.3f, "light palette not light-on-paper");
+    require(brightness(dark.background) < 0.2f && brightness(dark.text) > 0.7f, "dark palette not light-on-dark");
+    require(light.accent != dark.accent, "modes share an accent");
 }
 
 void testInstruments()
@@ -2696,6 +2710,32 @@ void testSongComposition()
     require(pop.parts[3] == SongPart::Chorus && pop.slots[3][0] == 1 && pop.slots[1][0] == 0,
             "choruses should use pattern B when it exists");
 
+    // Loop roles describe character; slot suggestions follow the music.
+    require(sonora::describeLoopRole(project.tracks[1], 0).contains("four-on-the-floor kick"), "kick role missed");
+    require(sonora::describeLoopRole(project.tracks[1], 0).contains("driving hats"), "hat role missed");
+    require(sonora::describeLoopRole(project.tracks[1], 1) == "empty", "empty loop mislabeled");
+    require(sonora::describeLoopRole(project.tracks[0], 0).contains("notes"), "melody role missed");
+    auto varied = project;
+    varied.tracks[0].melodies[1].count = 16; // dense chorus candidate
+    for (int n = 0; n < 16; ++n)
+        varied.tracks[0].melodies[1].notes[static_cast<std::size_t>(n)] = {
+            static_cast<std::uint32_t>(n + 1), n * 960, 240, 60 + (n % 12), 110 };
+    varied.tracks[0].melodies[2].count = 1; // sparse bridge candidate
+    varied.tracks[0].melodies[2].notes[0] = { 30, 0, 3840, 48, 80 };
+    using sonora::SongPart;
+    require(sonora::suggestSlotForPart(varied.tracks[0], SongPart::Chorus) == 1, "chorus wants the densest loop");
+    require(sonora::suggestSlotForPart(varied.tracks[0], SongPart::Drop) == 1, "drop wants the densest loop");
+    require(sonora::suggestSlotForPart(varied.tracks[0], SongPart::Verse) == 2, "verse wants the sparsest loop");
+    require(sonora::suggestSlotForPart(varied.tracks[0], SongPart::Intro) == 2, "intro wants the sparsest loop");
+    require(sonora::suggestSlotForPart(varied.tracks[0], SongPart::Build) == 0, "build wants the runner-up loop");
+    require(sonora::suggestSlotForPart(varied.tracks[0], SongPart::Bridge) == 0, "bridge wants the runner-up loop");
+    sonora::Track empty;
+    empty.kind = sonora::TrackKind::Synth;
+    require(sonora::suggestSlotForPart(empty, SongPart::Chorus) == 1, "empty track lost the old default");
+    require(sonora::suggestSlotForPart(empty, SongPart::Verse) == 0, "empty track lost the old default");
+    const auto smart = sonora::buildSongFromTemplate(varied, sonora::SongTemplate::Pop);
+    require(smart.slots[3][0] == 1 && smart.slots[1][0] == 2, "template ignored loop character");
+
     // v13 saves 16 parts with names; v12 files (8 rows) still open.
     auto saved = project;
     saved.song = pop;
@@ -2782,7 +2822,8 @@ void testAiAssistant()
             "part context missing");
     require(message.contains("\"Sine Keys\"") && message.contains("silent in this part"), "silent track not marked");
     require(message.contains("pitch=50 (D3)"), "other track should use the part's loop");
-    require(message.contains("loop B. Its current pattern:") && message.contains("Snare on sixteenth steps: 4"),
+    require(message.contains("replacing loop B") && message.contains("Loop B (target)")
+            && message.contains("Snare on sixteenth steps: 4"),
             "target's current beat missing (needed for edits)");
     require(message.contains("Producer: turn 8") && !message.contains("Producer: turn 6"),
             "history not limited to the most recent turns");
@@ -2888,7 +2929,7 @@ void testSongComposer()
     const auto message = ai::buildSongMessage(request);
     require(message.contains("Track 0 \"Sine Keys\"") && message.contains("Track 2 \"Bass\"")
             && message.contains("Track 1 \"Starter Drums\""), "tracks missing from song context");
-    require(message.contains("Loop B: (empty, free for a new loop)") && message.contains("pitch=48 (C3)")
+    require(message.contains("Loop B [empty]: (empty, free for a new loop)") && message.contains("pitch=48 (C3)")
             && message.contains("Kick on sixteenth steps: 0,16,32,48"), "loop contents missing");
     require(message.contains("Current arrangement (6 sections)") && message.contains("1. Intro: track 0 loop A, track 2 loop A")
             && message.contains("2. Verse: track 0 loop A, track 1 loop A, track 2 loop A"), "current arrangement missing");

@@ -41,5 +41,10 @@ private:
     int viewBase = 48;
     std::vector<int> liveNotes;
     juce::TextButton octaveDown { "- oct" }, octaveUp { "+ oct" };
+    // Slim custom scrollbar (matches the theme; avoids ScrollBar API churn).
+    juce::Rectangle<float> scrollTrack() const;
+    float scrollThumbH() const;
+    bool scrollDragging = false;
+    float scrollGrab = 0.0f;
 };
 }

@@ -51,7 +51,7 @@ private:
     Transcript transcript;
     juce::Viewport viewport;
     juce::TextEditor input;
-    juce::TextButton send { "Send" }, stop { "Stop" }, mic { "Mic" }, close { "X" }, newChat { "New chat" };
+    juce::TextButton send { "Send" }, stop { "Stop" }, mic { "Mic" }, paste { "Paste" }, close { "X" }, newChat { "New chat" };
     std::array<juce::TextButton, 4> chips;
     juce::Label status;
     juce::String title, detail, unavailable;

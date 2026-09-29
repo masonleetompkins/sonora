@@ -641,6 +641,10 @@ juce::String assistantSystemPrompt(bool drums)
         "rest of the song through the notes and drum steps listed with each message.\n\n"
         "Write parts that complement the other tracks: same key and harmony, rhythm that locks with the "
         "groove, and space for the other parts. Follow the producer's requests and the conversation so far.\n\n"
+        "You can see every loop (A-D) on every track, each labeled with its character in brackets — e.g. "
+        "[sparse motif], [driving 16ths], [four-on-the-floor kick] — so loops that share a letter pattern can "
+        "still be told apart: a sparse verse loop reads differently from a dense chorus one. Match the energy "
+        "the producer asks for (a verse part wants something sparser than a chorus part).\n\n"
         "Reply in 1-3 short, friendly sentences (no markdown). If the producer asks for a new part or a change "
         "to the current one, set change=true and return the COMPLETE new pattern for the target track, "
         "including anything you keep unchanged (it replaces the current pattern). If they ask a question or "
@@ -694,15 +698,19 @@ juce::String buildAssistantMessage(const AssistantRequest& request)
                                 : (track.kind == TrackKind::Drums ? request.drumSlots[i] : request.melodySlots[i]);
         const bool silent = inPart && !song.trackOn[static_cast<std::size_t>(request.part)][i];
         context << "Track \"" << cleanText(track.trackName(), 60) << "\" (" << instrumentDescription(track) << ")"
-                << (track.mix.mute ? " [muted]" : "");
-        if (silent)
+                << (track.mix.mute ? " [muted]" : "") << (silent ? " [silent in this part]" : "") << ":\n";
+        // Every loop, not just the current one: the producer's own patterns
+        // are visible too, each labeled with its character (verse-like,
+        // chorus-like...) so similar letters can still be told apart.
+        for (int loop = 0; loop < numPatterns; ++loop)
         {
-            context << ": silent in this part.\n";
-            continue;
+            const auto s = static_cast<std::size_t>(loop);
+            context << "  Loop " << juce::String::charToString(static_cast<juce::juce_wchar>('A' + loop))
+                    << (loop == std::clamp(slot, 0, numPatterns - 1) ? " (current)" : "")
+                    << " [" << describeLoopRole(track, loop) << "]:\n";
+            if (trackSlotHasContent(track, loop))
+                context << (track.kind == TrackKind::Drums ? describeDrums(track.drumPatterns[s]) : describeNotes(track.melodies[s]));
         }
-        context << ":\n";
-        const auto s = static_cast<std::size_t>(std::clamp(slot, 0, numPatterns - 1));
-        context << (track.kind == TrackKind::Drums ? describeDrums(track.drumPatterns[s]) : describeNotes(track.melodies[s]));
     }
     if (context.length() > maxContextChars)
         context = context.substring(0, maxContextChars) + "\n    (context truncated)\n";
@@ -712,9 +720,18 @@ juce::String buildAssistantMessage(const AssistantRequest& request)
     const auto slot = static_cast<std::size_t>(assistantTargetSlot(request));
     const bool drums = targetTrack.kind == TrackKind::Drums;
     message << "Target track \"" << cleanText(targetTrack.trackName(), 60) << "\" (" << instrumentDescription(targetTrack)
-            << "), loop " << juce::String::charToString(static_cast<juce::juce_wchar>('A' + static_cast<int>(slot)))
-            << ". Its current pattern:\n"
-            << (drums ? describeDrums(targetTrack.drumPatterns[slot]) : describeNotes(targetTrack.melodies[slot])) << "\n";
+            << "). All of its loops (you are replacing loop "
+            << juce::String::charToString(static_cast<juce::juce_wchar>('A' + static_cast<int>(slot)))
+            << "; the others are context, do not rewrite them):\n";
+    for (int loop = 0; loop < numPatterns; ++loop)
+    {
+        const auto s = static_cast<std::size_t>(loop);
+        message << "  Loop " << juce::String::charToString(static_cast<juce::juce_wchar>('A' + loop))
+                << (s == slot ? " (target)" : "") << " [" << describeLoopRole(targetTrack, loop) << "]:\n";
+        if (trackSlotHasContent(targetTrack, loop))
+            message << (drums ? describeDrums(targetTrack.drumPatterns[s]) : describeNotes(targetTrack.melodies[s]));
+    }
+    message << "\n";
 
     const auto first = request.history.size() > static_cast<std::size_t>(maxHistoryTurns)
         ? request.history.size() - static_cast<std::size_t>(maxHistoryTurns) : 0;
@@ -819,6 +836,9 @@ juce::String songSystemPrompt()
         "Make it feel like a real, evolving song: a clear shape (typically 8-14 sections, at most 16), energy that "
         "builds into choruses, contrast between sections (fewer tracks in intros, verses, and breaks; the full band "
         "in choruses; drums out or thinned for breaks and outros), and a strong final chorus.\n\n"
+        "Every loop carries a character label in brackets — [sparse motif], [driving 16ths], [four-on-the-floor "
+        "kick], and so on. Use it to match loops to sections: sparse, low-energy loops for verses, intros, and "
+        "breaks; the densest loops for choruses and drops; the runner-up for builds, pre-choruses, and bridges.\n\n"
         "Add variation by writing NEW loops into EMPTY loop slots only (never rewrite a loop that already has "
         "content): for example a drum loop with a fill at the end of bar 4 to lead into a chorus, a busier or "
         "half-time groove, a stripped-down bass for a bridge, or a lifted or answering melody for the last "
@@ -865,7 +885,8 @@ juce::String buildSongMessage(const SongRequest& request)
         {
             const auto s = static_cast<std::size_t>(slot);
             const bool empty = !trackSlotHasContent(track, slot);
-            tracks << "  Loop " << letter(slot) << (empty ? ": (empty, free for a new loop)\n" : ":\n");
+            tracks << "  Loop " << letter(slot) << " [" << describeLoopRole(track, slot) << "]"
+                   << (empty ? ": (empty, free for a new loop)\n" : ":\n");
             if (!empty)
                 tracks << (track.kind == TrackKind::Drums ? describeDrums(track.drumPatterns[s]) : describeNotes(track.melodies[s]));
         }

@@ -39,7 +39,7 @@ if(BUILD_TESTING)
         juce::juce_recommended_config_flags)
     # Offscreen UI renders for visual review (not run by ctest).
     juce_add_console_app(SonoraUiSnapshot PRODUCT_NAME "Sonora UI Snapshot")
-    target_sources(SonoraUiSnapshot PRIVATE tests/UiSnapshot.cpp src/ArrangementView.cpp src/AiSidebar.cpp)
+    target_sources(SonoraUiSnapshot PRIVATE tests/UiSnapshot.cpp src/ArrangementView.cpp src/AiSidebar.cpp src/PianoRoll.cpp)
     target_include_directories(SonoraUiSnapshot PRIVATE src)
     target_compile_definitions(SonoraUiSnapshot PRIVATE JUCE_USE_CURL=0 JUCE_WEB_BROWSER=0)
     target_link_libraries(SonoraUiSnapshot PRIVATE juce::juce_gui_basics juce::juce_audio_basics

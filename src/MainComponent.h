@@ -293,6 +293,14 @@ private:
     void saveAudioSettings();
     juce::String audioErrorMessage;
     std::uint64_t themeFingerprint = 0;
+    // Appearance mode for the header theme toggle: System follows the Omarchy
+    // theme, Light/Dark force the built-in palettes. Persisted in ui.json.
+    omarchy::ThemeMode themeMode = omarchy::ThemeMode::System;
+    juce::TextButton themeButton { "☾" };
+    juce::File uiSettingsFile();
+    void loadUiSettings();
+    void saveUiSettings();
+    void refreshThemeButton();
     void applyOmarchyTheme(bool force = false);
     void refreshKeyboardColours();
     // MIDI hardware plug-and-play: auto-enabled input identifiers, MCU port
@@ -314,6 +322,13 @@ private:
     void applyKnobChanges();
     void paintKnobStrip(juce::Graphics& g);
     juce::Rectangle<int> knobStripArea() const;
+    // On-screen dragging of the knob strip (same geometry as the paint code).
+    // One mouse gesture is one undo step; absolute MIDI knobs stay in sync so
+    // the next hardware turn starts from the dragged value instead of jumping.
+    juce::Rectangle<float> knobChipRect(int knob) const;
+    int screenKnob = -1, screenKnobStartY = 0;
+    float screenKnobStart = 0.0f;
+    bool screenKnobEditing = false;
     // MiniLab 3 screen + pad feedback (DAW program only). Output is opened
     // alongside the auto-connected inputs; replies arrive as SysEx.
     enum class MiniLabMode { Unknown, Arturia, Daw };

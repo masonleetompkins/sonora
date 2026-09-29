@@ -122,6 +122,8 @@ void ArrangementView::paint(juce::Graphics& g)
         const auto part = song.parts[static_cast<std::size_t>(s)];
         const auto colour = partColour(part);
         const bool isPlaying = s == playing;
+        if (s == state.selected || isPlaying)
+            ui::glow(g, area, colour, 6.0f, isPlaying ? 0.38f : 0.28f);
         g.setColour(colour.withAlpha(isPlaying ? 0.42f : 0.2f));
         g.fillRoundedRectangle(area, 6.0f);
         g.setColour(colour.withAlpha(0.9f));

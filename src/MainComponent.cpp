@@ -1529,7 +1529,7 @@ MainComponent::MainComponent()
              &panic, &keyboard, &pianoRoll, &play, &stop, &record, &ideaButton, &undo, &redo, &newProject,
              &open, &save, &saveAs, &exportButton, &clear, &demo, &tempo, &drumSequencer,
              &audioTab, &mute, &solo, &trackVolume, &repeatBar, &kitButton, &outputMeter,
-             &loopView, &songView, &duplicatePattern })
+             &loopView, &songView, &duplicatePattern, &themeButton })
         addAndMakeVisible(component);
     for (auto* component : std::initializer_list<juce::Component*> { &songTemplate, &partChoice, &partTrackOn, &partHint })
         addChildComponent(component);
@@ -1649,13 +1649,26 @@ MainComponent::MainComponent()
     exportButton.setColour(juce::TextButton::buttonOnColourId, ui::violet);
     exportButton.onClick = [this] { exportAudio(); };
     exportButton.setTooltip("Bounce the loop or song to a stereo WAV file (Ctrl+E).");
+    themeButton.setColour(juce::TextButton::buttonOnColourId, ui::cyan);
+    themeButton.onClick = [this] {
+        // Shift-click returns to the system (Omarchy) theme.
+        if (juce::ModifierKeys::getCurrentModifiers().isShiftDown())
+            themeMode = omarchy::ThemeMode::System;
+        else if (themeMode == omarchy::ThemeMode::Light
+                 || (themeMode == omarchy::ThemeMode::System && !ui::uiDark))
+            themeMode = omarchy::ThemeMode::Dark;
+        else
+            themeMode = omarchy::ThemeMode::Light;
+        saveUiSettings();
+        applyOmarchyTheme(true);
+    };
 
     // Keep transport shortcuts focused on the editor after toolbar clicks.
     for (auto* button : std::initializer_list<juce::Button*> {
              &play, &stop, &record, &ideaButton, &panic, &audioSettings, &undo, &redo,
              &newProject, &open, &save, &saveAs, &exportButton, &clear, &demo, &duplicatePattern,
              &audioTab, &mute, &solo, &repeatBar, &kitButton,
-             &loopView, &songView, &partTrackOn })
+             &loopView, &songView, &partTrackOn, &themeButton })
         button->setWantsKeyboardFocus(false);
     for (int i = 0; i < numPatterns; ++i)
     {
@@ -1944,6 +1957,7 @@ MainComponent::MainComponent()
                         .getChildFile(".local/state").getFullPathName();
     recoveryFile = juce::File(stateRoot).getChildFile("sonora/recovery.sonora.json");
     setSize(1440, 900);
+    loadUiSettings();
     applyOmarchyTheme(true); // theme first paint matches the desktop
     projectChanged();
     selectChannel(0);
@@ -2202,6 +2216,14 @@ juce::Rectangle<int> MainComponent::knobStripArea() const
     return { 540, getHeight() - 172, contentWidth() - 580, 30 };
 }
 
+juce::Rectangle<float> MainComponent::knobChipRect(int knob) const
+{
+    const auto area = knobStripArea();
+    const float chip = static_cast<float>(area.getWidth()) / 8.0f;
+    return { static_cast<float>(area.getX()) + chip * static_cast<float>(knob),
+             static_cast<float>(area.getY()) + 4.0f, chip - 6.0f, 22.0f };
+}
+
 void MainComponent::paintKnobStrip(juce::Graphics& g)
 {
     if (audioSelected)
@@ -2213,14 +2235,14 @@ void MainComponent::paintKnobStrip(juce::Graphics& g)
     const auto map = knobMapFor(track);
     const bool highlight = juce::Time::getMillisecondCounter() < knobHighlightUntil;
     const auto accent = trackColour(track.icon);
-    const float chip = static_cast<float>(area.getWidth()) / 8.0f;
     ui::caption(g, "KNOBS", { area.getX() - 50, area.getY() + 3, 46, 20 }, ui::muted, 9.0f);
     for (int knob = 0; knob < 8; ++knob)
     {
         const auto& slot = map[static_cast<std::size_t>(knob)];
-        const auto cell = juce::Rectangle<float>(static_cast<float>(area.getX()) + chip * static_cast<float>(knob),
-                                                 static_cast<float>(area.getY()) + 4.0f, chip - 6.0f, 22.0f);
+        const auto cell = knobChipRect(knob);
         const bool hot = highlight && knob == lastKnob;
+        if (hot)
+            ui::glow(g, cell, accent, 5.0f, 0.30f);
         g.setColour((hot ? accent.withAlpha(0.18f) : ui::raised.withAlpha(0.6f)));
         g.fillRoundedRectangle(cell, 5.0f);
         const float knobAt = juce::jlimit(0.0f, 1.0f, knobPosition(track, slot.target));
@@ -2400,6 +2422,36 @@ juce::File MainComponent::audioSettingsFile()
         root = juce::File::getSpecialLocation(juce::File::userHomeDirectory)
                    .getChildFile(".config").getFullPathName();
     return juce::File(root).getChildFile("sonora/audio.xml");
+}
+
+juce::File MainComponent::uiSettingsFile()
+{
+    return audioSettingsFile().getSiblingFile("ui.json");
+}
+
+void MainComponent::loadUiSettings()
+{
+    const auto file = uiSettingsFile();
+    if (!file.existsAsFile())
+        return;
+    themeMode = omarchy::themeModeFromString(juce::JSON::parse(file.loadFileAsString()).getProperty("theme", "system").toString());
+}
+
+void MainComponent::saveUiSettings()
+{
+    const auto file = uiSettingsFile();
+    file.getParentDirectory().createDirectory();
+    file.replaceWithText("{\"theme\":\"" + juce::String(omarchy::themeModeName(themeMode)) + "\"}\n");
+}
+
+void MainComponent::refreshThemeButton()
+{
+    // Glyph shows the current look; the tooltip names the action.
+    const bool light = !ui::uiDark;
+    themeButton.setButtonText(light ? juce::String::charToString(0x2600) : juce::String::charToString(0x263e));
+    juce::String mode = themeMode == omarchy::ThemeMode::System ? "System (Omarchy)"
+        : themeMode == omarchy::ThemeMode::Light ? "Light" : "Dark";
+    themeButton.setTooltip("Theme: " + mode + ". Click: switch Light/Dark. Shift-click: follow the system theme.");
 }
 
 void MainComponent::saveAudioSettings()
@@ -2912,6 +2964,20 @@ void MainComponent::moveTrack(int from, int to)
 
 void MainComponent::mouseDown(const juce::MouseEvent& event)
 {
+    screenKnob = -1;
+    if (event.eventComponent == this && !audioSelected)
+    {
+        const auto& track = project.tracks[static_cast<std::size_t>(std::clamp(selectedTrack, 0, maxTracks - 1))];
+        if (track.kind != TrackKind::None)
+            for (int knob = 0; knob < 8; ++knob)
+                if (knobChipRect(knob).contains(event.position))
+                {
+                    screenKnob = knob;
+                    screenKnobStartY = event.position.y;
+                    screenKnobStart = knobPosition(track, knobMapFor(track)[static_cast<std::size_t>(knob)].target);
+                    screenKnobEditing = false;
+                }
+    }
     dragTrack = dragHover = -1;
     for (int track = 0; track < maxTracks; ++track)
         if (event.eventComponent == &trackButtons[static_cast<std::size_t>(track)]
@@ -2929,6 +2995,44 @@ void MainComponent::mouseDown(const juce::MouseEvent& event)
 
 void MainComponent::mouseDrag(const juce::MouseEvent& event)
 {
+    if (screenKnob >= 0)
+    {
+        // Vertical drag over ~150px sweeps the whole range (up = more).
+        auto& track = project.tracks[static_cast<std::size_t>(std::clamp(selectedTrack, 0, maxTracks - 1))];
+        if (track.kind == TrackKind::None)
+        {
+            screenKnob = -1;
+            return;
+        }
+        const auto map = knobMapFor(track);
+        const auto target = map[static_cast<std::size_t>(screenKnob)].target;
+        if (!screenKnobEditing && !editing)
+        {
+            beginEdit();
+            screenKnobEditing = true;
+        }
+        const float value = juce::jlimit(0.0f, 1.0f,
+            screenKnobStart + static_cast<float>(screenKnobStartY - event.position.y) / 150.0f);
+        applyKnob(track, target, value);
+        // Keep the absolute hardware knobs in sync so the next physical turn
+        // continues from here instead of jumping back to a stale position.
+        knobValues[static_cast<std::size_t>(screenKnob)].store(static_cast<int>(std::round(value * 127.0f)));
+        appliedKnobValues[static_cast<std::size_t>(screenKnob)] = knobValues[static_cast<std::size_t>(screenKnob)].load();
+        const auto now = juce::Time::getMillisecondCounter();
+        knobHighlightUntil = now + 1500;
+        knobScreenUntil = now + 2000;
+        lastKnob = screenKnob;
+        refreshMiniLabDisplay(false);
+        projectChanged();
+        if (synthPanel != nullptr && synthPanel->isVisible())
+            refreshSynthPanel();
+        status.setText("Knob " + juce::String(screenKnob + 1) + "  /  " + track.trackName() + "  /  "
+                       + map[static_cast<std::size_t>(screenKnob)].label + " "
+                       + knobValueText(track, target),
+                       juce::dontSendNotification);
+        repaint(knobStripArea());
+        return;
+    }
     if (dragTrack < 0 || dragStartPos.getDistanceFrom(event.getPosition()) < 6)
         return;
     const auto pos = event.getEventRelativeTo(this).getPosition();
@@ -2944,6 +3048,16 @@ void MainComponent::mouseDrag(const juce::MouseEvent& event)
 void MainComponent::mouseUp(const juce::MouseEvent& event)
 {
     juce::ignoreUnused(event);
+    if (screenKnob >= 0)
+    {
+        screenKnob = -1;
+        if (screenKnobEditing)
+        {
+            screenKnobEditing = false;
+            endEdit();
+        }
+        return;
+    }
     const int from = dragTrack, to = dragHover;
     dragTrack = dragHover = -1;
     refreshTrackList();
@@ -3841,13 +3955,27 @@ void MainComponent::refreshKeyboardColours()
 
 void MainComponent::applyOmarchyTheme(bool force)
 {
-    const auto fingerprint = omarchy::themeFingerprint();
-    if (!force && fingerprint == themeFingerprint)
+    // Text follows the display scale (Omarchy monitor scale, e.g. 1.25), with
+    // a SONORA_UI_SCALE override for personal preference. Checked on every
+    // theme pass so docking/changing displays updates the whole UI.
+    float scale = 1.0f;
+    if (const auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
+        scale = static_cast<float>(display->scale);
+    const auto override = juce::SystemStats::getEnvironmentVariable("SONORA_UI_SCALE", {});
+    if (override.getDoubleValue() > 0.0)
+        scale = static_cast<float>(override.getDoubleValue());
+    scale = std::clamp(scale, 1.0f, 2.0f);
+    const auto palette = themeMode == omarchy::ThemeMode::Light ? omarchy::sonoraLightPalette()
+        : themeMode == omarchy::ThemeMode::Dark ? omarchy::sonoraDarkPalette()
+                                                : omarchy::loadOmarchyPalette();
+    const auto fingerprint = omarchy::themeFingerprint() * 3u + static_cast<unsigned>(themeMode);
+    if (!force && fingerprint == themeFingerprint && std::abs(ui::uiScale - scale) < 1.0e-6f)
         return;
+    ui::setScale(scale);
     themeFingerprint = fingerprint;
-    const auto palette = omarchy::loadOmarchyPalette();
     ui::applyPalette(palette);
     theme.applyPalette();
+    refreshThemeButton();
     refreshKeyboardColours();
     repaint();
     pianoRoll.repaint();
@@ -4407,6 +4535,18 @@ void MainComponent::paint(juce::Graphics& g)
     const auto w = static_cast<float>(contentWidth()), h = static_cast<float>(getHeight());
     const auto accent = audioSelected ? ui::blue : trackColour(project.tracks[static_cast<std::size_t>(selectedTrack)].icon);
     g.fillAll(ui::background);
+    // Ambient wash fading into the theme background, plus accent light behind
+    // the header and editor. Indigo depth when dark, cool paper glow when light.
+    const auto washTop = ui::uiDark ? ui::background.brighter(0.12f).interpolatedWith(juce::Colour(0xff232a55), 0.5f)
+                                    : ui::background.interpolatedWith(juce::Colour(0xffdbe7f2), 0.55f);
+    g.setGradientFill(juce::ColourGradient(washTop, 0, 0, ui::background, 0, h * 0.6f, false));
+    g.fillRect(0.0f, 0.0f, w, h);
+    g.setGradientFill(juce::ColourGradient(ui::cyan.withAlpha(0.10f), w * 0.5f, 0,
+                                           juce::Colours::transparentBlack, w * 0.5f, 260, false));
+    g.fillRect(0.0f, 0.0f, w, 260.0f);
+    g.setGradientFill(juce::ColourGradient(juce::Colours::transparentBlack, 0, h * 0.35f,
+                                           ui::violet.withAlpha(0.08f), w * 0.72f, h * 0.75f, false));
+    g.fillRect(0.0f, h * 0.35f, w, h * 0.65f);
     g.setGradientFill(juce::ColourGradient(juce::Colour(0xff142337), 80, 0,
                                           ui::background, w * 0.7f, 180, false));
     g.fillRect(0.0f, 0.0f, w, 100.0f);
@@ -4491,6 +4631,7 @@ void MainComponent::resized()
         button->setBounds(fileRow.removeFromLeft(98));
         fileRow.removeFromLeft(7);
     }
+    themeButton.setBounds(contentWidth() - 590, 27, 34, 34);
     play.setBounds(38, 138, 92, 34);
     stop.setBounds(138, 138, 56, 34);
     record.setBounds(202, 138, 58, 34);

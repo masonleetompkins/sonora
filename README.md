@@ -84,7 +84,10 @@ a fallback or for direct hardware access.
 - Follows your Omarchy theme: reads the active theme's `colors.toml` on
   startup and repaints live within seconds when you run `omarchy theme set`.
   Backgrounds, text, accents, and track hues all track the theme; without
-  Omarchy present it keeps the built-in neon look.
+  Omarchy present it keeps the built-in neon look. The sun/moon button in the
+  header forces the built-in Light (Daylight Paper) or Dark mode instead
+  (Shift-click returns to the system theme); text also scales with your
+  monitor scaling, overridable with `SONORA_UI_SCALE=1.5`.
 - Cyan/violet track identity, custom buttons/rotary control, and animated transport/playhead/pad cues.
 - Resizable dark native UI; Ctrl+1/Ctrl+2 switch melody/drums.
 - MiniLab 3 knobs 1-8 control the selected instrument's sound, mapped per
@@ -92,7 +95,8 @@ a fallback or for direct hardware access.
   Delay, Echoes, Reverb; synth: Cutoff, Resonance, Attack, Release, Drive,
   Chorus, Delay, Reverb). Works in the Arturia/User program (CC 74, 71, 76,
   77, 93, 18, 19, 16) and DAW mode (CC 86, 87, 89, 90, 110, 111, 116, 117).
-  The performance strip shows the current map and values; each knob gesture is
+  The performance strip shows the current map and values; drag the strips
+  on screen with the mouse or turn the hardware knobs — each gesture is
   one undo step and is saved with the project.
 - MiniLab 3 screen and pads: switch the MiniLab to its DAW program
   (Shift + Pad 3) and its screen shows the selected track and instrument,
