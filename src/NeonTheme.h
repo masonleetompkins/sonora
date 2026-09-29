@@ -129,7 +129,8 @@ public:
         const bool active = button.getToggleState() || down;
         const auto bounds = button.getLocalBounds().toFloat().reduced(1.5f);
         const float alpha = button.isEnabled() ? 1.0f : 0.32f;
-        auto fill = active ? accent.withMultipliedBrightness(0.22f) : raised;
+        auto fill = active ? (uiDark ? accent.withMultipliedBrightness(0.22f) : accent.withAlpha(0.20f))
+                           : raised;
         if (role == "primary") fill = accent;
         if (hover) fill = fill.brighter(0.12f);
         if (down) fill = fill.darker(0.1f);

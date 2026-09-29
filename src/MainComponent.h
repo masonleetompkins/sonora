@@ -293,9 +293,9 @@ private:
     void saveAudioSettings();
     juce::String audioErrorMessage;
     std::uint64_t themeFingerprint = 0;
-    // Appearance mode for the header theme toggle: System follows the Omarchy
-    // theme, Light/Dark force the built-in palettes. Persisted in ui.json.
-    omarchy::ThemeMode themeMode = omarchy::ThemeMode::System;
+    // Appearance mode for the header theme toggle: Light/Dark force the
+    // built-in palettes, System follows the Omarchy theme. Persisted in ui.json.
+    omarchy::ThemeMode themeMode = omarchy::ThemeMode::Light;
     juce::TextButton themeButton { "☾" };
     juce::File uiSettingsFile();
     void loadUiSettings();

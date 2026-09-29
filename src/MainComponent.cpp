@@ -4244,7 +4244,7 @@ void MainComponent::openAudioSettings()
     }
     juce::DialogWindow::LaunchOptions options;
     options.dialogTitle = "Audio & MIDI settings";
-    options.dialogBackgroundColour = juce::Colour(0xff181e2a);
+    options.dialogBackgroundColour = ui::panel;
     options.content.setOwned(new juce::AudioDeviceSelectorComponent(deviceManager, 0, 2, 0, 2,
                                                                    true, false, true, false));
     options.content->setSize(580, 480);
@@ -4547,7 +4547,7 @@ void MainComponent::paint(juce::Graphics& g)
     g.setGradientFill(juce::ColourGradient(juce::Colours::transparentBlack, 0, h * 0.35f,
                                            ui::violet.withAlpha(0.08f), w * 0.72f, h * 0.75f, false));
     g.fillRect(0.0f, h * 0.35f, w, h * 0.65f);
-    g.setGradientFill(juce::ColourGradient(juce::Colour(0xff142337), 80, 0,
+    g.setGradientFill(juce::ColourGradient(ui::raised, 80, 0,
                                           ui::background, w * 0.7f, 180, false));
     g.fillRect(0.0f, 0.0f, w, 100.0f);
     g.setColour(ui::border.withAlpha(0.6f));
