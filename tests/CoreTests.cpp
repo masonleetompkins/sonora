@@ -8,6 +8,7 @@
 #include "AiDictation.h"
 #include "IdeaCapture.h"
 #include "MiniLabDisplay.h"
+#include "MiniLabSender.h"
 #include "OmarchyTheme.h"
 #include "PitchCorrect.h"
 #include "ProjectIO.h"
@@ -2580,6 +2581,45 @@ void testAiMelody()
     }
 }
 
+void testBackgroundLoading()
+{
+    // The hardware sender never blocks the poster: malformed frames are
+    // dropped, rapid posts coalesce, and shutdown flushes the latest.
+    {
+        juce::CriticalSection lock;
+        std::vector<sonora::minilab::Bytes> received;
+        sonora::MiniLabSender sender([&](const sonora::minilab::Bytes& bytes) {
+            const juce::ScopedLock guard(lock);
+            received.push_back(bytes);
+        });
+        sender.post({ 0x01, 0x02 }); // no SysEx framing: dropped
+        sender.post(sonora::minilab::deviceInquiry());
+        for (int i = 0; i < 20; ++i)
+            sender.post(sonora::minilab::screenMessage("K" + juce::String(i), "v"));
+        sender.shutdown();
+        const juce::ScopedLock guard(lock);
+        require(!received.empty(), "sender delivered nothing");
+        for (const auto& bytes : received)
+            require(bytes.front() == 0xF0 && bytes.back() == 0xF7, "sender passed a malformed frame");
+        require(received.back() == sonora::minilab::screenMessage("K19", "v"), "shutdown lost the latest frame");
+        require(received.size() <= 22, "sender did not coalesce");
+    }
+    // Loaders honor cancellation so superseded jobs die promptly instead of
+    // piling up behind a slow resample.
+    {
+        std::array<sonora::AudioTakeMeta, sonora::maxTakes> takes {};
+        takes[0].id = 1;
+        takes[0].setFileName("missing.wav");
+        takes[0].frames = 48000;
+        const auto cancelled = sonora::loadTakes(takes, 1, juce::File(), 48000.0,
+                                                 [](double) { return false; });
+        require(cancelled == nullptr, "cancelled take load returned a set");
+        const auto bank = sonora::loadSampleBank({}, juce::File(), 48000.0, 0,
+                                                 [](double) { return false; });
+        require(bank == nullptr, "cancelled bank load returned a bank");
+    }
+}
+
 void testMiniLabDisplay()
 {
     namespace ml = sonora::minilab;
@@ -3103,6 +3143,7 @@ int main()
         testKitPresets(); std::cout << "PASS preset save/load/delete/browse, sanitize, corrupt rejection\n";
         testPitch(); std::cout << "PASS YIN accuracy, scale snap, correction, identity, vibrato, validation\n";
         testMidiHardware(); std::cout << "PASS Arturia pad map, MCU transport, auto-connect, status text\n";
+        testBackgroundLoading(); std::cout << "PASS async MiniLab sender, take/bank load cancel\n";
         testExpression(); std::cout << "PASS pitch bend, mod vibrato, sustain hold/release\n";
         testPersistence(); std::cout << "PASS project round-trip, validation, atomic replacement\n";
         testDrumPersistence(); std::cout << "PASS version-1 migration, drum/mixer persistence, malformed tracks\n";

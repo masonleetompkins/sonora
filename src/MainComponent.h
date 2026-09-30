@@ -11,6 +11,7 @@
 #include "IdeaCapture.h"
 #include "AiDictation.h"
 #include "MiniLabDisplay.h"
+#include "MiniLabSender.h"
 #include "AiMelody.h"
 #include "NeonTheme.h"
 #include "PitchCorrect.h"
@@ -144,7 +145,7 @@ private:
     struct PitchWorker;
     struct KitPanel;
     struct SynthPanel;
-    struct AssistantWorker;
+    struct BackgroundWorker;
     struct WaveCache
     {
         std::uint32_t takeId = 0;
@@ -161,7 +162,14 @@ private:
     // window is wide enough, otherwise it floats over the editor's right side.
     static constexpr int sidebarWidth = 380;
     std::unique_ptr<AiSidebar> aiSidebar;
-    std::unique_ptr<AssistantWorker> assistantWorker;
+    std::unique_ptr<BackgroundWorker> assistantWorker;
+    // Take audio and drum banks load on workers (file IO + resampling);
+    // completions install only if still current, otherwise the timer retries.
+    std::unique_ptr<BackgroundWorker> takeLoadWorker, bankLoadWorker;
+    juce::String takeSignature() const;
+    void takeLoadFinished(std::unique_ptr<TakeSet> set, const juce::String& signature);
+    juce::String bankSignature(int track) const;
+    void bankLoadFinished(int track, std::unique_ptr<SampleBank> bank, const juce::String& signature);
     bool transcribing = false;
     std::vector<ai::ChatTurn> chatHistory, songHistory; // track chat / song composer
     static constexpr juce::uint32 songChatId = 0xFFFFFFFFu;
@@ -198,7 +206,7 @@ private:
     void analyzeTake(std::uint32_t id);
     void refreshPitchDisplay();
     void applyPitch();
-    void finishTunedTake(const AudioTakeMeta& source, juce::AudioBuffer<float> tuned,
+    void finishTunedTake(const AudioTakeMeta& source, int frames, int channels,
                          double rate, const PitchContour& contour);
     void pitchFinished();
     const PreloadedTake* findLoadedTake(std::uint32_t id) const;
@@ -332,6 +340,8 @@ private:
     // MiniLab 3 screen + pad feedback (DAW program only). Output is opened
     // alongside the auto-connected inputs; replies arrive as SysEx.
     enum class MiniLabMode { Unknown, Arturia, Daw };
+    std::unique_ptr<MiniLabSender> miniLabSender;
+    juce::CriticalSection miniLabOutLock;
     std::unique_ptr<juce::MidiOutput> miniLabOut;
     juce::String miniLabOutId;
     MiniLabMode miniLabMode = MiniLabMode::Unknown;
@@ -342,6 +352,7 @@ private:
     bool miniLabHintShown = false;
     void openMiniLabOutput();
     void miniLabSend(const minilab::Bytes& bytes);
+    void sendMiniLabNow(const minilab::Bytes& bytes);
     void handleMiniLabSysex(const minilab::Bytes& bytes);
     void refreshMiniLabDisplay(bool force);
     bool lastRunning = false, lastSectionRunning = false, lastCanUndo = false, lastCanRedo = false;

@@ -686,10 +686,11 @@ void MainComponent::applySynthPatch(int patch)
 
 // Runs one AI request off the message thread. The job posts its own result
 // back to the message thread (callAsync) when it finishes.
-struct MainComponent::AssistantWorker final : public juce::Thread
+struct MainComponent::BackgroundWorker final : public juce::Thread
 {
-    explicit AssistantWorker(std::function<void(const std::atomic<bool>*)> jobIn)
-        : juce::Thread("Sonora AI assistant"), job(std::move(jobIn))
+    explicit BackgroundWorker(std::function<void(const std::atomic<bool>*)> jobIn,
+                              const char* name = "Sonora background job")
+        : juce::Thread(name), job(std::move(jobIn))
     {
     }
     void run() override { job(&cancel); }
@@ -784,7 +785,7 @@ void MainComponent::refreshAiSidebar()
 
 void MainComponent::startAiJob(std::function<void(const std::atomic<bool>*)> job)
 {
-    assistantWorker = std::make_unique<AssistantWorker>(std::move(job));
+    assistantWorker = std::make_unique<BackgroundWorker>(std::move(job));
     assistantStartedAt = juce::Time::getMillisecondCounter();
     aiSidebar->setBusy(true);
     aiSidebar->setStatus("Thinking...");
@@ -1131,24 +1132,56 @@ void MainComponent::collectSamples(const juce::File& destination)
     endEdit();
 }
 
+juce::String MainComponent::bankSignature(int track) const
+{
+    const auto t = static_cast<std::size_t>(std::clamp(track, 0, maxTracks - 1));
+    juce::String signature = juce::String(currentRate(), 0) + "|"
+        + juce::String(project.tracks[t].kitVariant) + "|";
+    for (int pad = 0; pad < drumPads; ++pad)
+        signature += padSampleName(project.tracks[t].padSamples[static_cast<std::size_t>(pad)]) + ";";
+    return signature;
+}
+
 void MainComponent::refreshPadBank()
 {
-    const double rate = currentRate();
+    // Sample files load on a worker for the same reason as takes: decoding
+    // and resampling on the message thread froze the UI.
+    const int track = drumEditTrack();
+    const auto trackIndex = static_cast<std::size_t>(track);
+    if (bankLoadWorker != nullptr || bankSignature(track) == lastBankSignature[trackIndex])
+        return;
+    auto safe = juce::Component::SafePointer<MainComponent>(this);
     const juce::File media = projectFile != juce::File() ? mediaDirFor(projectFile) : sessionDir();
-    juce::String signature = juce::String(rate, 0) + "|" + juce::String(project.tracks[static_cast<std::size_t>(drumEditTrack())].kitVariant) + "|";
+    const double rate = currentRate();
+    const int variant = project.tracks[trackIndex].kitVariant;
     std::array<juce::String, drumPads> files {};
     for (int pad = 0; pad < drumPads; ++pad)
+        files[static_cast<std::size_t>(pad)] = padSampleName(project.tracks[trackIndex].padSamples[static_cast<std::size_t>(pad)]);
+    const auto signature = bankSignature(track);
+    auto job = [safe, track, files, media, rate, variant, signature](const std::atomic<bool>* cancel) {
+        auto bank = loadSampleBank(files, media, rate, variant,
+                                   [cancel](double) { return cancel == nullptr || !cancel->load(); });
+        auto shared = std::make_shared<std::unique_ptr<SampleBank>>(std::move(bank));
+        juce::MessageManager::callAsync([safe, track, shared, signature]() {
+            if (safe != nullptr)
+                safe->bankLoadFinished(track, std::move(*shared), signature);
+        });
+    };
+    bankLoadWorker = std::make_unique<BackgroundWorker>(std::move(job), "Sonora bank loader");
+    bankLoadWorker->startThread();
+}
+
+void MainComponent::bankLoadFinished(int track, std::unique_ptr<SampleBank> bank, const juce::String& signature)
+{
+    if (bankLoadWorker != nullptr)
     {
-        files[static_cast<std::size_t>(pad)] = padSampleName(project.tracks[static_cast<std::size_t>(drumEditTrack())].padSamples[static_cast<std::size_t>(pad)]);
-        signature += files[static_cast<std::size_t>(pad)] + ";";
+        bankLoadWorker->stopThread(2000);
+        bankLoadWorker.reset();
     }
-    const auto trackIndex = static_cast<std::size_t>(drumEditTrack());
-    if (signature == lastBankSignature[trackIndex])
-        return;
+    const auto trackIndex = static_cast<std::size_t>(std::clamp(track, 0, maxTracks - 1));
+    if (bank == nullptr || signature != bankSignature(track))
+        return; // superseded or failed; the timer relaunches for current state
     lastBankSignature[trackIndex] = signature;
-    auto bank = loadSampleBank(files, media, rate, project.tracks[static_cast<std::size_t>(drumEditTrack())].kitVariant);
-    if (bank == nullptr)
-        return;
     auto* retired = engine.retirePadBank(static_cast<int>(trackIndex), bank.get());
     // release() transfers ownership of the old bank to the grace-period
     // callback. Assignment would destroy it before the audio thread lets go.
@@ -1512,6 +1545,14 @@ MainComponent::MainComponent()
 {
     setLookAndFeel(&theme);
     setWantsKeyboardFocus(true);
+    // The sender thread only ever touches the output through sendMiniLabNow
+    // under the output lock, so a wedged device stalls that thread — never
+    // the UI.
+    miniLabSender = std::make_unique<MiniLabSender>(
+        [safe = juce::Component::SafePointer<MainComponent>(this)](const minilab::Bytes& bytes) {
+            if (safe != nullptr)
+                safe->sendMiniLabNow(bytes);
+        });
     title.setText("SONORA", juce::dontSendNotification);
     title.setFont(ui::font(30.0f, true, 0.22f));
     subtitle.setFont(ui::font(12.0f));
@@ -2002,13 +2043,26 @@ MainComponent::~MainComponent()
     ideaFile.deleteFile();
     if (miniLabOut != nullptr)
         miniLabSend(minilab::disconnectDaw());
-    miniLabOut.reset();
+    if (miniLabSender != nullptr)
+        miniLabSender->shutdown();
+    {
+        const juce::ScopedLock lock(miniLabOutLock);
+        miniLabOut.reset();
+    }
     if (assistantWorker != nullptr)
     {
         assistantWorker->cancel.store(true);
         assistantWorker->stopThread(5000);
         assistantWorker.reset();
     }
+    for (auto* worker : { &takeLoadWorker, &bankLoadWorker })
+        if (worker->get() != nullptr)
+        {
+            (*worker)->cancel.store(true);
+            (*worker)->signalThreadShouldExit();
+            (*worker)->stopThread(5000);
+            worker->reset();
+        }
     delete audioDialog.getComponent();
     chooser.reset();
     if (recording)
@@ -2304,7 +2358,10 @@ void MainComponent::openMiniLabOutput()
         return;
     if (miniLabOut != nullptr)
         miniLabSend(minilab::disconnectDaw());
-    miniLabOut.reset();
+    {
+        const juce::ScopedLock lock(miniLabOutLock);
+        miniLabOut.reset();
+    }
     miniLabOutId = wanted;
     miniLabMode = MiniLabMode::Unknown;
     miniLabTop.clear();
@@ -2312,7 +2369,10 @@ void MainComponent::openMiniLabOutput()
     miniLabPadRgb = 0;
     if (wanted.isEmpty())
         return;
-    miniLabOut = juce::MidiOutput::openDevice(wanted);
+    {
+        const juce::ScopedLock lock(miniLabOutLock);
+        miniLabOut = juce::MidiOutput::openDevice(wanted);
+    }
     // Identify first; the reply triggers the DAW connect handshake.
     if (miniLabOut != nullptr)
         miniLabSend(minilab::deviceInquiry());
@@ -2320,10 +2380,19 @@ void MainComponent::openMiniLabOutput()
 
 void MainComponent::miniLabSend(const minilab::Bytes& bytes)
 {
-    if (miniLabOut == nullptr || bytes.size() < 2 || bytes.front() != 0xF0 || bytes.back() != 0xF7)
+    if (miniLabOut == nullptr || miniLabSender == nullptr)
         return;
-    miniLabOut->sendMessageNow(juce::MidiMessage::createSysExMessage(bytes.data() + 1,
-                                                                    static_cast<int>(bytes.size()) - 2));
+    miniLabSender->post(bytes);
+}
+
+void MainComponent::sendMiniLabNow(const minilab::Bytes& bytes)
+{
+    if (bytes.size() < 2 || bytes.front() != 0xF0 || bytes.back() != 0xF7)
+        return;
+    const juce::ScopedLock lock(miniLabOutLock);
+    if (miniLabOut != nullptr)
+        miniLabOut->sendMessageNow(juce::MidiMessage::createSysExMessage(bytes.data() + 1,
+                                                                        static_cast<int>(bytes.size()) - 2));
 }
 
 void MainComponent::handleMiniLabSysex(const minilab::Bytes& bytes)
@@ -3495,10 +3564,9 @@ juce::File MainComponent::resolveTakeFile(const AudioTakeMeta& take) const
     return juce::File();
 }
 
-void MainComponent::refreshTakes()
+juce::String MainComponent::takeSignature() const
 {
-    const double rate = currentRate();
-    juce::String signature = juce::String(rate, 0) + "|";
+    juce::String signature = juce::String(currentRate(), 0) + "|";
     for (int i = 0; i < project.takeCount; ++i)
     {
         const auto& take = project.takes[static_cast<std::size_t>(i)];
@@ -3506,15 +3574,48 @@ void MainComponent::refreshTakes()
             + ":" + juce::String(take.frames) + ":" + juce::String(take.gain, 2)
             + (take.mute ? "m" : "") + (take.offline ? "x" : "") + ";";
     }
-    if (signature == lastTakesSignature)
+    return signature;
+}
+
+void MainComponent::refreshTakes()
+{
+    // Take audio loads on a worker: reading and resampling whole takes on the
+    // message thread froze the UI for long recordings. A load already in
+    // flight is left to finish; its result is dropped if stale, and the timer
+    // relaunches for whatever is current.
+    if (takeLoadWorker != nullptr || takeSignature() == lastTakesSignature)
         return;
-    lastTakesSignature = signature;
+    auto safe = juce::Component::SafePointer<MainComponent>(this);
+    auto metas = project.takes;
+    const int count = project.takeCount;
+    const juce::File media = projectFile != juce::File() ? mediaDirFor(projectFile) : sessionDir();
+    const double rate = currentRate();
+    const auto signature = takeSignature();
     takesRevision = revision;
     takesRate = rate;
-    juce::File media = projectFile != juce::File() ? mediaDirFor(projectFile) : sessionDir();
-    auto set = loadTakes(project.takes, project.takeCount, media, rate);
-    if (set == nullptr)
-        return; // load cancelled or failed; keep the previous set live
+    auto job = [safe, metas, count, media, rate, signature](const std::atomic<bool>* cancel) {
+        auto set = loadTakes(metas, count, media, rate,
+                             [cancel](double) { return cancel == nullptr || !cancel->load(); });
+        auto shared = std::make_shared<std::unique_ptr<TakeSet>>(std::move(set));
+        juce::MessageManager::callAsync([safe, shared, signature]() {
+            if (safe != nullptr)
+                safe->takeLoadFinished(std::move(*shared), signature);
+        });
+    };
+    takeLoadWorker = std::make_unique<BackgroundWorker>(std::move(job), "Sonora take loader");
+    takeLoadWorker->startThread();
+}
+
+void MainComponent::takeLoadFinished(std::unique_ptr<TakeSet> set, const juce::String& signature)
+{
+    if (takeLoadWorker != nullptr)
+    {
+        takeLoadWorker->stopThread(2000);
+        takeLoadWorker.reset();
+    }
+    if (set == nullptr || signature != takeSignature())
+        return; // superseded or failed; the timer relaunches for current state
+    lastTakesSignature = signature;
     // The engine borrows the raw pointer; ownership stays here. The previously
     // installed set may still be read by an audio block in flight, so delete
     // it after a grace period on the message thread. Each installed set is
@@ -3745,9 +3846,10 @@ struct MainComponent::PitchWorker final : public juce::ThreadWithProgressWindow
 {
     enum class Mode { Analyze, Apply };
     PitchWorker(Mode modeIn, juce::AudioBuffer<float> audioIn, double rateIn, AudioTakeMeta sourceIn,
-                CorrectionSettings settingsIn, juce::Component::SafePointer<MainComponent> ownerIn)
+                CorrectionSettings settingsIn, juce::Component::SafePointer<MainComponent> ownerIn,
+                juce::File outFileIn = {})
         : ThreadWithProgressWindow(modeIn == Mode::Analyze ? "Analyzing pitch" : "Tuning take", true, true),
-          mode(modeIn), audio(std::move(audioIn)), rate(rateIn), source(sourceIn),
+          mode(modeIn), audio(std::move(audioIn)), outFile(std::move(outFileIn)), rate(rateIn), source(sourceIn),
           settings(settingsIn), owner(ownerIn) {}
     void run() override
     {
@@ -3780,6 +3882,19 @@ struct MainComponent::PitchWorker final : public juce::ThreadWithProgressWindow
                 if (threadShouldExit())
                     return;
             }
+            // The tuned WAV is written here on the worker: writing the whole
+            // take on the message thread froze the UI for long takes.
+            if (!threadShouldExit() && outFile != juce::File())
+            {
+                std::unique_ptr<juce::FileOutputStream> stream(new juce::FileOutputStream(outFile));
+                juce::WavAudioFormat format;
+                std::unique_ptr<juce::AudioFormatWriter> writer(stream->openedOk()
+                    ? format.createWriterFor(stream.release(), rate, static_cast<unsigned>(channels), 24, {}, 0)
+                    : nullptr);
+                wroteOk = writer != nullptr && writer->writeFromAudioSampleBuffer(tuned, 0, tuned.getNumSamples());
+                if (!wroteOk || threadShouldExit())
+                    outFile.deleteFile();
+            }
         }
     }
     void threadComplete(bool userPressedCancel) override
@@ -3798,12 +3913,16 @@ struct MainComponent::PitchWorker final : public juce::ThreadWithProgressWindow
             owner->pitchContours[source.id] = contour;
             owner->refreshPitchDisplay();
         }
+        else if (wroteOk)
+            owner->finishTunedTake(source, tuned.getNumSamples(), tuned.getNumChannels(), rate, contour);
         else
-            owner->finishTunedTake(source, std::move(tuned), rate, contour);
+            owner->showError("Could not write the tuned take.");
         owner->pitchFinished();
     }
     Mode mode;
     juce::AudioBuffer<float> audio, tuned;
+    juce::File outFile;
+    bool wroteOk = false;
     std::vector<float> mono, trajectory;
     double rate = 48000.0;
     AudioTakeMeta source;
@@ -3895,43 +4014,28 @@ void MainComponent::applyPitch()
     for (int i = 0; i < project.takeCount; ++i)
         if (project.takes[static_cast<std::size_t>(i)].id == selectedTake)
             meta = project.takes[static_cast<std::size_t>(i)];
+    const auto outFile = sessionDir().getNonexistentChildFile("take-" + juce::String(nextTakeId) + "-tuned", ".wav");
+    meta.setFileName(outFile.getFileName());
     pitchWorker = std::make_unique<PitchWorker>(PitchWorker::Mode::Apply, loaded->audio,
-        takesRate > 0.0 ? takesRate : currentRate(), meta, pitchSettings, this);
+        takesRate > 0.0 ? takesRate : currentRate(), meta, pitchSettings, this, outFile);
     pitchWorker->launchThread();
 }
 
-void MainComponent::finishTunedTake(const AudioTakeMeta& source, juce::AudioBuffer<float> tuned,
+void MainComponent::finishTunedTake(const AudioTakeMeta& source, int frames, int channels,
                                     double rate, const PitchContour& contour)
 {
-    if (tuned.getNumSamples() <= 0 || project.takeCount >= maxTakes)
+    juce::ignoreUnused(rate);
+    if (frames <= 0 || project.takeCount >= maxTakes)
         return;
-    const auto file = sessionDir().getNonexistentChildFile("take-" + juce::String(nextTakeId) + "-tuned", ".wav");
-    {
-        auto* stream = new juce::FileOutputStream(file);
-        if (!stream->openedOk())
-        {
-            delete stream;
-            showError("Could not write the tuned take.");
-            return;
-        }
-        juce::WavAudioFormat format;
-        std::unique_ptr<juce::AudioFormatWriter> writer(format.createWriterFor(stream, rate,
-            static_cast<unsigned>(tuned.getNumChannels()), 24, {}, 0));
-        if (writer == nullptr || !writer->writeFromAudioSampleBuffer(tuned, 0, tuned.getNumSamples()))
-        {
-            showError("Could not write the tuned take.");
-            return;
-        }
-    }
     beginEdit();
     AudioTakeMeta meta;
     meta.id = nextTakeId++;
-    meta.setFileName(file.getFileName());
+    meta.setFileName(source.fileName());
     meta.startTick = source.startTick;
-    meta.frames = tuned.getNumSamples();
+    meta.frames = frames;
     meta.gain = source.gain;
     meta.mute = false;
-    meta.channels = tuned.getNumChannels();
+    meta.channels = channels;
     project.takes[static_cast<std::size_t>(project.takeCount++)] = meta;
     pitchContours[meta.id] = contour;
     projectChanged();
