@@ -1541,6 +1541,228 @@ void MainComponent::ensureAudioInputs()
     setAudioChannels(2, 2);
 }
 
+// Key popup: song root, scale, and whether new notes snap to it.
+struct KeyPanel : public juce::Component
+{
+    KeyPanel(std::function<void(int, int)> changeCb, std::function<void(bool)> snapCb)
+        : onChange(std::move(changeCb)), onSnap(std::move(snapCb))
+    {
+        addAndMakeVisible(rootLabel);
+        rootLabel.setText("Root", juce::dontSendNotification);
+        rootLabel.setFont(ui::font(12.0f, true));
+        rootLabel.setColour(juce::Label::textColourId, ui::text);
+        addAndMakeVisible(root);
+        for (int key = 0; key < 12; ++key)
+            root.addItem(keyName(key), key + 1);
+        root.onChange = [this] { publish(); };
+        addAndMakeVisible(scaleLabel);
+        scaleLabel.setText("Scale", juce::dontSendNotification);
+        scaleLabel.setFont(ui::font(12.0f, true));
+        scaleLabel.setColour(juce::Label::textColourId, ui::text);
+        addAndMakeVisible(scaleBox);
+        for (int s = 0; s < static_cast<int>(MusicScale::numScales); ++s)
+            scaleBox.addItem(scaleName(static_cast<MusicScale>(s)), s + 1);
+        scaleBox.onChange = [this] { publish(); };
+        addAndMakeVisible(snap);
+        snap.setButtonText("Snap new notes to key");
+        snap.setClickingTogglesState(true);
+        snap.onClick = [this] {
+            if (onSnap) onSnap(snap.getToggleState());
+        };
+        snap.setTooltip("Drawn notes and chord stamps land on scale tones.");
+        setSize(280, 150);
+    }
+    void refresh(int key, int scale, bool snapOn)
+    {
+        root.setSelectedId(std::clamp(key, 0, 11) + 1, juce::dontSendNotification);
+        scaleBox.setSelectedId(std::clamp(scale, 0, static_cast<int>(MusicScale::numScales) - 1) + 1,
+                               juce::dontSendNotification);
+        snap.setToggleState(snapOn, juce::dontSendNotification);
+    }
+    void publish()
+    {
+        if (onChange) onChange(root.getSelectedId() - 1, scaleBox.getSelectedId() - 1);
+    }
+    void resized() override
+    {
+        rootLabel.setBounds(16, 10, 120, 20);
+        root.setBounds(16, 32, 120, 28);
+        scaleLabel.setBounds(144, 10, 120, 20);
+        scaleBox.setBounds(144, 32, 120, 28);
+        snap.setBounds(16, 70, 248, 28);
+    }
+    void paint(juce::Graphics& g) override
+    {
+        ui::surface(g, getLocalBounds().toFloat(), 10.0f);
+        ui::caption(g, "SONG KEY", { 16, 108, 200, 18 }, ui::muted, 9.0f);
+    }
+    juce::Label rootLabel, scaleLabel;
+    juce::ComboBox root, scaleBox;
+    juce::TextButton snap { "Snap" };
+    std::function<void(int, int)> onChange;
+    std::function<void(bool)> onSnap;
+};
+
+// Chord picker: choosing a type arms the piano roll for one-finger stamps.
+struct ChordPanel : public juce::Component
+{
+    explicit ChordPanel(std::function<void(int)> pickCb) : onPick(std::move(pickCb))
+    {
+        for (int c = 0; c < static_cast<int>(ChordType::numChords); ++c)
+        {
+            auto& button = chords[static_cast<std::size_t>(c)];
+            addAndMakeVisible(button);
+            button.setButtonText(chordName(static_cast<ChordType>(c)));
+            button.setTooltip("Stamp this chord with one click, then keep clicking for a progression.");
+            button.onClick = [this, c] { if (onPick) onPick(c); };
+        }
+        setSize(280, 150);
+    }
+    void refresh(bool armed) { repaint(); juce::ignoreUnused(armed); }
+    void resized() override
+    {
+        for (int c = 0; c < static_cast<int>(ChordType::numChords); ++c)
+            chords[static_cast<std::size_t>(c)].setBounds(16 + (c % 4) * 64, 14 + (c / 4) * 36, 60, 30);
+    }
+    void paint(juce::Graphics& g) override
+    {
+        ui::surface(g, getLocalBounds().toFloat(), 10.0f);
+        ui::caption(g, "CHORD  /  CLICK THE ROLL TO STAMP", { 16, 88, 248, 18 }, ui::muted, 9.0f);
+    }
+    std::array<juce::TextButton, static_cast<std::size_t>(ChordType::numChords)> chords;
+    std::function<void(int)> onPick;
+};
+
+// Velocity ramp: fade loop velocities from one level to another.
+struct RampPanel : public juce::Component
+{
+    explicit RampPanel(std::function<void(int, int)> applyCb) : onApply(std::move(applyCb))
+    {
+        addAndMakeVisible(fromLabel);
+        fromLabel.setText("First note", juce::dontSendNotification);
+        fromLabel.setFont(ui::font(12.0f, true));
+        fromLabel.setColour(juce::Label::textColourId, ui::text);
+        addAndMakeVisible(from);
+        from.setRange(1.0, 127.0, 1.0);
+        from.setTextValueSuffix("");
+        addAndMakeVisible(toLabel);
+        toLabel.setText("Last note", juce::dontSendNotification);
+        toLabel.setFont(ui::font(12.0f, true));
+        toLabel.setColour(juce::Label::textColourId, ui::text);
+        addAndMakeVisible(to);
+        to.setRange(1.0, 127.0, 1.0);
+        addAndMakeVisible(apply);
+        apply.setButtonText("Apply ramp");
+        apply.setTooltip("Set velocities across the loop, first note to last (undoable).");
+        apply.onClick = [this] {
+            if (onApply) onApply(static_cast<int>(from.getValue()), static_cast<int>(to.getValue()));
+        };
+        from.setValue(70.0, juce::dontSendNotification);
+        to.setValue(110.0, juce::dontSendNotification);
+        setSize(280, 168);
+    }
+    void resized() override
+    {
+        fromLabel.setBounds(16, 10, 120, 20);
+        from.setBounds(16, 32, 120, 28);
+        toLabel.setBounds(144, 10, 120, 20);
+        to.setBounds(144, 32, 120, 28);
+        apply.setBounds(16, 72, 248, 30);
+    }
+    void paint(juce::Graphics& g) override
+    {
+        ui::surface(g, getLocalBounds().toFloat(), 10.0f);
+        ui::caption(g, "VELOCITY RAMP", { 16, 110, 200, 18 }, ui::muted, 9.0f);
+    }
+    juce::Label fromLabel, toLabel;
+    juce::Slider from, to;
+    juce::TextButton apply;
+    std::function<void(int, int)> onApply;
+};
+
+// Groove popup: per-track swing plus destructive quantize/humanize for
+// the selected loop. Lives in a CallOutBox so the toolbar stays compact.
+struct GroovePanel : public juce::Component
+{
+    GroovePanel(std::function<void(float)> swingCb, std::function<void()> swingDragStartCb,
+                std::function<void()> swingDragEndCb, std::function<void(float)> quantizeCb,
+                std::function<void(float)> humanizeCb)
+        : onSwing(std::move(swingCb)), onQuantize(std::move(quantizeCb)),
+          onHumanize(std::move(humanizeCb)), onSwingDragStart(std::move(swingDragStartCb)),
+          onSwingDragEnd(std::move(swingDragEndCb))
+    {
+        addAndMakeVisible(swingLabel);
+        swingLabel.setText("Swing", juce::dontSendNotification);
+        swingLabel.setFont(ui::font(12.0f, true));
+        swingLabel.setColour(juce::Label::textColourId, ui::text);
+        addAndMakeVisible(swing);
+        swing.setRange(0.0, 75.0, 0.5);
+        swing.setTextValueSuffix(" %");
+        swing.setTooltip("Delay off-beat 16ths. 0 is straight; 15-30 is the classic pocket.");
+        swing.onDragStart = [this] { if (onSwingDragStart) onSwingDragStart(); };
+        swing.onDragEnd = [this] { if (onSwingDragEnd) onSwingDragEnd(); };
+        swing.onValueChange = [this] {
+            if (onSwing) onSwing(static_cast<float>(swing.getValue()) / 100.0f);
+        };
+        addAndMakeVisible(quantizeStrength);
+        quantizeStrength.setRange(0.0, 100.0, 1.0);
+        quantizeStrength.setTextValueSuffix(" %");
+        quantizeStrength.setTooltip("How far notes move toward the grid.");
+        addAndMakeVisible(quantize);
+        quantize.setButtonText("Quantize");
+        quantize.setTooltip("Snap this loop's notes to the 16th grid (undoable).");
+        quantize.onClick = [this] {
+            if (onQuantize) onQuantize(static_cast<float>(quantizeStrength.getValue()) / 100.0f);
+        };
+        addAndMakeVisible(humanizeAmount);
+        humanizeAmount.setRange(0.0, 100.0, 1.0);
+        humanizeAmount.setTextValueSuffix(" %");
+        humanizeAmount.setTooltip("How much timing and velocity wander.");
+        addAndMakeVisible(humanize);
+        humanize.setButtonText("Humanize");
+        humanize.setTooltip("Loosen timing and velocities with a fresh random feel each press (undoable).");
+        humanize.onClick = [this] {
+            if (onHumanize) onHumanize(static_cast<float>(humanizeAmount.getValue()) / 100.0f);
+        };
+        setSize(280, 196);
+    }
+    void refresh(float swingValue, bool drums)
+    {
+        swing.setValue(swingValue * 100.0, juce::dontSendNotification);
+        quantizeStrength.setValue(100.0, juce::dontSendNotification);
+        humanizeAmount.setValue(30.0, juce::dontSendNotification);
+        // Drum grids are already quantized; only timing swing and velocity
+        // wander apply there.
+        quantizeStrength.setVisible(!drums);
+        quantize.setVisible(!drums);
+        resized();
+    }
+    void resized() override
+    {
+        swingLabel.setBounds(16, 10, 248, 20);
+        swing.setBounds(16, 32, 248, 28);
+        int y = 70;
+        if (quantize.isVisible())
+        {
+            quantizeStrength.setBounds(16, y, 140, 28);
+            quantize.setBounds(164, y, 100, 28);
+            y += 38;
+        }
+        humanizeAmount.setBounds(16, y, 140, 28);
+        humanize.setBounds(164, y, 100, 28);
+    }
+    void paint(juce::Graphics& g) override
+    {
+        ui::surface(g, getLocalBounds().toFloat(), 10.0f);
+        ui::caption(g, "GROOVE  /  SELECTED TRACK", { 16, 208 - 22, 200, 18 }, ui::muted, 9.0f);
+    }
+    juce::Label swingLabel;
+    juce::Slider swing, quantizeStrength, humanizeAmount;
+    juce::TextButton quantize, humanize;
+    std::function<void(float)> onSwing, onQuantize, onHumanize;
+    std::function<void()> onSwingDragStart, onSwingDragEnd;
+};
+
 MainComponent::MainComponent()
 {
     setLookAndFeel(&theme);
@@ -1570,7 +1792,8 @@ MainComponent::MainComponent()
              &panic, &keyboard, &pianoRoll, &play, &stop, &record, &ideaButton, &undo, &redo, &newProject,
              &open, &save, &saveAs, &exportButton, &clear, &demo, &tempo, &drumSequencer,
              &audioTab, &mute, &solo, &trackVolume, &repeatBar, &kitButton, &outputMeter,
-             &loopView, &songView, &duplicatePattern, &themeButton })
+             &loopView, &songView, &duplicatePattern, &themeButton, &grooveButton,
+             &keyButton, &chordButton, &rampButton })
         addAndMakeVisible(component);
     for (auto* component : std::initializer_list<juce::Component*> { &songTemplate, &partChoice, &partTrackOn, &partHint })
         addChildComponent(component);
@@ -1709,7 +1932,8 @@ MainComponent::MainComponent()
              &play, &stop, &record, &ideaButton, &panic, &audioSettings, &undo, &redo,
              &newProject, &open, &save, &saveAs, &exportButton, &clear, &demo, &duplicatePattern,
              &audioTab, &mute, &solo, &repeatBar, &kitButton,
-             &loopView, &songView, &partTrackOn, &themeButton })
+             &loopView, &songView, &partTrackOn, &themeButton, &grooveButton,
+             &keyButton, &chordButton, &rampButton })
         button->setWantsKeyboardFocus(false);
     for (int i = 0; i < numPatterns; ++i)
     {
@@ -1721,6 +1945,64 @@ MainComponent::MainComponent()
         tab.onClick = [this, i] { selectPattern(i); };
         tab.setTooltip("Edit pattern slot. Loop mode previews the selected slot.");
     }
+    grooveButton.setTooltip("Groove for the selected track: swing playback, quantize or humanize the loop (undoable).");
+    keyButton.setTooltip("Song key and scale. New notes snap to the key; the AI writes in key too.");
+    keyButton.onClick = [this] {
+        auto panel = std::make_unique<KeyPanel>(
+            [this](int key, int scale) {
+                beginEdit();
+                project.musicKey = std::clamp(key, 0, 11);
+                project.musicScale = static_cast<MusicScale>(std::clamp(
+                    scale, 0, static_cast<int>(MusicScale::numScales) - 1));
+                refreshKeyButton();
+                projectChanged();
+                endEdit();
+            },
+            [this](bool snap) {
+                snapScale = snap;
+                pianoRoll.setScale(project.musicKey, project.musicScale, snap);
+            });
+        panel->refresh(project.musicKey, static_cast<int>(project.musicScale), snapScale);
+        juce::CallOutBox::launchAsynchronously(std::move(panel), keyButton.getScreenBounds(), this);
+    };
+    chordButton.setClickingTogglesState(true);
+    chordButton.setTooltip("One-finger chords: pick a type, then click the piano roll to stamp it. Click again to disarm.");
+    chordButton.onClick = [this] {
+        if (pianoRoll.isChordArmed())
+        {
+            pianoRoll.setChordArmed(false, ChordType::Major);
+            chordButton.setToggleState(false, juce::dontSendNotification);
+            chordButton.setButtonText("Chord");
+            return;
+        }
+        auto panel = std::make_unique<ChordPanel>([this](int chord) {
+            const auto type = static_cast<ChordType>(std::clamp(
+                chord, 0, static_cast<int>(ChordType::numChords) - 1));
+            pianoRoll.setChordArmed(true, type);
+            chordButton.setToggleState(true, juce::dontSendNotification);
+            chordButton.setButtonText(juce::String(chordName(type)));
+        });
+        panel->refresh(pianoRoll.isChordArmed());
+        juce::CallOutBox::launchAsynchronously(std::move(panel), chordButton.getScreenBounds(), this);
+    };
+    rampButton.setTooltip("Velocity ramp: fade the loop's velocities from quiet to loud (undoable).");
+    rampButton.onClick = [this] {
+        auto panel = std::make_unique<RampPanel>([this](int startVel, int endVel) {
+            applyVelocityRampToSelected(startVel, endVel);
+        });
+        juce::CallOutBox::launchAsynchronously(std::move(panel), rampButton.getScreenBounds(), this);
+    };
+    grooveButton.onClick = [this] {
+        auto panel = std::make_unique<GroovePanel>(
+            [this](float value) { setTrackSwing(value); },
+            [this] { beginEdit(); },
+            [this] { endEdit(); },
+            [this](float strength) { applyQuantize(strength); },
+            [this](float amount) { applyHumanize(amount); });
+        const auto sel = static_cast<std::size_t>(selectedTrack);
+        panel->refresh(project.tracks[sel].swing, drumsSelected);
+        juce::CallOutBox::launchAsynchronously(std::move(panel), grooveButton.getScreenBounds(), this);
+    };
     duplicatePattern.setTooltip("Copy the selected pattern into the next slot and edit it (undoable).");
     duplicatePattern.onClick = [this] {
         beginEdit();
@@ -2698,11 +2980,16 @@ void MainComponent::projectChanged()
         patternTabs[static_cast<std::size_t>(i)].setVisible(!audioSelected);
     }
     duplicatePattern.setVisible(!audioSelected);
+    grooveButton.setVisible(!audioSelected);
+    keyButton.setVisible(!audioSelected);
+    chordButton.setVisible(!audioSelected && !drumsSelected);
+    rampButton.setVisible(!audioSelected && !drumsSelected);
     for (int track = 0; track < maxTracks; ++track)
         engine.setLoopSelection(track, trackMelodySlot[static_cast<std::size_t>(track)],
                                 trackDrumSlot[static_cast<std::size_t>(track)]);
     engine.setLoopSelection(selectedTrack, trackMelodySlot[sel], trackDrumSlot[sel]);
     tempo.setValue(project.bpm, juce::dontSendNotification);
+    refreshKeyButton();
     pendingPublish = !engine.submit(project);
     int totalNotes = 0, totalHits = 0;
     for (const auto& track : project.tracks)
@@ -2756,6 +3043,70 @@ void MainComponent::selectTrack(bool drums)
         }
 }
 
+void MainComponent::setTrackSwing(float swing)
+{
+    const auto sel = static_cast<std::size_t>(selectedTrack);
+    auto& track = project.tracks[sel];
+    if (track.kind == TrackKind::None)
+        return;
+    const bool ownGesture = !editing;
+    if (ownGesture)
+        beginEdit();
+    track.swing = std::clamp(swing, 0.0f, maxSwing);
+    projectChanged();
+    if (ownGesture)
+        endEdit();
+}
+
+void MainComponent::applyQuantize(float strength)
+{
+    const auto sel = static_cast<std::size_t>(selectedTrack);
+    auto& track = project.tracks[sel];
+    if (track.kind != TrackKind::Synth || audioSelected)
+        return;
+    beginEdit();
+    quantizePattern(track.melodies[static_cast<std::size_t>(trackMelodySlot[sel])],
+                    strength);
+    projectChanged();
+    endEdit();
+}
+
+void MainComponent::applyVelocityRampToSelected(int startVel, int endVel)
+{
+    const auto sel = static_cast<std::size_t>(selectedTrack);
+    auto& track = project.tracks[sel];
+    if (track.kind != TrackKind::Synth || audioSelected)
+        return;
+    beginEdit();
+    applyVelocityRamp(track.melodies[static_cast<std::size_t>(trackMelodySlot[sel])], startVel, endVel);
+    projectChanged();
+    endEdit();
+}
+
+void MainComponent::refreshKeyButton()
+{
+    keyButton.setButtonText("Key: " + juce::String(keyName(project.musicKey)) + " "
+                            + scaleName(project.musicScale));
+    pianoRoll.setScale(project.musicKey, project.musicScale, snapScale);
+}
+
+void MainComponent::applyHumanize(float amount)
+{
+    const auto sel = static_cast<std::size_t>(selectedTrack);
+    auto& track = project.tracks[sel];
+    if (track.kind == TrackKind::None || audioSelected)
+        return;
+    beginEdit();
+    std::random_device seedSource;
+    const auto seed = seedSource();
+    if (track.kind == TrackKind::Drums)
+        humanizeDrums(track.drumPatterns[static_cast<std::size_t>(trackDrumSlot[sel])], amount, seed);
+    else
+        humanizePattern(track.melodies[static_cast<std::size_t>(trackMelodySlot[sel])], amount, amount, seed);
+    projectChanged();
+    endEdit();
+}
+
 void MainComponent::selectTrackIndex(int track)
 {
     if (track < 0 || track >= maxTracks)
@@ -2800,6 +3151,10 @@ void MainComponent::selectChannel(int channel)
     clear.setVisible(!audio);
     demo.setVisible(!audio);
     duplicatePattern.setVisible(!audio);
+    grooveButton.setVisible(!audio);
+    keyButton.setVisible(!audio);
+    chordButton.setVisible(!audio && !drums);
+    rampButton.setVisible(!audio && !drums);
     kitButton.setVisible(drumsSelected);
     for (int i = 0; i < numPatterns; ++i)
     {
@@ -4781,6 +5136,10 @@ void MainComponent::resized()
     for (int i = 0; i < numPatterns; ++i)
         patternTabs[static_cast<std::size_t>(i)].setBounds(330 + i * 36, 256, 32, 28);
     duplicatePattern.setBounds(480, 256, 60, 28);
+    grooveButton.setBounds(546, 256, 70, 28);
+    keyButton.setBounds(622, 256, 96, 28);
+    chordButton.setBounds(724, 256, 70, 28);
+    rampButton.setBounds(800, 256, 64, 28);
     pianoRoll.setBounds(254, 354, contentWidth() - 292, getHeight() - 634);
     drumSequencer.setBounds(pianoRoll.getBounds());
     if (audioView != nullptr)

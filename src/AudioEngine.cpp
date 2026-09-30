@@ -288,7 +288,8 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
                     [this, track, start = block.startSample](int pad, std::uint8_t velocity, int offset) {
                         units[static_cast<std::size_t>(track)].events.addEvent(
                             juce::MidiMessage::noteOn(10, drumBaseNote + pad, velocity), start + offset);
-                    });
+                    },
+                    active.tracks[static_cast<std::size_t>(track)].swing);
             }
         }
         auto emitNote = [this, start = block.startSample](int track, const Note& note, bool on, int offset) {
@@ -315,6 +316,7 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
                     loopMelodySlots[trackIndex].load(), 0, numPatterns - 1);
                 const int loopDrums = std::clamp(
                     loopDrumSlots[trackIndex].load(), 0, numPatterns - 1);
+                const float swing = active.tracks[trackIndex].swing;
                 if (kind == TrackKind::Synth)
                     scheduler.processLoopAt(active.tracks[static_cast<std::size_t>(track)].melodies[
                                                 static_cast<std::size_t>(loopMelody)],
@@ -322,7 +324,8 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
                                             blockStartPosition,
                                             [this, track, &emitNote](const Note& note, bool on, int offset) {
                                                 emitNote(track, note, on, offset);
-                                            });
+                                            },
+                                            swing);
                 else
                 {
                     scheduler.scheduleDrumsAt(active.tracks[static_cast<std::size_t>(track)].drumPatterns[
@@ -331,7 +334,8 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
                         [this, track, start = block.startSample](int pad, std::uint8_t velocity, int offset) {
                             units[static_cast<std::size_t>(track)].events.addEvent(
                                 juce::MidiMessage::noteOn(10, drumBaseNote + pad, velocity), start + offset);
-                        });
+                        },
+                        swing);
                 }
             }
             scheduler.advance(block.numSamples);

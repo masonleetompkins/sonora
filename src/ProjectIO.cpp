@@ -339,11 +339,12 @@ std::unique_ptr<juce::DynamicObject> encodeTrackState(const Track& track)
         samples.add(padSampleName(slot));
     object->setProperty("samples", samples);
     object->setProperty("kitVariant", track.kitVariant);
+    object->setProperty("swing", static_cast<double>(track.swing));
     return object;
 }
 
 juce::Result decodeTrackState(const juce::var& value, Track& track, bool requirePreset, bool requireSynth,
-                              bool requireExtendedFx)
+                              bool requireExtendedFx, bool requireGroove)
 {
     const auto* object = value.getDynamicObject();
     if (object == nullptr)
@@ -426,6 +427,13 @@ juce::Result decodeTrackState(const juce::var& value, Track& track, bool require
             return juce::Result::fail("Kit sample name too long.");
         setPadSampleName(candidate.padSamples[static_cast<std::size_t>(pad)], sample);
     }
+    if (requireGroove)
+    {
+        const auto swing = object->getProperty("swing");
+        if (!number(swing) || static_cast<float>(swing) < 0.0f || static_cast<float>(swing) > maxSwing)
+            return juce::Result::fail("Track swing out of range.");
+        candidate.swing = static_cast<float>(swing);
+    }
     const auto variant = object->getProperty("kitVariant");
     if (!integer(variant) || static_cast<juce::int64>(variant) < 0
         || static_cast<juce::int64>(variant) >= numKitVariants)
@@ -442,8 +450,10 @@ juce::String ProjectIO::encode(const ProjectState& state)
 {
     auto root = std::make_unique<juce::DynamicObject>();
     root->setProperty("format", "sonora-project");
-    root->setProperty("version", 13);
+    root->setProperty("version", 15);
     root->setProperty("bpm", state.bpm);
+    root->setProperty("musicKey", state.musicKey);
+    root->setProperty("musicScale", static_cast<int>(state.musicScale));
     root->setProperty("songMode", state.songMode);
     juce::DynamicObject* song = new juce::DynamicObject();
     song->setProperty("sections", state.song.sections);
@@ -702,7 +712,7 @@ juce::Result ProjectIO::decode(const juce::String& json, ProjectState& destinati
     if (!integer(version))
         return juce::Result::fail("Unsupported project version.");
     const auto versionNumber = static_cast<juce::int64>(version);
-    if (versionNumber < 1 || versionNumber > 13)
+    if (versionNumber < 1 || versionNumber > 15)
         return juce::Result::fail("Unsupported project version.");
     if (!integer(root->getProperty("ticksPerQuarter")) || !integer(root->getProperty("lengthTicks"))
         || static_cast<juce::int64>(root->getProperty("ticksPerQuarter")) != ticksPerQuarter
@@ -713,6 +723,17 @@ juce::Result ProjectIO::decode(const juce::String& json, ProjectState& destinati
         return juce::Result::fail("Invalid tempo.");
     ProjectState candidate;
     candidate.bpm = static_cast<double>(tempo);
+    if (versionNumber >= 15)
+    {
+        const auto key = root->getProperty("musicKey"), scale = root->getProperty("musicScale");
+        if (!integer(key) || !integer(scale) || static_cast<juce::int64>(key) < 0
+            || static_cast<juce::int64>(key) > 11
+            || static_cast<juce::int64>(scale) < 0
+            || static_cast<juce::int64>(scale) >= static_cast<juce::int64>(MusicScale::numScales))
+            return juce::Result::fail("Invalid song key.");
+        candidate.musicKey = static_cast<int>(key);
+        candidate.musicScale = static_cast<MusicScale>(static_cast<int>(scale));
+    }
     if (versionNumber == 1)
     {
         // Version 1 is the original melody-only document. Start from the
@@ -781,7 +802,7 @@ juce::Result ProjectIO::decode(const juce::String& json, ProjectState& destinati
         for (int track = 0; track < maxTracks; ++track)
         {
             result = decodeTrackState((*tracks)[track], candidate.tracks[static_cast<std::size_t>(track)],
-                                      versionNumber >= 10, versionNumber >= 11, versionNumber >= 12);
+                                      versionNumber >= 10, versionNumber >= 11, versionNumber >= 12, versionNumber >= 14);
             if (result.failed())
                 return result;
         }

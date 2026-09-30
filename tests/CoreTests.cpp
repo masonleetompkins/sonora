@@ -214,6 +214,165 @@ void testTiming()
     require(scheduler.tickPosition() == 0.0, "rewind failed");
 }
 
+void testGroove()
+{
+    // Swing helper: even 16ths stay, odd 16ths delay, zero swing is identity.
+    require(sonora::swingTicks(0, 0.0f) == 0, "swing changed an even step");
+    require(sonora::swingTicks(4 * sonora::stepTicks, 0.5f) == 4 * sonora::stepTicks,
+            "swing changed an even step");
+    require(sonora::swingTicks(sonora::stepTicks, 0.5f)
+                == sonora::stepTicks + sonora::stepTicks / 2,
+            "swing delay wrong");
+    require(sonora::swingTicks(5 * sonora::stepTicks, 0.0f) == 5 * sonora::stepTicks,
+            "zero swing not identity");
+
+    // Quantize: full strength snaps to grid, zero leaves untouched, partial
+    // interpolates, and the result is always a valid pattern.
+    sonora::Pattern loose;
+    loose.count = 3;
+    loose.notes[0] = { 1, 100, 240, 60, 100 };
+    loose.notes[1] = { 2, 500, 240, 62, 100 };
+    loose.notes[2] = { 3, 300, 240, 60, 100 };
+    auto untouched = loose;
+    sonora::quantizePattern(loose, 0.0f);
+    require(loose == untouched, "zero-strength quantize moved notes");
+    sonora::quantizePattern(loose, 1.0f);
+    require(loose.valid(), "quantized pattern invalid");
+    for (int i = 0; i < loose.count; ++i)
+        require(loose.notes[static_cast<std::size_t>(i)].start % sonora::stepTicks == 0,
+                "quantize missed the grid");
+    auto half = untouched;
+    sonora::quantizePattern(half, 0.5f);
+    require(half.valid(), "half quantize invalid");
+    require(half.notes[0].start > 0 && half.notes[0].start < sonora::stepTicks,
+            "half quantize did not interpolate");
+
+    // Humanize is seeded (same seed, same result) and stays valid; drums
+    // keep their steps and only gain velocity wander.
+    auto human = untouched;
+    sonora::humanizePattern(human, 0.5f, 0.5f, 1234u);
+    auto humanAgain = untouched;
+    sonora::humanizePattern(humanAgain, 0.5f, 0.5f, 1234u);
+    require(human == humanAgain, "humanize not reproducible");
+    require(human.valid(), "humanized pattern invalid");
+    require(!(human == untouched), "humanize changed nothing");
+    sonora::DrumPattern drums;
+    drums.steps[0][0] = 100;
+    drums.steps[1][16] = 90;
+    auto drumsAgain = drums;
+    sonora::humanizeDrums(drums, 0.5f, 99u);
+    require(drums.valid(), "humanized drums invalid");
+    require(drums.steps[0][0] != 100 || drums.steps[1][16] != 90, "drum humanize changed nothing");
+    sonora::humanizeDrums(drumsAgain, 0.0f, 99u);
+    require(drumsAgain.steps[0][0] == 100, "zero humanize touched drums");
+
+    // Scheduler: swung odd steps land late in both loop and song mode.
+    {
+        sonora::LoopScheduler scheduler;
+        scheduler.configure(48000.0, 120.0);
+        sonora::DrumPattern kick;
+        kick.steps[0][0] = 100;
+        kick.steps[0][1] = 100;
+        std::vector<int> straight, swung;
+        scheduler.scheduleDrumsAt(kick, 200000, 0, [&](int, std::uint8_t, int offset) {
+            straight.push_back(offset);
+        });
+        scheduler.scheduleDrumsAt(kick, 200000, 0, [&](int, std::uint8_t, int offset) {
+            swung.push_back(offset);
+        }, 0.5f);
+        require(straight.size() == 2 && swung.size() == 2, "swing dropped hits");
+        require(swung[0] == straight[0], "swing moved an even step");
+        // 0.5 swing delays the offbeat by half a 16th: 120 ticks at 25 frames
+        // per tick (48 kHz, 120 BPM).
+        require(swung[1] - straight[1] == 120 * 25, "swing offset wrong");
+    }
+
+    // Engine: a lone offbeat hit renders a full swung delay later.
+    {
+        auto render = [](float swing) {
+            sonora::AudioEngine engine;
+            engine.prepare(48000.0);
+            auto project = fixture();
+            project.tracks[0].melodies[0] = {};
+            project.tracks[1].drumPatterns[0] = {};
+            project.tracks[1].drumPatterns[0].steps[0][1] = 110;
+            project.tracks[1].swing = swing;
+            require(engine.submit(project), "groove project rejected");
+            engine.setPlaying(true);
+            juce::AudioBuffer<float> buffer(2, 512);
+            int firstAudible = -1;
+            for (int i = 0; i < 60; ++i)
+            {
+                buffer.clear();
+                engine.process({ &buffer, 0, 512 });
+                if (firstAudible < 0 && buffer.getMagnitude(0, 512) > 0.02f)
+                    firstAudible = i;
+            }
+            return firstAudible;
+        };
+        const int straight = render(0.0f), swung = render(0.5f);
+        require(straight >= 0 && swung >= 0, "groove probe silent");
+        // Step 1 sits at 6000 samples (block 11); +3000 swung samples lands
+        // six blocks later.
+        require(straight == 11, "straight offbeat at wrong block");
+        require(swung == straight + 6, "engine swing delay wrong");
+    }
+}
+
+void testKeyTools()
+{
+    using sonora::MusicScale;
+    // Membership across a few scales.
+    require(sonora::pitchInScale(60, 0, MusicScale::Major), "C not in C major");
+    require(!sonora::pitchInScale(61, 0, MusicScale::Major), "C# in C major");
+    require(sonora::pitchInScale(61, 9, MusicScale::Major), "C# not in A major");
+    require(!sonora::pitchInScale(63, 9, MusicScale::Major), "Eb tritone accepted in A major");
+    require(sonora::pitchInScale(60, 0, MusicScale::NaturalMinor), "C not in C minor");
+    require(!sonora::pitchInScale(64, 0, MusicScale::NaturalMinor), "E natural in C minor");
+    require(sonora::pitchInScale(66, 0, MusicScale::Blues), "Gb not in C blues");
+    require(sonora::pitchInScale(69, 0, MusicScale::MajorPentatonic), "A missing from C major pentatonic");
+    require(!sonora::pitchInScale(70, 0, MusicScale::MajorPentatonic), "Bb in C major pentatonic");
+    // Snapping: nearest, ties up, edges clamp.
+    require(sonora::snapPitchToScale(61, 0, MusicScale::Major) == 62, "snap tie did not go up");
+    require(sonora::snapPitchToScale(63, 0, MusicScale::Major) == 64, "snap wrong");
+    require(sonora::snapPitchToScale(60, 0, MusicScale::Major) == 60, "in-scale snap moved");
+    require(sonora::snapPitchToScale(-5, 0, MusicScale::Major) == 0, "low snap unclamped");
+    require(sonora::snapPitchToScale(200, 0, MusicScale::Major) == 127, "high snap unclamped");
+    require(sonora::snapPitchToScale(63, 2, MusicScale::Major) == 64, "snap ignored key");
+    // Chord voicings, low roots keep every tone in range.
+    const auto maj = sonora::chordPitches(60, sonora::ChordType::Major);
+    require(maj == std::vector<int>({ 60, 64, 67 }), "major voicing wrong");
+    const auto min7 = sonora::chordPitches(60, sonora::ChordType::Min7);
+    require(min7 == std::vector<int>({ 60, 63, 67, 70 }), "min7 voicing wrong");
+    const auto top = sonora::chordPitches(127, sonora::ChordType::Major);
+    require(top == std::vector<int>({ 127 }), "high root kept out-of-range tones");
+    // Velocity ramp interpolates first-to-last across start order.
+    sonora::Pattern ramp;
+    ramp.count = 4;
+    ramp.notes[0] = { 1, 3000, 240, 60, 10 };
+    ramp.notes[1] = { 2, 0, 240, 62, 20 };
+    ramp.notes[2] = { 3, 1000, 240, 64, 30 };
+    ramp.notes[3] = { 4, 2000, 240, 65, 40 };
+    sonora::applyVelocityRamp(ramp, 60, 100);
+    require(ramp.notes[1].velocity == 60 && ramp.notes[2].velocity == 73
+            && ramp.notes[3].velocity == 87 && ramp.notes[0].velocity == 100,
+            "ramp order or interpolation wrong");
+    require(ramp.valid(), "ramped pattern invalid");
+    sonora::applyVelocityRamp(ramp, 300, -50);
+    for (int i = 0; i < ramp.count; ++i)
+        require(ramp.notes[static_cast<std::size_t>(i)].velocity >= 1
+                && ramp.notes[static_cast<std::size_t>(i)].velocity <= 127,
+                "ramp escaped velocity range");
+    sonora::Pattern single;
+    single.count = 1;
+    single.notes[0] = { 1, 0, 240, 60, 64 };
+    sonora::applyVelocityRamp(single, 90, 100);
+    require(single.notes[0].velocity == 90, "single-note ramp wrong");
+    sonora::Pattern empty;
+    sonora::applyVelocityRamp(empty, 0, 127);
+    require(empty.count == 0, "ramp created notes");
+}
+
 void testPersistence()
 {
     const auto original = fixture();
@@ -224,9 +383,9 @@ void testPersistence()
     require(sonora::ProjectIO::decode("{broken json", loaded).failed(), "malformed JSON accepted");
     require(loaded == good, "failed load mutated the project");
     auto json = sonora::ProjectIO::encode(original);
-    require(sonora::ProjectIO::decode(json.replace("\"version\": 13", "\"version\": 14"), loaded).failed(),
+    require(sonora::ProjectIO::decode(json.replace("\"version\": 15", "\"version\": 16"), loaded).failed(),
             "unknown version accepted");
-    require(sonora::ProjectIO::decode(json.replace("\"version\": 13", "\"version\": 4294967297"), loaded).failed(),
+    require(sonora::ProjectIO::decode(json.replace("\"version\": 15", "\"version\": 4294967297"), loaded).failed(),
             "overflowed version accepted");
     require(sonora::ProjectIO::decode(json.replace("\"velocity\": 100", "\"velocity\": 0"), loaded).failed(),
             "zero velocity accepted");
@@ -948,7 +1107,7 @@ void testFxPersistence()
     original.master.releaseMs = 120.0f;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 13"), "projects must save as v13");
+    require(json.contains("\"version\": 15"), "projects must save as v15");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "fx round-trip changed parameters");
 
@@ -1023,7 +1182,7 @@ void testTakePersistence()
     original.takes[1].mute = true;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 13"), "take projects must save as v13");
+    require(json.contains("\"version\": 15"), "take projects must save as v15");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "take round-trip changed metadata");
 
@@ -1449,7 +1608,7 @@ void testVariations()
     original.song.sections = 4;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 13"), "variation projects must save as v13");
+    require(json.contains("\"version\": 15"), "variation projects must save as v15");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "variation round-trip changed slots or indices");
 
@@ -1714,7 +1873,7 @@ void testKitPersistence()
     original.tracks[1].kitVariant = 1;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 13"), "kit projects must save as v13");
+    require(json.contains("\"version\": 15"), "kit projects must save as v15");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "kit round-trip changed pad samples");
     // Version 6 documents migrate to the built-in kit.
@@ -2080,7 +2239,7 @@ void testInstruments()
     saved.tracks[2].instrumentPreset = 16;
     const auto json = sonora::ProjectIO::encode(saved);
     sonora::ProjectState loaded;
-    require(json.contains("\"version\": 13"), "instrument projects must save as v13");
+    require(json.contains("\"version\": 15"), "instrument projects must save as v15");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "instrument round-trip failed");
     auto legacy = juce::JSON::parse(json);
     legacy.getDynamicObject()->setProperty("version", 9);
@@ -2237,7 +2396,7 @@ void testSynthEngine()
     saved.tracks[0].synth = sonora::synthPatches()[3].params;
     const auto json = sonora::ProjectIO::encode(saved);
     sonora::ProjectState loaded;
-    require(json.contains("\"version\": 13"), "synth projects must save as v13");
+    require(json.contains("\"version\": 15"), "synth projects must save as v15");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "synth round-trip failed");
     auto legacy = juce::JSON::parse(json);
     legacy.getDynamicObject()->setProperty("version", 10);
@@ -2393,7 +2552,7 @@ void testKnobs()
     saved.tracks[0].fx.chorus = { 0.4f, 1.2f, 0.8f, false };
     const auto json = sonora::ProjectIO::encode(saved);
     sonora::ProjectState loaded;
-    require(json.contains("\"version\": 13"), "fx projects must save as v13");
+    require(json.contains("\"version\": 15"), "fx projects must save as v15");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "drive/chorus round-trip failed");
     auto legacy = juce::JSON::parse(json);
     legacy.getDynamicObject()->setProperty("version", 11);
@@ -2782,7 +2941,7 @@ void testSongComposition()
     saved.song.insertSection(pop.sections, 0);
     const auto json = sonora::ProjectIO::encode(saved);
     sonora::ProjectState loaded;
-    require(json.contains("\"version\": 13"), "song projects must save as v13");
+    require(json.contains("\"version\": 15"), "song projects must save as v15");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "song parts round-trip failed");
     auto big = project;
     big.song.sections = sonora::maxSections;
@@ -2798,7 +2957,65 @@ void testSongComposition()
     require(sonora::ProjectIO::decode(juce::JSON::toString(badPart), loaded).failed(), "unknown part accepted");
     auto shortRows = juce::JSON::parse(json);
     toPreV13Song(shortRows);
-    require(sonora::ProjectIO::decode(juce::JSON::toString(shortRows), loaded).failed(), "v13 with 8 rows accepted");
+    require(sonora::ProjectIO::decode(juce::JSON::toString(shortRows), loaded).failed(), "v15 with 8 rows accepted");
+
+    // v14 persists per-track swing; v13 files open straight.
+    auto swung = project;
+    swung.tracks[0].swing = 0.25f;
+    swung.tracks[1].swing = 0.5f;
+    const auto swingJson = sonora::ProjectIO::encode(swung);
+    require(sonora::ProjectIO::decode(swingJson, loaded).wasOk() && loaded == swung
+            && loaded.tracks[0].swing == 0.25f, "swing round-trip failed");
+    auto legacySwing = juce::JSON::parse(swingJson);
+    legacySwing.getDynamicObject()->setProperty("version", 13);
+    require(sonora::ProjectIO::decode(juce::JSON::toString(legacySwing), loaded).wasOk()
+            && loaded.tracks[0].swing == 0.0f, "v13 did not open with straight swing");
+    auto badSwing = juce::JSON::parse(swingJson);
+    badSwing.getDynamicObject()->getProperty("tracks").getArray()->getReference(0)
+        .getDynamicObject()->setProperty("swing", 2.0);
+    loaded = swung;
+    require(sonora::ProjectIO::decode(juce::JSON::toString(badSwing), loaded).failed(), "over-range swing accepted");
+    require(loaded == swung, "bad swing destroyed current state");
+    auto missingSwing = juce::JSON::parse(swingJson);
+    missingSwing.getDynamicObject()->getProperty("tracks").getArray()->getReference(0)
+        .getDynamicObject()->removeProperty("swing");
+    loaded = swung;
+    require(sonora::ProjectIO::decode(juce::JSON::toString(missingSwing), loaded).failed(), "v15 without swing accepted");
+    auto invalidSwing = swung;
+    invalidSwing.tracks[0].swing = -0.5f;
+    require(!invalidSwing.valid(), "negative swing validated");
+
+    // v15 persists the song key; older files open in C major.
+    auto keyed = project;
+    keyed.musicKey = 9;
+    keyed.musicScale = sonora::MusicScale::Dorian;
+    const auto keyJson = sonora::ProjectIO::encode(keyed);
+    require(sonora::ProjectIO::decode(keyJson, loaded).wasOk() && loaded == keyed
+            && loaded.musicKey == 9
+            && juce::String(sonora::scaleName(loaded.musicScale)) == "Dorian", "key round-trip failed");
+    auto legacyKey = juce::JSON::parse(keyJson);
+    legacyKey.getDynamicObject()->setProperty("version", 14);
+    legacyKey.getDynamicObject()->removeProperty("musicKey");
+    legacyKey.getDynamicObject()->removeProperty("musicScale");
+    require(sonora::ProjectIO::decode(juce::JSON::toString(legacyKey), loaded).wasOk()
+            && loaded.musicKey == 0 && loaded.musicScale == sonora::MusicScale::Major,
+            "v14 did not open in C major");
+    auto badKey = juce::JSON::parse(keyJson);
+    badKey.getDynamicObject()->setProperty("musicKey", 12);
+    loaded = keyed;
+    require(sonora::ProjectIO::decode(juce::JSON::toString(badKey), loaded).failed(), "out-of-range key accepted");
+    require(loaded == keyed, "bad key destroyed current state");
+    auto badScale = juce::JSON::parse(keyJson);
+    badScale.getDynamicObject()->setProperty("musicScale", 99);
+    loaded = keyed;
+    require(sonora::ProjectIO::decode(juce::JSON::toString(badScale), loaded).failed(), "unknown scale accepted");
+    auto missingKey = juce::JSON::parse(keyJson);
+    missingKey.getDynamicObject()->removeProperty("musicKey");
+    loaded = keyed;
+    require(sonora::ProjectIO::decode(juce::JSON::toString(missingKey), loaded).failed(), "v15 without key accepted");
+    auto invalidKey = keyed;
+    invalidKey.musicKey = -1;
+    require(!invalidKey.valid(), "negative key validated");
 
     // Play from a part: only part 3 has the melody switched on.
     auto songProject = project;
@@ -3127,6 +3344,8 @@ int main()
     try
     {
         testTiming(); std::cout << "PASS sample-accurate looping, boundaries, chase, tempo\n";
+        testGroove(); std::cout << "PASS swing timing, quantize, humanize, engine groove\n";
+        testKeyTools(); std::cout << "PASS scales, snap, chords, velocity ramp\n";
                 testFx(); std::cout << "PASS fx transparency, EQ/comp/delay/verb/limiter behavior, validation\n";
         testFxPersistence(); std::cout << "PASS v4 fx round-trip, v3 migration, malformed fx, effected export\n";
         testTakePersistence(); std::cout << "PASS v5 take round-trip, v4 migration, malformed takes, latency math\n";

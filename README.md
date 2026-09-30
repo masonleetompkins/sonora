@@ -117,6 +117,11 @@ a fallback or for direct hardware access.
   which loop the track uses there.
 - Per-track Drive (overdrive with tone control) and stereo Chorus effects, in
   a Drive -> EQ -> Compressor -> Chorus -> Delay -> Reverb chain.
+- Groove per track: non-destructive swing on playback plus undoable quantize
+  and seeded humanize edits, from the Groove button by the pattern tabs.
+- Song key and scale (Key button): new notes snap to key, out-of-key rows
+  dim in the piano roll, one-finger chord stamps (Chord button), velocity
+  ramps (Ramp button), and the AI writes in key too.
 - AI assistant sidebar (AI assistant button or Ctrl+I): chat with Claude on
   the right while you work. It writes or edits the selected track's melody
   or drum beat, sees the whole song structure and the other tracks in the
@@ -284,8 +289,10 @@ sample import and kit browsing are still to come. See `ASSETS.md` for provenance
 
 Save projects as `*.sonora.json`. Format v10 adds each synth track's
 instrument preset, v11 adds each track's synth patch, and v12 adds per-track
-drive and chorus, and v13 adds named song parts and 16-part songs; older projects open
-with Sine Keys and the default sine patch. It contains tempo, timing metadata, two
+drive and chorus, v13 adds named song parts and 16-part songs, and v14 adds
+per-track swing; older projects open
+with Sine Keys and the default sine patch. Format v15 adds the song-wide
+key and scale (older projects open in C major). It contains tempo, timing metadata, two
 stable track IDs/instrument identifiers, track mix settings, per-track effect
 chains, master limiter settings, four melody patterns and four drum patterns
 per track, per-pad custom sample filenames, the factory kit variant, audio take

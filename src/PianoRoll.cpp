@@ -62,6 +62,30 @@ void PianoRoll::setLiveNotes(const std::vector<int>& notes)
     repaint();
 }
 
+void PianoRoll::setScale(int key, MusicScale value, bool snap)
+{
+    scaleKey = std::clamp(key, 0, 11);
+    scale = value < MusicScale::numScales ? value : MusicScale::Major;
+    snapToScale = snap;
+    repaint();
+}
+
+void PianoRoll::setChordArmed(bool armed, ChordType type)
+{
+    chordArmed = armed;
+    chordType = type < ChordType::numChords ? type : ChordType::Major;
+    repaint();
+}
+
+std::uint32_t PianoRoll::nextNoteId(const Pattern& in)
+{
+    std::uint32_t nextId = 1;
+    while (std::any_of(in.notes.begin(), in.notes.begin() + in.count,
+                      [nextId](const Note& note) { return note.id == nextId; }))
+        ++nextId;
+    return nextId;
+}
+
 void PianoRoll::setPattern(const Pattern& value)
 {
     pattern = value;
@@ -129,6 +153,11 @@ void PianoRoll::paint(juce::Graphics& g)
         g.setColour(ui::uiDark ? juce::Colour(black ? 0xff0c1420 : 0xff111c29)
                                : juce::Colour(black ? 0xffe9e2d2 : 0xffffffff));
         g.fillRect(area.getX(), y, area.getWidth(), row - 1.0f);
+        if (snapToScale && !pitchInScale(pitch, scaleKey, scale))
+        {
+            g.setColour(ui::background.withAlpha(ui::uiDark ? 0.55f : 0.45f));
+            g.fillRect(area.getX(), y, area.getWidth(), row - 1.0f);
+        }
         g.setColour(black ? ui::background.darker(ui::uiDark ? 0.0f : 0.12f) : ui::raised);
         g.fillRoundedRectangle(2, y + 0.5f, black ? 37.0f : 45.0f, row - 1.0f, 2);
         if (key == 0)
@@ -288,16 +317,56 @@ void PianoRoll::mouseDown(const juce::MouseEvent& event)
         publish();
         return;
     }
+    if (chordArmed && !event.mods.isRightButtonDown())
+    {
+        // One-finger chord: root at the clicked pitch (snapped first), the
+        // rest stacked above it at the clicked step. Notes colliding with
+        // existing ones are skipped so the pattern stays valid.
+        const int root = snapToScale ? snapPitchToScale(anchorPitch, scaleKey, scale) : anchorPitch;
+        auto candidate = pattern;
+        auto freshId = nextNoteId(candidate);
+        const auto claimId = [&] {
+            while (std::any_of(candidate.notes.begin(), candidate.notes.begin() + candidate.count,
+                               [freshId](const Note& note) { return note.id == freshId; }))
+                ++freshId;
+            return freshId++;
+        };
+        for (const int pitch : chordPitches(root, chordType))
+        {
+            if (candidate.count >= Pattern::capacity)
+                break;
+            const int start = anchorStep * stepTicks;
+            bool collides = false;
+            for (int i = 0; i < candidate.count; ++i)
+            {
+                const auto& n = candidate.notes[static_cast<std::size_t>(i)];
+                if (n.pitch == pitch && start < n.start + n.duration && n.start < start + stepTicks * 4)
+                {
+                    collides = true;
+                    break;
+                }
+            }
+            if (collides)
+                continue;
+            candidate.notes[static_cast<std::size_t>(candidate.count++)] = {
+                claimId(), start, stepTicks * 4, pitch, 100 };
+        }
+        selected = -1;
+        if (candidate.count != pattern.count && candidate.valid())
+        {
+            pattern = candidate;
+            publish();
+        }
+        return;
+    }
     if (selected < 0)
     {
         if (pattern.count == Pattern::capacity)
             return;
-        std::uint32_t nextId = 1;
-        while (std::any_of(pattern.notes.begin(), pattern.notes.begin() + pattern.count,
-                          [nextId](const Note& note) { return note.id == nextId; }))
-            ++nextId;
+        const auto nextId = nextNoteId(pattern);
         selected = pattern.count++;
-        pattern.notes[static_cast<std::size_t>(selected)] = { nextId, anchorStep * stepTicks, stepTicks, anchorPitch, 100 };
+        const int pitch = snapToScale ? snapPitchToScale(anchorPitch, scaleKey, scale) : anchorPitch;
+        pattern.notes[static_cast<std::size_t>(selected)] = { nextId, anchorStep * stepTicks, stepTicks, pitch, 100 };
         resizing = true;
     }
     else
@@ -330,7 +399,8 @@ void PianoRoll::mouseDrag(const juce::MouseEvent& event)
     {
         n.start = juce::jlimit(0, patternTicks - n.duration,
                               anchor.start + (stepAt(event.position.x) - anchorStep) * stepTicks);
-        n.pitch = juce::jlimit(0, 127, anchor.pitch + pitchAt(event.position.y) - anchorPitch);
+        const int raw = juce::jlimit(0, 127, anchor.pitch + pitchAt(event.position.y) - anchorPitch);
+        n.pitch = snapToScale ? snapPitchToScale(raw, scaleKey, scale) : raw;
     }
     if (candidate.valid())
     {

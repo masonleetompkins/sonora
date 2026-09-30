@@ -16,6 +16,9 @@ public:
     void setViewBase(int pitch);
     int getViewBase() const { return viewBase; }
     void setLiveNotes(const std::vector<int>& notes);
+    void setScale(int key, MusicScale scale, bool snap);
+    void setChordArmed(bool armed, ChordType type);
+    bool isChordArmed() const { return chordArmed; }
     std::function<void(const Pattern&)> onPreview;
     std::function<void()> onGestureBegin, onGestureEnd;
     void paint(juce::Graphics&) override;
@@ -40,6 +43,12 @@ private:
     double playhead = -1.0;
     int viewBase = 48;
     std::vector<int> liveNotes;
+    int scaleKey = 0;
+    MusicScale scale = MusicScale::Major;
+    bool snapToScale = true;
+    bool chordArmed = false;
+    ChordType chordType = ChordType::Major;
+    static std::uint32_t nextNoteId(const Pattern& in);
     juce::TextButton octaveDown { "- oct" }, octaveUp { "+ oct" };
     // Slim custom scrollbar (matches the theme; avoids ScrollBar API churn).
     juce::Rectangle<float> scrollTrack() const;

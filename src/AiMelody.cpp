@@ -364,7 +364,9 @@ juce::String buildUserMessage(const MelodyRequest& request)
         context = context.substring(0, maxContextChars) + "\n    (context truncated)\n";
     const auto& targetTrack = project.tracks[target];
     juce::String message;
-    message << "Write the part for track \"" << cleanText(targetTrack.trackName(), 60) << "\" ("
+    message << "Song key: " << keyName(project.musicKey) << " " << scaleName(project.musicScale)
+            << ". Prefer notes in key; passing tones are fine in small doses.\n\n"
+            << "Write the part for track \"" << cleanText(targetTrack.trackName(), 60) << "\" ("
             << instrumentDescription(targetTrack) << ").\n\n"
             << "Other tracks in the loop:\n" << context << "\n"
             << "The target track's current notes (you are replacing them; use them only as a hint):\n"

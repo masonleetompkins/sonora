@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdint>
 #include <cmath>
+#include <random>
 #include <utility>
 #include <vector>
 
@@ -110,6 +111,238 @@ struct DrumPattern
     bool operator==(const DrumPattern&) const = default;
 };
 
+// Groove toolbox. Swing is non-destructive (a per-track playback offset
+// applied at schedule time); quantize and humanize are destructive edits.
+// Swing delays odd 16th steps by a fraction of one step; 0.1-0.3 is the
+// classic pocket, 0 is straight.
+inline constexpr float maxSwing = 0.75f;
+
+inline int swingTicks(int tick, float swing)
+{
+    if (swing <= 0.0f)
+        return tick;
+    if ((tick / stepTicks) % 2 == 1)
+        return tick + static_cast<int>(std::round(swing * stepTicks));
+    return tick;
+}
+
+// Sort, trim same-pitch overlaps, cap, and reassign ids so a transformed
+// pattern always stays valid (undo restores the original anyway).
+inline void packNotes(Pattern& pattern, std::vector<Note> notes)
+{
+    std::stable_sort(notes.begin(), notes.end(), [](const Note& a, const Note& b) {
+        return std::tie(a.start, a.pitch) < std::tie(b.start, b.pitch);
+    });
+    Pattern packed;
+    for (auto note : notes)
+    {
+        note.duration = std::clamp(note.duration, 1, patternTicks - note.start);
+        bool duplicate = false;
+        for (int i = 0; i < packed.count; ++i)
+        {
+            auto& previous = packed.notes[static_cast<std::size_t>(i)];
+            if (previous.pitch != note.pitch || previous.start + previous.duration <= note.start)
+                continue;
+            if (previous.start == note.start)
+                duplicate = true;
+            else
+                previous.duration = note.start - previous.start;
+        }
+        if (duplicate || packed.count >= Pattern::capacity)
+            continue;
+        note.id = static_cast<std::uint32_t>(packed.count + 1);
+        packed.notes[static_cast<std::size_t>(packed.count++)] = note;
+    }
+    pattern = packed;
+}
+
+// Snap note starts toward the 16th grid. Strength 1 is fully quantized.
+inline void quantizePattern(Pattern& pattern, float strength)
+{
+    strength = std::clamp(strength, 0.0f, 1.0f);
+    if (strength <= 0.0f || pattern.count == 0)
+        return;
+    std::vector<Note> notes(pattern.notes.begin(), pattern.notes.begin() + pattern.count);
+    for (auto& note : notes)
+    {
+        const int snapped = static_cast<int>(std::round(static_cast<double>(note.start) / stepTicks)) * stepTicks;
+        note.start = std::clamp(static_cast<int>(std::round(note.start + (snapped - note.start) * strength)),
+                                0, patternTicks - 1);
+    }
+    packNotes(pattern, std::move(notes));
+}
+
+// Loosen timing (±timing * 60 ticks) and velocity (±velocity * 20).
+// Seeded so results are reproducible (the UI picks a fresh seed per take).
+inline void humanizePattern(Pattern& pattern, float timing, float velocity, std::uint32_t seed)
+{
+    timing = std::clamp(timing, 0.0f, 1.0f);
+    velocity = std::clamp(velocity, 0.0f, 1.0f);
+    if ((timing <= 0.0f && velocity <= 0.0f) || pattern.count == 0)
+        return;
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<float> jitter(-1.0f, 1.0f);
+    std::vector<Note> notes(pattern.notes.begin(), pattern.notes.begin() + pattern.count);
+    for (auto& note : notes)
+    {
+        note.start = std::clamp(static_cast<int>(std::round(note.start + jitter(rng) * timing * 60.0f)),
+                                0, patternTicks - 1);
+        note.velocity = std::clamp(static_cast<int>(std::round(note.velocity + jitter(rng) * velocity * 20.0f)),
+                                   1, 127);
+    }
+    packNotes(pattern, std::move(notes));
+}
+
+// Drums live on the grid, so only velocities wander.
+inline void humanizeDrums(DrumPattern& pattern, float velocity, std::uint32_t seed)
+{
+    velocity = std::clamp(velocity, 0.0f, 1.0f);
+    if (velocity <= 0.0f)
+        return;
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<float> jitter(-1.0f, 1.0f);
+    for (auto& row : pattern.steps)
+        for (auto& cell : row)
+            if (cell > 0)
+                cell = static_cast<std::uint8_t>(std::clamp(
+                    static_cast<int>(std::round(cell + jitter(rng) * velocity * 20.0f)), 1, 127));
+}
+
+// Musical key tools: per-project key/scale, scale membership, snapping,
+// chord voicings, and velocity ramps. Pitch classes are 0-11 (C=0).
+enum class MusicScale : std::uint8_t
+{
+    Major = 0, NaturalMinor, HarmonicMinor, Dorian, MajorPentatonic, MinorPentatonic, Blues, numScales
+};
+
+inline const char* scaleName(MusicScale scale)
+{
+    switch (scale)
+    {
+        case MusicScale::Major: return "Major";
+        case MusicScale::NaturalMinor: return "Natural minor";
+        case MusicScale::HarmonicMinor: return "Harmonic minor";
+        case MusicScale::Dorian: return "Dorian";
+        case MusicScale::MajorPentatonic: return "Major pentatonic";
+        case MusicScale::MinorPentatonic: return "Minor pentatonic";
+        case MusicScale::Blues: return "Blues";
+        case MusicScale::numScales: break;
+    }
+    return "Major";
+}
+
+inline const char* keyName(int key)
+{
+    static constexpr const char* names[] { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+    return names[std::clamp(key, 0, 11)];
+}
+
+inline std::array<bool, 12> scalePitchClasses(MusicScale scale)
+{
+    switch (scale)
+    {
+        case MusicScale::Major: return { { 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1 } };
+        case MusicScale::NaturalMinor: return { { 1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1, 0 } };
+        case MusicScale::HarmonicMinor: return { { 1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 0, 1 } };
+        case MusicScale::Dorian: return { { 1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 0 } };
+        case MusicScale::MajorPentatonic: return { { 1, 0, 1, 0, 1, 0, 0, 1, 0, 1, 0, 0 } };
+        case MusicScale::MinorPentatonic: return { { 1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 1, 0 } };
+        case MusicScale::Blues: return { { 1, 0, 0, 1, 0, 1, 1, 1, 0, 0, 1, 0 } };
+        case MusicScale::numScales: break;
+    }
+    return { { 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1 } };
+}
+
+inline bool pitchInScale(int pitch, int key, MusicScale scale)
+{
+    const int pc = ((pitch - key) % 12 + 12) % 12;
+    return scalePitchClasses(scale)[static_cast<std::size_t>(pc)];
+}
+
+// Nearest in-scale pitch (ties resolve upward), clamped to MIDI range.
+inline int snapPitchToScale(int pitch, int key, MusicScale scale)
+{
+    pitch = std::clamp(pitch, lowestPitch, highestPitch);
+    for (int radius = 0; radius <= 6; ++radius)
+    {
+        if (pitch + radius <= highestPitch && pitchInScale(pitch + radius, key, scale))
+            return pitch + radius;
+        if (pitch - radius >= lowestPitch && pitchInScale(pitch - radius, key, scale))
+            return pitch - radius;
+    }
+    return pitch;
+}
+
+enum class ChordType : std::uint8_t
+{
+    Major = 0, Minor, Dom7, Maj7, Min7, Sus4, Dim, Aug, numChords
+};
+
+inline const char* chordName(ChordType chord)
+{
+    switch (chord)
+    {
+        case ChordType::Major: return "Major";
+        case ChordType::Minor: return "Minor";
+        case ChordType::Dom7: return "7";
+        case ChordType::Maj7: return "Maj7";
+        case ChordType::Min7: return "Min7";
+        case ChordType::Sus4: return "Sus4";
+        case ChordType::Dim: return "Dim";
+        case ChordType::Aug: return "Aug";
+        case ChordType::numChords: break;
+    }
+    return "Major";
+}
+
+// Semitone offsets from the root for one-finger chord stamps.
+inline std::vector<int> chordPitches(int root, ChordType chord)
+{
+    const int* offsets = nullptr;
+    int count = 0;
+    static constexpr int major[] { 0, 4, 7 }, minor[] { 0, 3, 7 }, dom7[] { 0, 4, 7, 10 },
+        maj7[] { 0, 4, 7, 11 }, min7[] { 0, 3, 7, 10 }, sus4[] { 0, 5, 7 }, dim[] { 0, 3, 6 }, aug[] { 0, 4, 8 };
+    switch (chord)
+    {
+        case ChordType::Major: offsets = major; count = 3; break;
+        case ChordType::Minor: offsets = minor; count = 3; break;
+        case ChordType::Dom7: offsets = dom7; count = 4; break;
+        case ChordType::Maj7: offsets = maj7; count = 4; break;
+        case ChordType::Min7: offsets = min7; count = 4; break;
+        case ChordType::Sus4: offsets = sus4; count = 3; break;
+        case ChordType::Dim: offsets = dim; count = 3; break;
+        case ChordType::Aug: offsets = aug; count = 3; break;
+        case ChordType::numChords: break;
+    }
+    std::vector<int> pitches;
+    for (int i = 0; i < count; ++i)
+        if (root + offsets[i] >= lowestPitch && root + offsets[i] <= highestPitch)
+            pitches.push_back(root + offsets[i]);
+    return pitches;
+}
+
+// Linear velocity ramp across notes ordered by start (first gets startVel,
+// last gets endVel). Note order in the pattern is preserved.
+inline void applyVelocityRamp(Pattern& pattern, int startVel, int endVel)
+{
+    if (pattern.count == 0)
+        return;
+    startVel = std::clamp(startVel, 1, 127);
+    endVel = std::clamp(endVel, 1, 127);
+    std::vector<int> order(static_cast<std::size_t>(pattern.count));
+    for (int i = 0; i < pattern.count; ++i)
+        order[static_cast<std::size_t>(i)] = i;
+    std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
+        return pattern.notes[static_cast<std::size_t>(a)].start < pattern.notes[static_cast<std::size_t>(b)].start;
+    });
+    for (std::size_t k = 0; k < order.size(); ++k)
+    {
+        const double t = order.size() == 1 ? 0.0 : static_cast<double>(k) / (order.size() - 1);
+        pattern.notes[static_cast<std::size_t>(order[k])].velocity =
+            std::clamp(static_cast<int>(std::round(startVel + (endVel - startVel) * t)), 1, 127);
+    }
+}
+
 struct TrackMix
 {
     float volume = 0.8f;
@@ -148,6 +381,7 @@ struct Track
     int kitVariant = 0;
     TrackMix mix;
     TrackFx fx;
+    float swing = 0.0f;
     bool valid() const
     {
         // Empty slots carry no identity and their content is ignored.
@@ -160,6 +394,8 @@ struct Track
         if (kind != TrackKind::Synth && kind != TrackKind::Drums)
             return false;
         if (kitVariant < 0 || kitVariant >= numKitVariants)
+            return false;
+        if (!std::isfinite(swing) || swing < 0.0f || swing > maxSwing)
             return false;
         for (const auto& pattern : melodies)
             if (!pattern.valid())
@@ -394,6 +630,8 @@ struct ProjectState
     std::array<AudioTakeMeta, maxTakes> takes {};
     int takeCount = 0;
     double bpm = 120.0;
+    int musicKey = 0; // C=0..B=11
+    MusicScale musicScale = MusicScale::Major;
     int activeTrackCount() const
     {
         int count = 0;
@@ -405,6 +643,8 @@ struct ProjectState
     {
         if (!(std::isfinite(bpm) && bpm >= 40.0 && bpm <= 240.0
             && master.valid() && song.valid()))
+            return false;
+        if (musicKey < 0 || musicKey > 11 || musicScale >= MusicScale::numScales)
             return false;
         for (const auto& track : tracks)
             if (!track.valid())
