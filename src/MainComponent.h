@@ -112,6 +112,7 @@ private:
     juce::TextButton duplicatePattern { "Dup" };
     juce::TextButton grooveButton { "Groove" };
     juce::TextButton keyButton { "Key: C Major" }, chordButton { "Chord" }, rampButton { "Ramp" };
+    juce::TextButton arpButton { "Arp" };
     bool snapScale = true;
     std::array<juce::TextButton, numPatterns> patternTabs;
     std::array<juce::TextButton, maxTracks> trackButtons;
@@ -238,6 +239,7 @@ private:
     void setTrackSwing(float swing);
     void applyVelocityRampToSelected(int startVel, int endVel);
     void refreshKeyButton();
+    void refreshArpButton();
     void selectTrackIndex(int track);
     void setTrackIcon(int track, int icon);
     void moveTrack(int from, int to);

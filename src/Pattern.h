@@ -343,6 +343,75 @@ inline void applyVelocityRamp(Pattern& pattern, int startVel, int endVel)
     }
 }
 
+// Live MIDI FX for MiniLab playing: arpeggiator + one-finger chords on the
+// synth target's live notes. Processed engine-side; see LiveFx.h.
+enum class ArpMode : std::uint8_t
+{
+    Off = 0, Up, Down, UpDown, Random, numModes
+};
+
+inline const char* arpModeName(ArpMode mode)
+{
+    switch (mode)
+    {
+        case ArpMode::Off: return "Off";
+        case ArpMode::Up: return "Up";
+        case ArpMode::Down: return "Down";
+        case ArpMode::UpDown: return "Up-down";
+        case ArpMode::Random: return "Random";
+        case ArpMode::numModes: break;
+    }
+    return "Off";
+}
+
+enum class ArpRate : std::uint8_t
+{
+    Eighth = 0, Sixteenth, EighthTriplet, SixteenthTriplet, numRates
+};
+
+inline const char* arpRateName(ArpRate rate)
+{
+    switch (rate)
+    {
+        case ArpRate::Eighth: return "1/8";
+        case ArpRate::Sixteenth: return "1/16";
+        case ArpRate::EighthTriplet: return "1/8T";
+        case ArpRate::SixteenthTriplet: return "1/16T";
+        case ArpRate::numRates: break;
+    }
+    return "1/16";
+}
+
+inline double arpStepBeats(ArpRate rate)
+{
+    switch (rate)
+    {
+        case ArpRate::Eighth: return 0.5;
+        case ArpRate::Sixteenth: return 0.25;
+        case ArpRate::EighthTriplet: return 1.0 / 3.0;
+        case ArpRate::SixteenthTriplet: return 1.0 / 6.0;
+        case ArpRate::numRates: break;
+    }
+    return 0.25;
+}
+
+struct LiveFx
+{
+    ArpMode arp = ArpMode::Off;
+    ArpRate rate = ArpRate::Sixteenth;
+    int octaves = 1; // 1-3
+    bool latch = false;
+    bool chordOn = false;
+    ChordType chord = ChordType::Major;
+    bool active() const { return arp != ArpMode::Off || chordOn; }
+    bool valid() const
+    {
+        return arp < ArpMode::numModes && rate < ArpRate::numRates && octaves >= 1 && octaves <= 3
+            && chord < ChordType::numChords;
+    }
+    bool operator==(const LiveFx&) const = default;
+};
+
 struct TrackMix
 {
     float volume = 0.8f;
@@ -382,6 +451,7 @@ struct Track
     TrackMix mix;
     TrackFx fx;
     float swing = 0.0f;
+    LiveFx liveFx;
     bool valid() const
     {
         // Empty slots carry no identity and their content is ignored.
@@ -396,6 +466,8 @@ struct Track
         if (kitVariant < 0 || kitVariant >= numKitVariants)
             return false;
         if (!std::isfinite(swing) || swing < 0.0f || swing > maxSwing)
+            return false;
+        if (!liveFx.valid())
             return false;
         for (const auto& pattern : melodies)
             if (!pattern.valid())

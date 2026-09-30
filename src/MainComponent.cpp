@@ -1633,6 +1633,101 @@ struct ChordPanel : public juce::Component
     std::function<void(int)> onPick;
 };
 
+// Arpeggiator + live chord FX for MiniLab playing on the selected track.
+// Changes apply immediately (each one is undoable); the engine picks them up
+// with the next project submit.
+struct ArpPanel : public juce::Component
+{
+    explicit ArpPanel(std::function<void(LiveFx)> changeCb) : onChange(std::move(changeCb))
+    {
+        addAndMakeVisible(modeLabel);
+        modeLabel.setText("Arp mode", juce::dontSendNotification);
+        modeLabel.setFont(ui::font(12.0f, true));
+        modeLabel.setColour(juce::Label::textColourId, ui::text);
+        addAndMakeVisible(mode);
+        for (int m = 0; m < static_cast<int>(ArpMode::numModes); ++m)
+            mode.addItem(arpModeName(static_cast<ArpMode>(m)), m + 1);
+        mode.onChange = [this] { publish(); };
+        addAndMakeVisible(rateLabel);
+        rateLabel.setText("Rate", juce::dontSendNotification);
+        rateLabel.setFont(ui::font(12.0f, true));
+        rateLabel.setColour(juce::Label::textColourId, ui::text);
+        addAndMakeVisible(rate);
+        for (int r = 0; r < static_cast<int>(ArpRate::numRates); ++r)
+            rate.addItem(arpRateName(static_cast<ArpRate>(r)), r + 1);
+        rate.onChange = [this] { publish(); };
+        addAndMakeVisible(octavesLabel);
+        octavesLabel.setText("Octaves", juce::dontSendNotification);
+        octavesLabel.setFont(ui::font(12.0f, true));
+        octavesLabel.setColour(juce::Label::textColourId, ui::text);
+        addAndMakeVisible(octaves);
+        for (int o = 1; o <= 3; ++o)
+            octaves.addItem(juce::String(o), o);
+        octaves.onChange = [this] { publish(); };
+        addAndMakeVisible(liveChordLabel);
+        liveChordLabel.setText("Live chord", juce::dontSendNotification);
+        liveChordLabel.setFont(ui::font(12.0f, true));
+        liveChordLabel.setColour(juce::Label::textColourId, ui::text);
+        addAndMakeVisible(liveChord);
+        liveChord.addItem("Off", 1);
+        for (int c = 0; c < static_cast<int>(ChordType::numChords); ++c)
+            liveChord.addItem(chordName(static_cast<ChordType>(c)), c + 2);
+        liveChord.onChange = [this] { publish(); };
+        addAndMakeVisible(latch);
+        latch.setButtonText("Latch (arp holds after release)");
+        latch.setClickingTogglesState(true);
+        latch.setTooltip("Released notes keep arpeggiating until you play a fresh chord.");
+        latch.onClick = [this] { publish(); };
+        setSize(280, 208);
+    }
+    void refresh(const LiveFx& fx)
+    {
+        mode.setSelectedId(static_cast<int>(fx.arp) + 1, juce::dontSendNotification);
+        rate.setSelectedId(static_cast<int>(fx.rate) + 1, juce::dontSendNotification);
+        octaves.setSelectedId(std::clamp(fx.octaves, 1, 3), juce::dontSendNotification);
+        liveChord.setSelectedId(fx.chordOn ? static_cast<int>(fx.chord) + 2 : 1, juce::dontSendNotification);
+        latch.setToggleState(fx.latch, juce::dontSendNotification);
+    }
+    void publish()
+    {
+        if (!onChange)
+            return;
+        LiveFx fx;
+        fx.arp = static_cast<ArpMode>(std::clamp(mode.getSelectedId() - 1, 0,
+                                                static_cast<int>(ArpMode::numModes) - 1));
+        fx.rate = static_cast<ArpRate>(std::clamp(rate.getSelectedId() - 1, 0,
+                                                 static_cast<int>(ArpRate::numRates) - 1));
+        fx.octaves = std::clamp(octaves.getSelectedId(), 1, 3);
+        const int chordId = liveChord.getSelectedId();
+        fx.chordOn = chordId > 1;
+        fx.chord = static_cast<ChordType>(std::clamp(chordId - 2, 0,
+                                                    static_cast<int>(ChordType::numChords) - 1));
+        fx.latch = latch.getToggleState();
+        onChange(fx);
+    }
+    void resized() override
+    {
+        modeLabel.setBounds(16, 10, 120, 20);
+        mode.setBounds(16, 32, 120, 28);
+        rateLabel.setBounds(144, 10, 120, 20);
+        rate.setBounds(144, 32, 120, 28);
+        octavesLabel.setBounds(16, 68, 120, 20);
+        octaves.setBounds(16, 90, 120, 28);
+        liveChordLabel.setBounds(144, 68, 120, 20);
+        liveChord.setBounds(144, 90, 120, 28);
+        latch.setBounds(16, 128, 248, 28);
+    }
+    void paint(juce::Graphics& g) override
+    {
+        ui::surface(g, getLocalBounds().toFloat(), 10.0f);
+        ui::caption(g, "LIVE ARP + CHORD  /  MINILAB KEYS", { 16, 164, 248, 18 }, ui::muted, 9.0f);
+    }
+    juce::Label modeLabel, rateLabel, octavesLabel, liveChordLabel;
+    juce::ComboBox mode, rate, octaves, liveChord;
+    juce::ToggleButton latch;
+    std::function<void(LiveFx)> onChange;
+};
+
 // Velocity ramp: fade loop velocities from one level to another.
 struct RampPanel : public juce::Component
 {
@@ -1793,7 +1888,7 @@ MainComponent::MainComponent()
              &open, &save, &saveAs, &exportButton, &clear, &demo, &tempo, &drumSequencer,
              &audioTab, &mute, &solo, &trackVolume, &repeatBar, &kitButton, &outputMeter,
              &loopView, &songView, &duplicatePattern, &themeButton, &grooveButton,
-             &keyButton, &chordButton, &rampButton })
+             &keyButton, &chordButton, &arpButton, &rampButton })
         addAndMakeVisible(component);
     for (auto* component : std::initializer_list<juce::Component*> { &songTemplate, &partChoice, &partTrackOn, &partHint })
         addChildComponent(component);
@@ -1933,7 +2028,7 @@ MainComponent::MainComponent()
              &newProject, &open, &save, &saveAs, &exportButton, &clear, &demo, &duplicatePattern,
              &audioTab, &mute, &solo, &repeatBar, &kitButton,
              &loopView, &songView, &partTrackOn, &themeButton, &grooveButton,
-             &keyButton, &chordButton, &rampButton })
+             &keyButton, &chordButton, &arpButton, &rampButton })
         button->setWantsKeyboardFocus(false);
     for (int i = 0; i < numPatterns; ++i)
     {
@@ -1991,6 +2086,23 @@ MainComponent::MainComponent()
             applyVelocityRampToSelected(startVel, endVel);
         });
         juce::CallOutBox::launchAsynchronously(std::move(panel), rampButton.getScreenBounds(), this);
+    };
+    arpButton.setTooltip("Arpeggiator and live chords for MiniLab playing on this track (undoable).");
+    arpButton.onClick = [this] {
+        const auto sel = static_cast<std::size_t>(std::clamp(selectedTrack, 0, maxTracks - 1));
+        auto panel = std::make_unique<ArpPanel>([this](LiveFx fx) {
+            const auto target = static_cast<std::size_t>(std::clamp(selectedTrack, 0, maxTracks - 1));
+            auto& track = project.tracks[target];
+            if (track.kind != TrackKind::Synth || audioSelected)
+                return;
+            beginEdit();
+            track.liveFx = fx;
+            refreshArpButton();
+            projectChanged();
+            endEdit();
+        });
+        panel->refresh(project.tracks[sel].liveFx);
+        juce::CallOutBox::launchAsynchronously(std::move(panel), arpButton.getScreenBounds(), this);
     };
     grooveButton.onClick = [this] {
         auto panel = std::make_unique<GroovePanel>(
@@ -2983,6 +3095,7 @@ void MainComponent::projectChanged()
     grooveButton.setVisible(!audioSelected);
     keyButton.setVisible(!audioSelected);
     chordButton.setVisible(!audioSelected && !drumsSelected);
+    arpButton.setVisible(!audioSelected && !drumsSelected);
     rampButton.setVisible(!audioSelected && !drumsSelected);
     for (int track = 0; track < maxTracks; ++track)
         engine.setLoopSelection(track, trackMelodySlot[static_cast<std::size_t>(track)],
@@ -2990,6 +3103,7 @@ void MainComponent::projectChanged()
     engine.setLoopSelection(selectedTrack, trackMelodySlot[sel], trackDrumSlot[sel]);
     tempo.setValue(project.bpm, juce::dontSendNotification);
     refreshKeyButton();
+    refreshArpButton();
     pendingPublish = !engine.submit(project);
     int totalNotes = 0, totalHits = 0;
     for (const auto& track : project.tracks)
@@ -3090,6 +3204,26 @@ void MainComponent::refreshKeyButton()
     pianoRoll.setScale(project.musicKey, project.musicScale, snapScale);
 }
 
+void MainComponent::refreshArpButton()
+{
+    const auto sel = static_cast<std::size_t>(std::clamp(selectedTrack, 0, maxTracks - 1));
+    const auto& fx = project.tracks[sel].liveFx;
+    arpButton.setToggleState(fx.active(), juce::dontSendNotification);
+    if (!fx.active())
+    {
+        arpButton.setButtonText("Arp");
+        return;
+    }
+    juce::String text = juce::String(fx.arp == ArpMode::Off ? "Chord" : arpModeName(fx.arp));
+    if (fx.arp != ArpMode::Off)
+        text += juce::String(" ") + arpRateName(fx.rate);
+    if (fx.chordOn && fx.arp != ArpMode::Off)
+        text += "+" + juce::String(chordName(fx.chord));
+    else if (fx.chordOn)
+        text += juce::String(" ") + chordName(fx.chord);
+    arpButton.setButtonText(text);
+}
+
 void MainComponent::applyHumanize(float amount)
 {
     const auto sel = static_cast<std::size_t>(selectedTrack);
@@ -3154,6 +3288,7 @@ void MainComponent::selectChannel(int channel)
     grooveButton.setVisible(!audio);
     keyButton.setVisible(!audio);
     chordButton.setVisible(!audio && !drums);
+    arpButton.setVisible(!audio && !drums);
     rampButton.setVisible(!audio && !drums);
     kitButton.setVisible(drumsSelected);
     for (int i = 0; i < numPatterns; ++i)
@@ -5138,8 +5273,9 @@ void MainComponent::resized()
     duplicatePattern.setBounds(480, 256, 60, 28);
     grooveButton.setBounds(546, 256, 70, 28);
     keyButton.setBounds(622, 256, 96, 28);
-    chordButton.setBounds(724, 256, 70, 28);
-    rampButton.setBounds(800, 256, 64, 28);
+    chordButton.setBounds(724, 256, 64, 28);
+    arpButton.setBounds(794, 256, 60, 28);
+    rampButton.setBounds(860, 256, 60, 28);
     pianoRoll.setBounds(254, 354, contentWidth() - 292, getHeight() - 634);
     drumSequencer.setBounds(pianoRoll.getBounds());
     if (audioView != nullptr)

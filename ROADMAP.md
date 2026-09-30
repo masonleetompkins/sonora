@@ -7,6 +7,7 @@ Build 1-8, skip the rest.
 2. **Piano roll key tools**: scale lock + chord stamps + velocity ramp.
    DONE (project key/scale, format v15, AI writes in key).
 3. **Arpeggiator + chord MIDI FX** for live MiniLab playing.
+   DONE (per-track arp/chord FX at song tempo, format v16).
 4. **Take comping UI** (takes model already exists).
 5. **Global chord track** feeding AI composer + transposition.
 6. **Sends/returns + mixer view**.

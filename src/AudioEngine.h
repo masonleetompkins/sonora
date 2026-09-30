@@ -6,6 +6,7 @@
 #include "LoopScheduler.h"
 #include "MidiHardware.h"
 #include "SnapshotQueue.h"
+#include "LiveFx.h"
 #include <juce_audio_devices/juce_audio_devices.h>
 
 namespace sonora
@@ -86,6 +87,11 @@ private:
     LoopScheduler scheduler;
     SnapshotQueue<ProjectState> pending;
     ProjectState active;
+    // Live arpeggiator/chord FX for the synth target's MiniLab notes.
+    LiveArp liveFx;
+    int liveFxTrack = -1;
+    std::int64_t liveFxPosition = 0;
+    juce::MidiBuffer fxUi;
     // Last submitted project, message thread only: validates auditions against
     // the editor state even before the audio thread picks the block up.
     ProjectState latest;

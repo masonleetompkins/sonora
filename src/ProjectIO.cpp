@@ -340,11 +340,17 @@ std::unique_ptr<juce::DynamicObject> encodeTrackState(const Track& track)
     object->setProperty("samples", samples);
     object->setProperty("kitVariant", track.kitVariant);
     object->setProperty("swing", static_cast<double>(track.swing));
+    object->setProperty("liveArp", static_cast<int>(track.liveFx.arp));
+    object->setProperty("liveArpRate", static_cast<int>(track.liveFx.rate));
+    object->setProperty("liveArpOctaves", track.liveFx.octaves);
+    object->setProperty("liveArpLatch", track.liveFx.latch);
+    object->setProperty("liveChordOn", track.liveFx.chordOn);
+    object->setProperty("liveChord", static_cast<int>(track.liveFx.chord));
     return object;
 }
 
 juce::Result decodeTrackState(const juce::var& value, Track& track, bool requirePreset, bool requireSynth,
-                              bool requireExtendedFx, bool requireGroove)
+                              bool requireExtendedFx, bool requireGroove, bool requireLiveFx)
 {
     const auto* object = value.getDynamicObject();
     if (object == nullptr)
@@ -434,6 +440,24 @@ juce::Result decodeTrackState(const juce::var& value, Track& track, bool require
             return juce::Result::fail("Track swing out of range.");
         candidate.swing = static_cast<float>(swing);
     }
+    if (requireLiveFx)
+    {
+        const auto arp = object->getProperty("liveArp"), rate = object->getProperty("liveArpRate"),
+                   octaves = object->getProperty("liveArpOctaves"), latch = object->getProperty("liveArpLatch"),
+                   chordOn = object->getProperty("liveChordOn"), chord = object->getProperty("liveChord");
+        if (!integer(arp) || !integer(rate) || !integer(octaves) || !integer(chord))
+            return juce::Result::fail("Track live FX malformed.");
+        LiveFx fx;
+        fx.arp = static_cast<ArpMode>(static_cast<int>(arp));
+        fx.rate = static_cast<ArpRate>(static_cast<int>(rate));
+        fx.octaves = static_cast<int>(octaves);
+        fx.latch = latch.isBool() ? static_cast<bool>(latch) : static_cast<int>(latch) == 1;
+        fx.chordOn = chordOn.isBool() ? static_cast<bool>(chordOn) : static_cast<int>(chordOn) == 1;
+        fx.chord = static_cast<ChordType>(static_cast<int>(chord));
+        if (!fx.valid())
+            return juce::Result::fail("Track live FX out of range.");
+        candidate.liveFx = fx;
+    }
     const auto variant = object->getProperty("kitVariant");
     if (!integer(variant) || static_cast<juce::int64>(variant) < 0
         || static_cast<juce::int64>(variant) >= numKitVariants)
@@ -450,7 +474,7 @@ juce::String ProjectIO::encode(const ProjectState& state)
 {
     auto root = std::make_unique<juce::DynamicObject>();
     root->setProperty("format", "sonora-project");
-    root->setProperty("version", 15);
+    root->setProperty("version", 16);
     root->setProperty("bpm", state.bpm);
     root->setProperty("musicKey", state.musicKey);
     root->setProperty("musicScale", static_cast<int>(state.musicScale));
@@ -712,7 +736,7 @@ juce::Result ProjectIO::decode(const juce::String& json, ProjectState& destinati
     if (!integer(version))
         return juce::Result::fail("Unsupported project version.");
     const auto versionNumber = static_cast<juce::int64>(version);
-    if (versionNumber < 1 || versionNumber > 15)
+    if (versionNumber < 1 || versionNumber > 16)
         return juce::Result::fail("Unsupported project version.");
     if (!integer(root->getProperty("ticksPerQuarter")) || !integer(root->getProperty("lengthTicks"))
         || static_cast<juce::int64>(root->getProperty("ticksPerQuarter")) != ticksPerQuarter
@@ -802,7 +826,8 @@ juce::Result ProjectIO::decode(const juce::String& json, ProjectState& destinati
         for (int track = 0; track < maxTracks; ++track)
         {
             result = decodeTrackState((*tracks)[track], candidate.tracks[static_cast<std::size_t>(track)],
-                                      versionNumber >= 10, versionNumber >= 11, versionNumber >= 12, versionNumber >= 14);
+                                      versionNumber >= 10, versionNumber >= 11, versionNumber >= 12, versionNumber >= 14,
+                                      versionNumber >= 16);
             if (result.failed())
                 return result;
         }

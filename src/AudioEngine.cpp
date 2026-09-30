@@ -71,6 +71,9 @@ void AudioEngine::prepare(double sampleRate)
         unit.gain.setCurrentAndTargetValue(1.0f);
     }
     master.prepare(rate);
+    liveFx.reset(0);
+    liveFxTrack = -1;
+    liveFxPosition = 0;
     midiCollector.reset(rate);
     scheduler.configure(rate, active.bpm);
     scheduler.rewind();
@@ -194,7 +197,8 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
 
     midi.clear();
     midiCollector.removeNextBlockOfMessages(midi, block.numSamples);
-    keyboardState.processNextMidiBuffer(midi, 0, block.numSamples, true);
+    // keyboardState is fed below from the FX-shaped buffer so the on-screen
+    // keyboard and roll highlight show what is actually heard.
     if (panicNow || reset)
         midi.clear();
 
@@ -240,6 +244,26 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
         if (kind == TrackKind::Synth && synthTarget < 0)
             synthTarget = track;
     }
+    // Live FX follows the synth target's own settings. Retargeting releases
+    // any ringing arp/chord notes on the old unit before the state resets.
+    const bool fxOn = synthTarget >= 0 && active.tracks[static_cast<std::size_t>(synthTarget)].liveFx.active();
+    if (synthTarget != liveFxTrack)
+    {
+        if (liveFxTrack >= 0)
+            for (const auto& off : liveFx.releaseAll())
+                units[static_cast<std::size_t>(liveFxTrack)].events.addEvent(
+                    juce::MidiMessage::noteOff(1, off.pitch), block.startSample + off.offset);
+        liveFx.reset(liveFxPosition);
+        liveFxTrack = synthTarget;
+    }
+    if (panicNow || reset)
+        liveFx.reset(liveFxPosition);
+    if (fxOn)
+        liveFx.setParams(active.tracks[static_cast<std::size_t>(synthTarget)].liveFx);
+    else
+        liveFx.reset(liveFxPosition);
+    std::vector<FxInput> fxIn;
+    fxUi.clear();
     for (const auto metadata : midi)
     {
         if (metadata.numBytes > 3)
@@ -247,6 +271,7 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
         auto message = metadata.getMessage();
         if (message.getChannel() == 10)
         {
+            fxUi.addEvent(message, metadata.samplePosition);
             if (message.isNoteOn() && drumTarget >= 0 && audible(drumTarget, active))
             {
                 int pad = -1;
@@ -262,14 +287,45 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
                         metadata.samplePosition + block.startSample);
             }
         }
-        else if (message.getChannel() > 0 && synthTarget >= 0 && audible(synthTarget, active))
+        else if (message.getChannel() > 0 && synthTarget >= 0)
         {
-            // Channel 1 isolates live keys from sequenced voices (2 + track).
-            message.setChannel(1);
-            units[static_cast<std::size_t>(synthTarget)].events.addEvent(
-                message, metadata.samplePosition + block.startSample);
+            if (fxOn && (message.isNoteOn() || message.isNoteOff()))
+            {
+                // Consumed: the FX output below replaces these notes.
+                fxIn.push_back({ metadata.samplePosition, message.isNoteOn() && message.getVelocity() > 0,
+                                 message.getNoteNumber(), message.getVelocity() });
+            }
+            else
+            {
+                fxUi.addEvent(message, metadata.samplePosition);
+                if (audible(synthTarget, active))
+                {
+                    // Channel 1 isolates live keys from sequenced voices (2 + track).
+                    message.setChannel(1);
+                    units[static_cast<std::size_t>(synthTarget)].events.addEvent(
+                        message, metadata.samplePosition + block.startSample);
+                }
+            }
+        }
+        else
+            fxUi.addEvent(message, metadata.samplePosition);
+    }
+    if (fxOn)
+    {
+        const bool hear = audible(synthTarget, active);
+        for (const auto& e : liveFx.process(liveFxPosition, block.numSamples, fxIn, rate, active.bpm))
+        {
+            const auto fxMessage = e.on ? juce::MidiMessage::noteOn(1, e.pitch,
+                                              static_cast<juce::uint8>(std::clamp(e.velocity, 1, 127)))
+                                        : juce::MidiMessage::noteOff(1, e.pitch);
+            fxUi.addEvent(fxMessage, e.offset);
+            if (hear)
+                units[static_cast<std::size_t>(synthTarget)].events.addEvent(
+                    fxMessage, block.startSample + e.offset);
         }
     }
+    keyboardState.processNextMidiBuffer(fxUi, 0, block.numSamples, true);
+    liveFxPosition += block.numSamples;
 
     std::int64_t blockStartPosition = scheduler.samplePosition();
     if (running && !panicNow)

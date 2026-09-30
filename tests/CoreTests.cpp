@@ -4,6 +4,7 @@
 #include "Fx.h"
 #include "KitSamples.h"
 #include "KnobMaps.h"
+#include "LiveFx.h"
 #include "AiMelody.h"
 #include "AiDictation.h"
 #include "IdeaCapture.h"
@@ -319,6 +320,141 @@ void testGroove()
     }
 }
 
+void testLiveFx()
+{
+    using sonora::ArpMode;
+    using sonora::ArpRate;
+    constexpr double rate = 48000.0, bpm = 120.0; // 1/16 = 6000 samples.
+    auto ons = [](const std::vector<sonora::FxEvent>& events) {
+        std::vector<int> pitches;
+        for (const auto& e : events)
+            if (e.on)
+                pitches.push_back(e.pitch);
+        return pitches;
+    };
+    // Idle FX passes nothing through (the engine routes originals itself).
+    sonora::LiveArp idle;
+    require(idle.process(0, 512, { { 0, true, 60, 100 } }, rate, bpm).empty(), "idle FX emitted");
+
+    // One-finger chord: C stamps C major, and the shared tone survives the
+    // first root's release when G major still holds it.
+    sonora::LiveArp chords;
+    sonora::LiveFx chordFx;
+    chordFx.chordOn = true;
+    chords.setParams(chordFx);
+    require(ons(chords.process(0, 512, { { 0, true, 60, 90 } }, rate, bpm))
+                == std::vector<int>({ 60, 64, 67 }),
+            "C major stamp wrong");
+    require(ons(chords.process(512, 512, { { 0, true, 67, 80 } }, rate, bpm))
+                == std::vector<int>({ 67, 71, 74 }),
+            "G major stamp wrong");
+    auto release = chords.process(1024, 512, { { 0, false, 60, 0 } }, rate, bpm);
+    std::vector<int> offs;
+    for (const auto& e : release)
+        if (!e.on)
+            offs.push_back(e.pitch);
+    require(offs == std::vector<int>({ 60, 64 }), "shared chord tone cut early");
+    // Velocity follows the pressed key.
+    sonora::LiveArp vel;
+    vel.setParams(chordFx);
+    const auto stamped = vel.process(0, 512, { { 0, true, 60, 90 } }, rate, bpm);
+    require(!stamped.empty() && stamped.front().velocity == 90, "chord lost velocity");
+
+    // Arp up over C-E-G at 1/16: 60, 64, 67, 60 across four steps.
+    sonora::LiveArp up;
+    sonora::LiveFx upFx;
+    upFx.arp = ArpMode::Up;
+    up.setParams(upFx);
+    const auto arpOut = up.process(0, 24000,
+                                   { { 0, true, 60, 100 }, { 0, true, 64, 100 }, { 0, true, 67, 100 } },
+                                   rate, bpm);
+    require(ons(arpOut) == std::vector<int>({ 60, 64, 67, 60 }), "arp up order wrong");
+    // Full release answers at the release offset, not the next step.
+    const auto hush = up.process(24000, 6000, { { 100, false, 60, 0 }, { 100, false, 64, 0 },
+                                                { 100, false, 67, 0 } },
+                                 rate, bpm);
+    require(hush.size() == 1 && !hush.front().on && hush.front().offset == 100, "release not answered");
+
+    // 1/8 at 120bpm steps every 12000 samples: two steps per 24000-sample block.
+    sonora::LiveArp eighths;
+    sonora::LiveFx eighthFx;
+    eighthFx.arp = ArpMode::Up;
+    eighthFx.rate = ArpRate::Eighth;
+    eighths.setParams(eighthFx);
+    require(ons(eighths.process(0, 24000, { { 0, true, 60, 100 }, { 0, true, 67, 100 } }, rate, bpm))
+                == std::vector<int>({ 60, 67 }),
+            "eighth rate mistimed");
+
+    // Down starts at the top; up-down ping-pongs without repeating the ends.
+    sonora::LiveArp down;
+    sonora::LiveFx downFx;
+    downFx.arp = ArpMode::Down;
+    down.setParams(downFx);
+    require(ons(down.process(0, 12000, { { 0, true, 60, 100 }, { 0, true, 67, 100 } }, rate, bpm))
+                == std::vector<int>({ 67, 60 }),
+            "arp down start wrong");
+    sonora::LiveArp pingpong;
+    sonora::LiveFx pongFx;
+    pongFx.arp = ArpMode::UpDown;
+    pingpong.setParams(pongFx);
+    require(ons(pingpong.process(0, 36000,
+                                 { { 0, true, 60, 100 }, { 0, true, 64, 100 }, { 0, true, 67, 100 } },
+                                 rate, bpm))
+                == std::vector<int>({ 60, 64, 67, 64, 60, 64 }),
+            "arp up-down wrong");
+
+    // Two octaves double the pool; latch holds past release and restarts fresh.
+    sonora::LiveArp wide;
+    sonora::LiveFx wideFx;
+    wideFx.arp = ArpMode::Up;
+    wideFx.octaves = 2;
+    wide.setParams(wideFx);
+    require(ons(wide.process(0, 18000, { { 0, true, 60, 100 } }, rate, bpm))
+                == std::vector<int>({ 60, 72, 60 }),
+            "arp octaves wrong");
+    sonora::LiveArp latched;
+    sonora::LiveFx latchFx;
+    latchFx.arp = ArpMode::Up;
+    latchFx.latch = true;
+    latched.setParams(latchFx);
+    latched.process(0, 6000, { { 0, true, 60, 100 } }, rate, bpm);
+    require(latched.process(6000, 6000, { { 0, false, 60, 0 } }, rate, bpm).empty(),
+            "latch cut the arp");
+    require(ons(latched.process(12000, 6000, { { 0, true, 62, 100 } }, rate, bpm))
+                == std::vector<int>({ 62 }),
+            "latch did not restart fresh");
+
+    // Chord tones join the arp pool when both are on.
+    sonora::LiveArp both;
+    sonora::LiveFx bothFx;
+    bothFx.arp = ArpMode::Up;
+    bothFx.chordOn = true;
+    both.setParams(bothFx);
+    require(ons(both.process(0, 24000, { { 0, true, 60, 100 } }, rate, bpm))
+                == std::vector<int>({ 60, 64, 67, 60 }),
+            "chord arp pool wrong");
+
+    // releaseAll silences the current step note.
+    sonora::LiveArp ringing;
+    ringing.setParams(upFx);
+    ringing.process(0, 6000, { { 0, true, 60, 100 }, { 0, true, 64, 100 } }, rate, bpm);
+    const auto silenced = ringing.releaseAll();
+    require(silenced.size() == 1 && !silenced.front().on && silenced.front().pitch == 60,
+            "releaseAll missed the step");
+
+    require(juce::String(sonora::arpModeName(ArpMode::UpDown)) == "Up-down", "arp mode name wrong");
+    require(juce::String(sonora::arpRateName(ArpRate::SixteenthTriplet)) == "1/16T", "arp rate name wrong");
+    require(std::abs(sonora::arpStepBeats(ArpRate::EighthTriplet) - 1.0 / 3.0) < 1.0e-9,
+            "triplet math wrong");
+    sonora::LiveFx bad;
+    bad.octaves = 0;
+    require(!bad.valid(), "zero octaves validated");
+    bad = sonora::LiveFx {};
+    bad.rate = sonora::ArpRate::numRates;
+    require(!bad.valid(), "unknown rate validated");
+    require(sonora::LiveFx {}.valid() && !sonora::LiveFx {}.active(), "default FX wrong");
+}
+
 void testKeyTools()
 {
     using sonora::MusicScale;
@@ -383,9 +519,9 @@ void testPersistence()
     require(sonora::ProjectIO::decode("{broken json", loaded).failed(), "malformed JSON accepted");
     require(loaded == good, "failed load mutated the project");
     auto json = sonora::ProjectIO::encode(original);
-    require(sonora::ProjectIO::decode(json.replace("\"version\": 15", "\"version\": 16"), loaded).failed(),
+    require(sonora::ProjectIO::decode(json.replace("\"version\": 16", "\"version\": 17"), loaded).failed(),
             "unknown version accepted");
-    require(sonora::ProjectIO::decode(json.replace("\"version\": 15", "\"version\": 4294967297"), loaded).failed(),
+    require(sonora::ProjectIO::decode(json.replace("\"version\": 16", "\"version\": 4294967297"), loaded).failed(),
             "overflowed version accepted");
     require(sonora::ProjectIO::decode(json.replace("\"velocity\": 100", "\"velocity\": 0"), loaded).failed(),
             "zero velocity accepted");
@@ -1107,7 +1243,7 @@ void testFxPersistence()
     original.master.releaseMs = 120.0f;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 15"), "projects must save as v15");
+    require(json.contains("\"version\": 16"), "projects must save as v16");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "fx round-trip changed parameters");
 
@@ -1182,7 +1318,7 @@ void testTakePersistence()
     original.takes[1].mute = true;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 15"), "take projects must save as v15");
+    require(json.contains("\"version\": 16"), "take projects must save as v16");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "take round-trip changed metadata");
 
@@ -1608,7 +1744,7 @@ void testVariations()
     original.song.sections = 4;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 15"), "variation projects must save as v15");
+    require(json.contains("\"version\": 16"), "variation projects must save as v16");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "variation round-trip changed slots or indices");
 
@@ -1873,7 +2009,7 @@ void testKitPersistence()
     original.tracks[1].kitVariant = 1;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 15"), "kit projects must save as v15");
+    require(json.contains("\"version\": 16"), "kit projects must save as v16");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "kit round-trip changed pad samples");
     // Version 6 documents migrate to the built-in kit.
@@ -2239,7 +2375,7 @@ void testInstruments()
     saved.tracks[2].instrumentPreset = 16;
     const auto json = sonora::ProjectIO::encode(saved);
     sonora::ProjectState loaded;
-    require(json.contains("\"version\": 15"), "instrument projects must save as v15");
+    require(json.contains("\"version\": 16"), "instrument projects must save as v16");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "instrument round-trip failed");
     auto legacy = juce::JSON::parse(json);
     legacy.getDynamicObject()->setProperty("version", 9);
@@ -2396,7 +2532,7 @@ void testSynthEngine()
     saved.tracks[0].synth = sonora::synthPatches()[3].params;
     const auto json = sonora::ProjectIO::encode(saved);
     sonora::ProjectState loaded;
-    require(json.contains("\"version\": 15"), "synth projects must save as v15");
+    require(json.contains("\"version\": 16"), "synth projects must save as v16");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "synth round-trip failed");
     auto legacy = juce::JSON::parse(json);
     legacy.getDynamicObject()->setProperty("version", 10);
@@ -2552,7 +2688,7 @@ void testKnobs()
     saved.tracks[0].fx.chorus = { 0.4f, 1.2f, 0.8f, false };
     const auto json = sonora::ProjectIO::encode(saved);
     sonora::ProjectState loaded;
-    require(json.contains("\"version\": 15"), "fx projects must save as v15");
+    require(json.contains("\"version\": 16"), "fx projects must save as v16");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "drive/chorus round-trip failed");
     auto legacy = juce::JSON::parse(json);
     legacy.getDynamicObject()->setProperty("version", 11);
@@ -2941,7 +3077,7 @@ void testSongComposition()
     saved.song.insertSection(pop.sections, 0);
     const auto json = sonora::ProjectIO::encode(saved);
     sonora::ProjectState loaded;
-    require(json.contains("\"version\": 15"), "song projects must save as v15");
+    require(json.contains("\"version\": 16"), "song projects must save as v16");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "song parts round-trip failed");
     auto big = project;
     big.song.sections = sonora::maxSections;
@@ -2980,7 +3116,7 @@ void testSongComposition()
     missingSwing.getDynamicObject()->getProperty("tracks").getArray()->getReference(0)
         .getDynamicObject()->removeProperty("swing");
     loaded = swung;
-    require(sonora::ProjectIO::decode(juce::JSON::toString(missingSwing), loaded).failed(), "v15 without swing accepted");
+    require(sonora::ProjectIO::decode(juce::JSON::toString(missingSwing), loaded).failed(), "v16 without swing accepted");
     auto invalidSwing = swung;
     invalidSwing.tracks[0].swing = -0.5f;
     require(!invalidSwing.valid(), "negative swing validated");
@@ -3016,6 +3152,47 @@ void testSongComposition()
     auto invalidKey = keyed;
     invalidKey.musicKey = -1;
     require(!invalidKey.valid(), "negative key validated");
+
+    // v16 persists live FX; older files open with FX off.
+    auto lively = project;
+    lively.tracks[0].liveFx.arp = sonora::ArpMode::Up;
+    lively.tracks[0].liveFx.rate = sonora::ArpRate::Eighth;
+    lively.tracks[0].liveFx.octaves = 2;
+    lively.tracks[0].liveFx.latch = true;
+    lively.tracks[0].liveFx.chordOn = true;
+    lively.tracks[0].liveFx.chord = sonora::ChordType::Min7;
+    const auto liveJson = sonora::ProjectIO::encode(lively);
+    require(sonora::ProjectIO::decode(liveJson, loaded).wasOk() && loaded == lively
+            && loaded.tracks[0].liveFx.arp == sonora::ArpMode::Up
+            && loaded.tracks[0].liveFx.octaves == 2 && loaded.tracks[0].liveFx.latch
+            && loaded.tracks[0].liveFx.chordOn
+            && loaded.tracks[0].liveFx.chord == sonora::ChordType::Min7,
+            "live FX round-trip failed");
+    auto legacyLive = juce::JSON::parse(liveJson);
+    legacyLive.getDynamicObject()->setProperty("version", 15);
+    for (const char* key : { "liveArp", "liveArpRate", "liveArpOctaves", "liveArpLatch", "liveChordOn",
+                             "liveChord" })
+        legacyLive.getDynamicObject()->getProperty("tracks").getArray()->getReference(0)
+            .getDynamicObject()->removeProperty(key);
+    require(sonora::ProjectIO::decode(juce::JSON::toString(legacyLive), loaded).wasOk()
+            && loaded.tracks[0].liveFx == sonora::LiveFx {},
+            "v15 did not open with live FX off");
+    auto badArp = juce::JSON::parse(liveJson);
+    badArp.getDynamicObject()->getProperty("tracks").getArray()->getReference(0)
+        .getDynamicObject()->setProperty("liveArp", 99);
+    loaded = lively;
+    require(sonora::ProjectIO::decode(juce::JSON::toString(badArp), loaded).failed(),
+            "unknown arp mode accepted");
+    require(loaded == lively, "bad arp destroyed current state");
+    auto missingArp = juce::JSON::parse(liveJson);
+    missingArp.getDynamicObject()->getProperty("tracks").getArray()->getReference(0)
+        .getDynamicObject()->removeProperty("liveArpRate");
+    loaded = lively;
+    require(sonora::ProjectIO::decode(juce::JSON::toString(missingArp), loaded).failed(),
+            "v16 without arp rate accepted");
+    auto invalidLive = lively;
+    invalidLive.tracks[0].liveFx.octaves = 4;
+    require(!invalidLive.valid(), "arp octave validated");
 
     // Play from a part: only part 3 has the melody switched on.
     auto songProject = project;
@@ -3346,6 +3523,7 @@ int main()
         testTiming(); std::cout << "PASS sample-accurate looping, boundaries, chase, tempo\n";
         testGroove(); std::cout << "PASS swing timing, quantize, humanize, engine groove\n";
         testKeyTools(); std::cout << "PASS scales, snap, chords, velocity ramp\n";
+        testLiveFx(); std::cout << "PASS live arp and chord FX\n";
                 testFx(); std::cout << "PASS fx transparency, EQ/comp/delay/verb/limiter behavior, validation\n";
         testFxPersistence(); std::cout << "PASS v4 fx round-trip, v3 migration, malformed fx, effected export\n";
         testTakePersistence(); std::cout << "PASS v5 take round-trip, v4 migration, malformed takes, latency math\n";

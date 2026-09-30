@@ -122,6 +122,9 @@ a fallback or for direct hardware access.
 - Song key and scale (Key button): new notes snap to key, out-of-key rows
   dim in the piano roll, one-finger chord stamps (Chord button), velocity
   ramps (Ramp button), and the AI writes in key too.
+- Live arp and chords (Arp button): the MiniLab plays an arpeggiator
+  (up/down/up-down/random, triplets, 1-3 octaves, latch) and one-finger
+  chords on the selected synth track, in time with the song tempo.
 - AI assistant sidebar (AI assistant button or Ctrl+I): chat with Claude on
   the right while you work. It writes or edits the selected track's melody
   or drum beat, sees the whole song structure and the other tracks in the
@@ -292,7 +295,9 @@ instrument preset, v11 adds each track's synth patch, and v12 adds per-track
 drive and chorus, v13 adds named song parts and 16-part songs, and v14 adds
 per-track swing; older projects open
 with Sine Keys and the default sine patch. Format v15 adds the song-wide
-key and scale (older projects open in C major). It contains tempo, timing metadata, two
+key and scale (older projects open in C major), and v16 adds per-track
+live arp/chord settings (older projects play MiniLab notes straight
+through). It contains tempo, timing metadata, two
 stable track IDs/instrument identifiers, track mix settings, per-track effect
 chains, master limiter settings, four melody patterns and four drum patterns
 per track, per-pad custom sample filenames, the factory kit variant, audio take
