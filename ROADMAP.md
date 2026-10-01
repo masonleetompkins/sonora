@@ -12,6 +12,8 @@ Build 1-8, skip the rest.
    DONE lanes (waveform lanes, solo audition, keep-as-comp, format v17).
    Section-swipe comping is a follow-up.
 5. **Global chord track** feeding AI composer + transposition.
+   DONE (per-section chords, follow-transpose in song playback, AI writes
+   in-chord, format v18).
 6. **Sends/returns + mixer view**.
 7. **Automation lanes** (volume/pan/FX; format bump).
 8. **Time-stretch for takes** (Rubber Band library integration).

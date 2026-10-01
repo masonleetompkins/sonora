@@ -500,10 +500,54 @@ inline const char* songPartName(SongPart part)
     return index >= 0 && index < static_cast<int>(SongPart::numParts) ? names[index] : "Part";
 }
 
+// Global chord track: one chord per song section. Song-mode playback
+// transposes synth loops by (root - song key) in chorded sections, and the
+// AI composer writes new loops to fit. root -1 means no chord (as written).
+struct SectionChord
+{
+    int root = -1; // -1 = none, else pitch class C=0..B=11
+    ChordType type = ChordType::Major;
+    bool set() const { return root >= 0; }
+    bool valid() const
+    {
+        return (root == -1 || (root >= 0 && root <= 11)) && type < ChordType::numChords;
+    }
+    bool operator==(const SectionChord&) const = default;
+};
+
+inline juce::String chordLabel(const SectionChord& chord)
+{
+    if (!chord.set())
+        return "-";
+    juce::String label(keyName(chord.root));
+    switch (chord.type)
+    {
+        case ChordType::Major: break;
+        case ChordType::Minor: label += "m"; break;
+        case ChordType::Dom7: label += "7"; break;
+        case ChordType::Maj7: label += "maj7"; break;
+        case ChordType::Min7: label += "m7"; break;
+        case ChordType::Sus4: label += "sus4"; break;
+        case ChordType::Dim: label += "dim"; break;
+        case ChordType::Aug: label += "aug"; break;
+        case ChordType::numChords: break;
+    }
+    return label;
+}
+
+// Semitone shift so the song key center follows the section chord.
+inline int chordTranspose(const SectionChord& chord, int songKey)
+{
+    if (!chord.set())
+        return 0;
+    return chord.root - std::clamp(songKey, 0, 11);
+}
+
 struct Arrangement
 {
     int sections = 2;
     std::array<SongPart, maxSections> parts {};
+    std::array<SectionChord, maxSections> chords {};
     // Per section, per track: pattern slot + audible flag. Tracks are
     // addressed by index and never shift (deleting a track clears its cells),
     // so sections survive track edits without remapping.
@@ -520,6 +564,9 @@ struct Arrangement
             return false;
         for (const auto part : parts)
             if (part >= SongPart::numParts)
+                return false;
+        for (const auto& chord : chords)
+            if (!chord.valid())
                 return false;
         for (const auto& row : slots)
             for (const auto slot : row)
@@ -540,9 +587,15 @@ struct Arrangement
         Column column = copyFrom >= 0 && copyFrom < sections ? columnAt(copyFrom) : Column {};
         if (copyFrom < 0 || copyFrom >= sections)
             column.on.fill(true);
+        const SectionChord carried = copyFrom >= 0 && copyFrom < sections
+            ? chords[static_cast<std::size_t>(copyFrom)] : SectionChord {};
         for (int s = sections; s > at; --s)
+        {
             setColumn(s, columnAt(s - 1));
+            chords[static_cast<std::size_t>(s)] = chords[static_cast<std::size_t>(s - 1)];
+        }
         setColumn(at, column);
+        chords[static_cast<std::size_t>(at)] = carried;
         ++sections;
         return true;
     }
@@ -552,10 +605,14 @@ struct Arrangement
         if (sections <= 1 || at < 0 || at >= sections)
             return false;
         for (int s = at; s < sections - 1; ++s)
+        {
             setColumn(s, columnAt(s + 1));
+            chords[static_cast<std::size_t>(s)] = chords[static_cast<std::size_t>(s + 1)];
+        }
         Column cleared {};
         cleared.on.fill(true);
         setColumn(sections - 1, cleared);
+        chords[static_cast<std::size_t>(sections - 1)] = SectionChord {};
         --sections;
         return true;
     }
@@ -564,10 +621,15 @@ struct Arrangement
         if (from < 0 || from >= sections || to < 0 || to >= sections || from == to)
             return false;
         const auto moving = columnAt(from);
+        const auto movingChord = chords[static_cast<std::size_t>(from)];
         const int step = to > from ? 1 : -1;
         for (int s = from; s != to; s += step)
+        {
             setColumn(s, columnAt(s + step));
+            chords[static_cast<std::size_t>(s)] = chords[static_cast<std::size_t>(s + step)];
+        }
         setColumn(to, moving);
+        chords[static_cast<std::size_t>(to)] = movingChord;
         return true;
     }
 

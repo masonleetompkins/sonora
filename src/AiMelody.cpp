@@ -683,9 +683,16 @@ juce::String buildAssistantMessage(const AssistantRequest& request)
                 << (inPart && s == request.part ? " (current)" : "");
     message << ".\n";
     if (inPart)
+    {
         message << "Working on part " << (request.part + 1) << ", "
                 << songPartName(song.parts[static_cast<std::size_t>(request.part)]) << " (bars "
-                << (request.part * 4 + 1) << "-" << (request.part * 4 + 4) << ").\n\n";
+                << (request.part * 4 + 1) << "-" << (request.part * 4 + 4) << ").\n";
+        const auto chord = song.chords[static_cast<std::size_t>(request.part)];
+        if (chord.set())
+            message << "This part follows chord " << chordLabel(chord)
+                    << ": fit the loop to it (chord tones on strong beats).\n";
+        message << "\n";
+    }
     else
         message << "Working on a free 4-bar loop (not a specific song part).\n\n";
 
@@ -845,7 +852,9 @@ juce::String songSystemPrompt()
         "content): for example a drum loop with a fill at the end of bar 4 to lead into a chorus, a busier or "
         "half-time groove, a stripped-down bass for a bridge, or a lifted or answering melody for the last "
         "chorus. Keep new loops in the same key, harmony, and groove as the existing ones, and use them in the "
-        "arrangement. " + melodyRulesText() + " " + drumRulesText() + " Melodic tracks get \"notes\"; drum "
+        "arrangement. When sections carry chords (listed per section below), new melody loops must fit the "
+        "chords of the sections they play in: chord tones on strong beats, and the loop's home key transposed "
+        "to each chord root as needed. " + melodyRulesText() + " " + drumRulesText() + " Melodic tracks get \"notes\"; drum "
         "tracks get \"hits\".\n\n"
         "Reply in 2-4 short, friendly sentences (no markdown) describing the song's shape and the variations you "
         "added. If the producer asks a question or nothing should change, set change=false with empty sections "
@@ -896,7 +905,8 @@ juce::String buildSongMessage(const SongRequest& request)
     if (tracks.length() > 2 * maxContextChars)
         tracks = tracks.substring(0, 2 * maxContextChars) + "\n  (context truncated)\n";
     juce::String message;
-    message << "Song: " << juce::String(project.bpm, 0) << " BPM, 4/4, sections of 4 bars.\n\n" << tracks << "\n";
+    message << "Song: " << juce::String(project.bpm, 0) << " BPM, 4/4, sections of 4 bars. Song key: "
+            << keyName(project.musicKey) << " " << scaleName(project.musicScale) << ".\n\n" << tracks << "\n";
     message << "Current arrangement (" << song.sections << " sections):\n";
     for (int s = 0; s < song.sections; ++s)
     {
@@ -908,8 +918,11 @@ juce::String buildSongMessage(const SongRequest& request)
             if (project.tracks[i].kind != TrackKind::None && song.trackOn[si][i])
                 playing.add("track " + juce::String(index) + " loop " + letter(song.slots[si][i]));
         }
-        message << "  " << (s + 1) << ". " << songPartName(song.parts[si]) << ": "
-                << (playing.isEmpty() ? juce::String("(all silent)") : playing.joinIntoString(", ")) << "\n";
+        const auto chord = song.chords[si];
+        message << "  " << (s + 1) << ". " << songPartName(song.parts[si])
+                << (chord.set() ? " [chord " + chordLabel(chord) + ", loops transpose "
+                                   + juce::String(chordTranspose(chord, project.musicKey)) + "]" : juce::String())
+                << ": " << (playing.isEmpty() ? juce::String("(all silent)") : playing.joinIntoString(", ")) << "\n";
     }
     message << "\n";
     const auto first = request.history.size() > static_cast<std::size_t>(maxHistoryTurns)

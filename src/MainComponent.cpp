@@ -5459,6 +5459,7 @@ void MainComponent::refreshArrangement()
         return;
     ArrangementState view;
     view.song = project.song;
+    view.musicKey = project.musicKey;
     for (int track = 0; track < maxTracks; ++track)
     {
         const auto t = static_cast<std::size_t>(track);
@@ -5535,6 +5536,24 @@ void MainComponent::handleArrangementAction(const ArrangementAction& action)
         case K::SetPartType:
             edit([&] { song.parts[s] = static_cast<SongPart>(std::clamp(action.value, 0, static_cast<int>(SongPart::numParts) - 1)); });
             break;
+        case K::SetChord:
+        {
+            const int root = action.value / 16 - 1;
+            const auto type = static_cast<ChordType>(std::clamp(action.value % 16, 0,
+                                                               static_cast<int>(ChordType::numChords) - 1));
+            edit([&] { song.chords[s] = { std::clamp(root, -1, 11), type }; });
+            const auto chord = song.chords[s];
+            const auto shift = chordTranspose(chord, project.musicKey);
+            status.setText(chord.set()
+                               ? "Bars " + juce::String(action.section * 4 + 1) + "-" + juce::String(action.section * 4 + 4)
+                                 + " follow " + chordLabel(chord) + " (loops transpose "
+                                 + (shift >= 0 ? "+" : "") + juce::String(shift) + " semitones)."
+                               : "Chord cleared: bars " + juce::String(action.section * 4 + 1) + "-"
+                                 + juce::String(action.section * 4 + 4) + " play as written.",
+                           juce::dontSendNotification);
+            refreshArrangement();
+            break;
+        }
         case K::Duplicate:
             edit([&] { song.duplicateSection(action.section); });
             break;

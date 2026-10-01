@@ -474,7 +474,7 @@ juce::String ProjectIO::encode(const ProjectState& state)
 {
     auto root = std::make_unique<juce::DynamicObject>();
     root->setProperty("format", "sonora-project");
-    root->setProperty("version", 17);
+    root->setProperty("version", 18);
     root->setProperty("bpm", state.bpm);
     root->setProperty("musicKey", state.musicKey);
     root->setProperty("musicScale", static_cast<int>(state.musicScale));
@@ -499,6 +499,15 @@ juce::String ProjectIO::encode(const ProjectState& state)
     for (const auto part : state.song.parts)
         parts.add(static_cast<int>(part));
     song->setProperty("parts", parts);
+    juce::Array<juce::var> chords;
+    for (const auto& chord : state.song.chords)
+    {
+        auto* chordObject = new juce::DynamicObject();
+        chordObject->setProperty("root", chord.root);
+        chordObject->setProperty("type", static_cast<int>(chord.type));
+        chords.add(juce::var(chordObject));
+    }
+    song->setProperty("chords", chords);
     root->setProperty("song", juce::var(song));
     root->setProperty("ticksPerQuarter", ticksPerQuarter);
     root->setProperty("lengthTicks", patternTicks);
@@ -737,7 +746,7 @@ juce::Result ProjectIO::decode(const juce::String& json, ProjectState& destinati
     if (!integer(version))
         return juce::Result::fail("Unsupported project version.");
     const auto versionNumber = static_cast<juce::int64>(version);
-    if (versionNumber < 1 || versionNumber > 17)
+    if (versionNumber < 1 || versionNumber > 18)
         return juce::Result::fail("Unsupported project version.");
     if (!integer(root->getProperty("ticksPerQuarter")) || !integer(root->getProperty("lengthTicks"))
         || static_cast<juce::int64>(root->getProperty("ticksPerQuarter")) != ticksPerQuarter
@@ -799,6 +808,28 @@ juce::Result ProjectIO::decode(const juce::String& json, ProjectState& destinati
                     || static_cast<juce::int64>(part) >= static_cast<juce::int64>(SongPart::numParts))
                     return juce::Result::fail("Unknown song part.");
                 candidate.song.parts[static_cast<std::size_t>(s)] = static_cast<SongPart>(static_cast<int>(part));
+            }
+        }
+        if (versionNumber >= 18)
+        {
+            const auto* chords = songObject->getProperty("chords").getArray();
+            if (chords == nullptr || chords->size() != maxSections)
+                return juce::Result::fail("Invalid song chord track.");
+            for (int s = 0; s < maxSections; ++s)
+            {
+                const auto* chordObject = (*chords)[s].getDynamicObject();
+                if (chordObject == nullptr)
+                    return juce::Result::fail("Invalid song chord.");
+                const auto root = chordObject->getProperty("root");
+                const auto type = chordObject->getProperty("type");
+                if (!integer(root) || !integer(type) || static_cast<juce::int64>(root) < -1
+                    || static_cast<juce::int64>(root) > 11
+                    || static_cast<juce::int64>(type) < 0
+                    || static_cast<juce::int64>(type) >= static_cast<juce::int64>(ChordType::numChords))
+                    return juce::Result::fail("Song chord out of range.");
+                candidate.song.chords[static_cast<std::size_t>(s)] = {
+                    static_cast<int>(root), static_cast<ChordType>(static_cast<int>(type))
+                };
             }
         }
         for (int s = 0; s < rows; ++s)

@@ -135,15 +135,23 @@ public:
     // gating and linear transport that returns true when the song end is
     // reached during this block. Loop mode is handled by processLoop().
     // The emit callback gains the track index: emit(track, note, on, offset).
+    // Chorded sections transpose synth loops by (chord root - song key) at
+    // schedule time (non-destructive, like swing). The shift follows the
+    // note's onset section so offs always match their ons.
     template <typename Emit>
     bool processSong(const std::array<Track, maxTracks>& tracks, const Arrangement& song,
-                     int samples, bool chase, Emit&& emit)
+                     int samples, bool chase, Emit&& emit, int songKey = 0)
     {
         if (samples <= 0)
             return false;
         const auto songFrames = std::llround(static_cast<double>(song.songTicks()) * framesPerTick);
         const auto currentSection = std::clamp(static_cast<int>(tickPosition()) / patternTicks,
                                                0, song.sections - 1);
+        const auto shiftFor = [&](int section) {
+            return chordTranspose(song.chords[static_cast<std::size_t>(
+                                      std::clamp(section, 0, song.sections - 1))],
+                                  songKey);
+        };
         if (chase)
             for (int track = 0; track < maxTracks; ++track)
             {
@@ -154,12 +162,16 @@ public:
                 const auto& pattern = tracks[static_cast<std::size_t>(track)]
                                           .melodies[song.slots[static_cast<std::size_t>(currentSection)]
                                                                  [static_cast<std::size_t>(track)]];
+                const auto shift = shiftFor(currentSection);
                 for (int i = 0; i < pattern.count; ++i)
                 {
-                    const auto& n = pattern.notes[static_cast<std::size_t>(i)];
+                    auto n = pattern.notes[static_cast<std::size_t>(i)];
                     if (frameAt(n.start) % loopFrames < position % loopFrames
                         && frameAt(n.start + n.duration) % loopFrames > position % loopFrames)
+                    {
+                        n.pitch = std::clamp(n.pitch + shift, lowestPitch, highestPitch);
                         emit(track, n, true, 0);
+                    }
                 }
             }
         // Offs precede ons at shared boundaries.
@@ -175,14 +187,16 @@ public:
                     const auto& pattern = trackState
                                                .melodies[song.slots[static_cast<std::size_t>(s)]
                                                                       [static_cast<std::size_t>(track)]];
+                    const auto shift = shiftFor(s);
                     for (int i = 0; i < pattern.count; ++i)
                     {
-                        const auto& n = pattern.notes[static_cast<std::size_t>(i)];
+                        auto n = pattern.notes[static_cast<std::size_t>(i)];
                         const auto onset = swingTicks(n.start, trackState.swing);
                         const auto frame = static_cast<std::int64_t>(s) * loopFrames
                             + frameAt(on ? onset : onset + n.duration);
                         if (frame < position || frame >= position + samples || frame >= songFrames)
                             continue;
+                        n.pitch = std::clamp(n.pitch + shift, lowestPitch, highestPitch);
                         emit(track, n, on, static_cast<int>(frame - position));
                     }
                 }

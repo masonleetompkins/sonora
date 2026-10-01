@@ -12,6 +12,7 @@ namespace sonora
 struct ArrangementState
 {
     Arrangement song;
+    int musicKey = 0; // song key, so chord cells can show their transpose
     std::array<bool, maxTracks> used {}, drums {};
     std::array<juce::String, maxTracks> names;
     std::array<juce::Colour, maxTracks> colours;
@@ -22,7 +23,7 @@ struct ArrangementState
 
 struct ArrangementAction
 {
-    enum class Kind { SetCell, SelectSection, EditPart, EditLoop, SetPartType, Duplicate, Insert, Remove, Move, Add, MakeUnique };
+    enum class Kind { SetCell, SelectSection, EditPart, EditLoop, SetPartType, Duplicate, Insert, Remove, Move, Add, MakeUnique, SetChord };
     Kind kind = Kind::SelectSection;
     int section = -1, track = -1, value = 0;
     bool on = false;
@@ -51,10 +52,11 @@ private:
     {
         enum class Area { None, Header, Add, Cell, Chip } area = Area::None;
         int section = -1, row = -1, slot = -1;
+        bool chord = false; // lower header strip: the section's chord
     };
     struct Layout
     {
-        float headerTop = 0, headerHeight = 46, gridTop = 0, rowHeight = 40;
+        float headerTop = 0, headerHeight = 64, gridTop = 0, rowHeight = 40;
         float labelWidth = 236, gridLeft = 0, columnWidth = 80, addWidth = 44;
     };
     Layout layout() const;
@@ -67,6 +69,8 @@ private:
     void paintCell(const juce::MouseEvent& event);
     void showCellMenu(int section, int track);
     void showHeaderMenu(int section);
+    void showChordMenu(int section);
+    juce::Rectangle<float> chordBounds(int section) const;
 
     ArrangementState state;
     enum class Drag { None, Paint, Chip, Header } drag = Drag::None;

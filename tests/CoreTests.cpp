@@ -455,6 +455,85 @@ void testLiveFx()
     require(sonora::LiveFx {}.valid() && !sonora::LiveFx {}.active(), "default FX wrong");
 }
 
+void testChordTrack()
+{
+    namespace ai = sonora::ai;
+    using sonora::ChordType;
+    using sonora::SectionChord;
+    // Labels, transpose math, validation.
+    require(juce::String(sonora::chordLabel({ 9, ChordType::Minor })) == "Am", "Am label wrong");
+    require(juce::String(sonora::chordLabel({ 6, ChordType::Dom7 })) == "F#7", "7 label wrong");
+    require(juce::String(sonora::chordLabel({})) == "-", "empty chord label wrong");
+    require(sonora::chordTranspose({ 2, ChordType::Major }, 0) == 2, "D-over-C shift wrong");
+    require(sonora::chordTranspose({ 9, ChordType::Minor }, 2) == 7, "relative shift wrong");
+    require(sonora::chordTranspose({}, 0) == 0, "empty chord transposes");
+    require(!SectionChord { 12, ChordType::Major }.valid(), "root octave validated");
+    require(!SectionChord { 0, ChordType::numChords }.valid(), "unknown type validated");
+
+    // Section edits carry chords along.
+    sonora::Arrangement song;
+    song.sections = 3;
+    song.chords[0] = { 0, ChordType::Major };
+    song.chords[2] = { 7, ChordType::Minor };
+    require(song.insertSection(1)
+                && song.chords[0].root == 0 && !song.chords[1].set() && !song.chords[2].set()
+                && song.chords[3].root == 7,
+            "insert dropped chords");
+    require(song.removeSection(0) && !song.chords[0].set() && !song.chords[1].set()
+                && song.chords[2].root == 7,
+            "remove dropped chords");
+    require(song.moveSection(2, 0) && song.chords[0].root == 7 && !song.chords[2].set(),
+            "move dropped chords");
+    sonora::Arrangement dup;
+    dup.sections = 2;
+    dup.chords[0] = { 5, ChordType::Dom7 };
+    require(dup.duplicateSection(0) && dup.chords[0].root == 5 && dup.chords[1].root == 5,
+            "duplicate did not copy the chord");
+
+    // Song playback transposes chorded sections; offs match their ons.
+    auto project = fixture();
+    project.song.sections = 2;
+    project.song.chords[1] = { 2, ChordType::Major }; // D over C: +2
+    sonora::LoopScheduler scheduler;
+    scheduler.configure(48000.0, 120.0);
+    const auto loopFrames = scheduler.lengthInSamples();
+    std::vector<int> sectionOns[2];
+    std::vector<int> sectionOffs[2];
+    const bool done = scheduler.processSong(project.tracks, project.song, static_cast<int>(loopFrames) * 2,
+                                            false,
+                                            [&](int track, const sonora::Note& note, bool on, int offset) {
+                                                require(track == 0, "drums leaked into song melody");
+                                                (on ? sectionOns : sectionOffs)[offset < loopFrames ? 0 : 1]
+                                                    .push_back(note.pitch);
+                                            },
+                                            0);
+    require(done, "two-section song did not finish");
+    require(sectionOns[0] == std::vector<int>({ 60, 60, 67, 60 }), "plain section altered");
+    require(sectionOns[1] == std::vector<int>({ 62, 62, 69, 62 }), "chord section not transposed");
+    require(sectionOffs[0] == std::vector<int>({ 60, 60, 67 }), "plain offs altered");
+    // The boundary note's off lives in section 2 but keeps its onset shift.
+    require(sectionOffs[1] == std::vector<int>({ 60, 62, 62, 69 }), "transposed off mismatched");
+
+    // The AI sees the progression and the part chord.
+    project.musicKey = 0;
+    project.song.chords[0] = { 9, ChordType::Minor };
+    ai::SongRequest songRequest;
+    songRequest.project = project;
+    songRequest.message = "Compose";
+    const auto songMessage = ai::buildSongMessage(songRequest);
+    require(songMessage.contains("[chord Am") && songMessage.contains("transpose 9"),
+            "progression missing from song context");
+    require(ai::songSystemPrompt().contains("chords of the sections they play in"),
+            "chord rule missing from composer prompt");
+    ai::AssistantRequest assistantRequest;
+    assistantRequest.project = project;
+    assistantRequest.track = 0;
+    assistantRequest.part = 0;
+    assistantRequest.message = "A hook";
+    require(ai::buildAssistantMessage(assistantRequest).contains("chord Am"),
+            "part chord missing from assistant context");
+}
+
 void testKeyTools()
 {
     using sonora::MusicScale;
@@ -519,9 +598,9 @@ void testPersistence()
     require(sonora::ProjectIO::decode("{broken json", loaded).failed(), "malformed JSON accepted");
     require(loaded == good, "failed load mutated the project");
     auto json = sonora::ProjectIO::encode(original);
-    require(sonora::ProjectIO::decode(json.replace("\"version\": 17", "\"version\": 18"), loaded).failed(),
+    require(sonora::ProjectIO::decode(json.replace("\"version\": 18", "\"version\": 19"), loaded).failed(),
             "unknown version accepted");
-    require(sonora::ProjectIO::decode(json.replace("\"version\": 17", "\"version\": 4294967297"), loaded).failed(),
+    require(sonora::ProjectIO::decode(json.replace("\"version\": 18", "\"version\": 4294967297"), loaded).failed(),
             "overflowed version accepted");
     require(sonora::ProjectIO::decode(json.replace("\"velocity\": 100", "\"velocity\": 0"), loaded).failed(),
             "zero velocity accepted");
@@ -1243,7 +1322,7 @@ void testFxPersistence()
     original.master.releaseMs = 120.0f;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 17"), "projects must save as v17");
+    require(json.contains("\"version\": 18"), "projects must save as v18");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "fx round-trip changed parameters");
 
@@ -1318,7 +1397,7 @@ void testTakePersistence()
     original.takes[1].mute = true;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 17"), "take projects must save as v17");
+    require(json.contains("\"version\": 18"), "take projects must save as v18");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "take round-trip changed metadata");
 
@@ -1799,7 +1878,7 @@ void testVariations()
     original.song.sections = 4;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 17"), "variation projects must save as v17");
+    require(json.contains("\"version\": 18"), "variation projects must save as v18");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "variation round-trip changed slots or indices");
 
@@ -2064,7 +2143,7 @@ void testKitPersistence()
     original.tracks[1].kitVariant = 1;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 17"), "kit projects must save as v17");
+    require(json.contains("\"version\": 18"), "kit projects must save as v18");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "kit round-trip changed pad samples");
     // Version 6 documents migrate to the built-in kit.
@@ -2430,7 +2509,7 @@ void testInstruments()
     saved.tracks[2].instrumentPreset = 16;
     const auto json = sonora::ProjectIO::encode(saved);
     sonora::ProjectState loaded;
-    require(json.contains("\"version\": 17"), "instrument projects must save as v17");
+    require(json.contains("\"version\": 18"), "instrument projects must save as v18");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "instrument round-trip failed");
     auto legacy = juce::JSON::parse(json);
     legacy.getDynamicObject()->setProperty("version", 9);
@@ -2587,7 +2666,7 @@ void testSynthEngine()
     saved.tracks[0].synth = sonora::synthPatches()[3].params;
     const auto json = sonora::ProjectIO::encode(saved);
     sonora::ProjectState loaded;
-    require(json.contains("\"version\": 17"), "synth projects must save as v17");
+    require(json.contains("\"version\": 18"), "synth projects must save as v18");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "synth round-trip failed");
     auto legacy = juce::JSON::parse(json);
     legacy.getDynamicObject()->setProperty("version", 10);
@@ -2743,7 +2822,7 @@ void testKnobs()
     saved.tracks[0].fx.chorus = { 0.4f, 1.2f, 0.8f, false };
     const auto json = sonora::ProjectIO::encode(saved);
     sonora::ProjectState loaded;
-    require(json.contains("\"version\": 17"), "fx projects must save as v17");
+    require(json.contains("\"version\": 18"), "fx projects must save as v18");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "drive/chorus round-trip failed");
     auto legacy = juce::JSON::parse(json);
     legacy.getDynamicObject()->setProperty("version", 11);
@@ -3132,7 +3211,7 @@ void testSongComposition()
     saved.song.insertSection(pop.sections, 0);
     const auto json = sonora::ProjectIO::encode(saved);
     sonora::ProjectState loaded;
-    require(json.contains("\"version\": 17"), "song projects must save as v17");
+    require(json.contains("\"version\": 18"), "song projects must save as v18");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "song parts round-trip failed");
     auto big = project;
     big.song.sections = sonora::maxSections;
@@ -3171,7 +3250,7 @@ void testSongComposition()
     missingSwing.getDynamicObject()->getProperty("tracks").getArray()->getReference(0)
         .getDynamicObject()->removeProperty("swing");
     loaded = swung;
-    require(sonora::ProjectIO::decode(juce::JSON::toString(missingSwing), loaded).failed(), "v17 without swing accepted");
+    require(sonora::ProjectIO::decode(juce::JSON::toString(missingSwing), loaded).failed(), "v18 without swing accepted");
     auto invalidSwing = swung;
     invalidSwing.tracks[0].swing = -0.5f;
     require(!invalidSwing.valid(), "negative swing validated");
@@ -3203,7 +3282,7 @@ void testSongComposition()
     auto missingKey = juce::JSON::parse(keyJson);
     missingKey.getDynamicObject()->removeProperty("musicKey");
     loaded = keyed;
-    require(sonora::ProjectIO::decode(juce::JSON::toString(missingKey), loaded).failed(), "v17 without key accepted");
+    require(sonora::ProjectIO::decode(juce::JSON::toString(missingKey), loaded).failed(), "v18 without key accepted");
     auto invalidKey = keyed;
     invalidKey.musicKey = -1;
     require(!invalidKey.valid(), "negative key validated");
@@ -3244,10 +3323,42 @@ void testSongComposition()
         .getDynamicObject()->removeProperty("liveArpRate");
     loaded = lively;
     require(sonora::ProjectIO::decode(juce::JSON::toString(missingArp), loaded).failed(),
-            "v17 without arp rate accepted");
+            "v18 without arp rate accepted");
     auto invalidLive = lively;
     invalidLive.tracks[0].liveFx.octaves = 4;
     require(!invalidLive.valid(), "arp octave validated");
+
+    // v18 persists the chord track; older files open chordless.
+    auto chorded = project;
+    chorded.musicKey = 0;
+    chorded.song.sections = 4;
+    chorded.song.chords[0] = { 9, sonora::ChordType::Minor };
+    chorded.song.chords[3] = { 5, sonora::ChordType::Major };
+    require(chorded.valid(), "chord fixture rejected");
+    const auto chordJson = sonora::ProjectIO::encode(chorded);
+    require(sonora::ProjectIO::decode(chordJson, loaded).wasOk() && loaded == chorded
+            && juce::String(sonora::chordLabel(loaded.song.chords[0])) == "Am"
+            && juce::String(sonora::chordLabel(loaded.song.chords[3])) == "F"
+            && sonora::chordTranspose(loaded.song.chords[3], 0) == 5,
+            "chord track round-trip failed");
+    auto legacyChords = juce::JSON::parse(chordJson);
+    legacyChords.getDynamicObject()->setProperty("version", 17);
+    legacyChords.getDynamicObject()->getProperty("song").getDynamicObject()->removeProperty("chords");
+    require(sonora::ProjectIO::decode(juce::JSON::toString(legacyChords), loaded).wasOk()
+            && !loaded.song.chords[0].set() && !loaded.song.chords[3].set(),
+            "v17 did not open chordless");
+    auto badRoot = juce::JSON::parse(chordJson);
+    badRoot.getDynamicObject()->getProperty("song").getDynamicObject()->getProperty("chords")
+        .getArray()->getReference(0).getDynamicObject()->setProperty("root", 12);
+    loaded = chorded;
+    require(sonora::ProjectIO::decode(juce::JSON::toString(badRoot), loaded).failed(),
+            "out-of-range chord root accepted");
+    require(loaded == chorded, "bad chord destroyed current state");
+    auto missingChords = juce::JSON::parse(chordJson);
+    missingChords.getDynamicObject()->getProperty("song").getDynamicObject()->removeProperty("chords");
+    loaded = chorded;
+    require(sonora::ProjectIO::decode(juce::JSON::toString(missingChords), loaded).failed(),
+            "v18 without chords accepted");
 
     // v17 persists take solos; older files open with solos off.
     auto comped = project;
@@ -3615,6 +3726,7 @@ int main()
         testRecorder(); std::cout << "PASS FIFO recorder write/read integrity, overruns, validation\n";
         testTakePlayback(); std::cout << "PASS song-mode take offset/level, mute, loop-mode silence\n";
         testTakeSolo(); std::cout << "PASS take solo comping\n";
+        testChordTrack(); std::cout << "PASS chord track, follow transpose, AI chords\n";
         testVariations(); std::cout << "PASS pattern library round-trip, v5 migration, malformed slots\n";
         testInstances(); std::cout << "PASS make-unique detach, full-library refusal, sharing queries\n";
         testOmarchyTheme(); std::cout << "PASS theme parse, palette map, fallbacks, live load\n";

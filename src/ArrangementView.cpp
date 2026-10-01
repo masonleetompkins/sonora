@@ -60,6 +60,13 @@ juce::Rectangle<float> ArrangementView::headerBounds(int section) const
     return { l.gridLeft + l.columnWidth * static_cast<float>(section), l.headerTop, l.columnWidth - 4.0f, l.headerHeight };
 }
 
+juce::Rectangle<float> ArrangementView::chordBounds(int section) const
+{
+    const auto l = layout();
+    return { l.gridLeft + l.columnWidth * static_cast<float>(section), l.headerTop + l.headerHeight - 20.0f,
+             l.columnWidth - 4.0f, 18.0f };
+}
+
 juce::Rectangle<float> ArrangementView::cellBounds(int section, int row) const
 {
     const auto l = layout();
@@ -84,7 +91,10 @@ ArrangementView::Hit ArrangementView::locate(juce::Point<float> p) const
     {
         const int section = static_cast<int>(std::floor((p.x - l.gridLeft) / l.columnWidth));
         if (p.x >= l.gridLeft && section >= 0 && section < state.song.sections)
-            return { Hit::Area::Header, section, -1, -1 };
+        {
+            hit = { Hit::Area::Header, section, -1, -1, p.y >= l.headerTop + l.headerHeight - 22.0f };
+            return hit;
+        }
         const float addLeft = l.gridLeft + l.columnWidth * static_cast<float>(state.song.sections);
         if (p.x >= addLeft && p.x < addLeft + l.addWidth)
             return { Hit::Area::Add, -1, -1, -1 };
@@ -149,9 +159,32 @@ void ArrangementView::paint(juce::Graphics& g)
         g.setColour(ui::muted);
         g.setFont(ui::font(10.5f));
         g.drawText(juce::String(s * 4 + 1) + (area.getWidth() > 50.0f ? "-" + juce::String(s * 4 + 4) : juce::String()),
-                   area.reduced(5.0f, 4.0f).withTrimmedTop(26.0f).withTrimmedLeft(s == state.selected ? 10.0f : 0.0f)
-                       .toNearestInt(),
+                   area.reduced(5.0f, 4.0f).withTrimmedTop(26.0f).withTrimmedBottom(20.0f)
+                       .withTrimmedLeft(s == state.selected ? 10.0f : 0.0f).toNearestInt(),
                    juce::Justification::centredLeft);
+        // Chord strip: the section's chord and its loop transpose, or a hint.
+        const auto chord = song.chords[static_cast<std::size_t>(s)];
+        const auto strip = chordBounds(s);
+        const bool narrowStrip = strip.getWidth() < 52.0f;
+        if (chord.set())
+        {
+            const auto shift = chordTranspose(chord, state.musicKey);
+            g.setColour(ui::violet.withAlpha(0.85f));
+            g.fillRoundedRectangle(strip.reduced(strip.getWidth() > 60.0f ? 8.0f : 2.0f, 1.0f), 8.0f);
+            g.setColour(ui::text);
+            g.setFont(ui::font(11.0f, true));
+            const auto text = chordLabel(chord)
+                + (shift != 0 && !narrowStrip
+                       ? (shift > 0 ? " +" + juce::String(shift) : " " + juce::String(shift)) : juce::String());
+            g.drawFittedText(text, strip.toNearestInt(), juce::Justification::centred, 1, 0.6f);
+        }
+        else
+        {
+            g.setColour(ui::muted.withAlpha(hover.area == Hit::Area::Header && hover.section == s && hover.chord
+                                                ? 0.9f : 0.45f));
+            g.setFont(ui::font(11.0f));
+            g.drawFittedText(narrowStrip ? "+" : "+ chord", strip.toNearestInt(), juce::Justification::centred, 1);
+        }
     }
     // Add-part button.
     if (song.sections < maxSections)
@@ -277,6 +310,11 @@ void ArrangementView::mouseDown(const juce::MouseEvent& event)
         if (event.mods.isPopupMenu())
         {
             showHeaderMenu(hit.section);
+            return;
+        }
+        if (hit.chord)
+        {
+            showChordMenu(hit.section);
             return;
         }
         emit({ ArrangementAction::Kind::SelectSection, hit.section });
@@ -491,6 +529,40 @@ void ArrangementView::showHeaderMenu(int section)
                 safe->emit({ K::Move, section, -1, section + 1 });
             else if (result == 7)
                 safe->emit({ K::Remove, section });
+        });
+}
+void ArrangementView::showChordMenu(int section)
+{
+    const auto current = state.song.chords[static_cast<std::size_t>(section)];
+    juce::PopupMenu menu;
+    menu.addSectionHeader("Chord for bars " + juce::String(section * 4 + 1) + "-" + juce::String(section * 4 + 4)
+                          + "  /  loops transpose to follow it");
+    menu.addItem(1, "No chord (play loops as written)", true, !current.set());
+    menu.addSeparator();
+    for (int root = 0; root < 12; ++root)
+    {
+        juce::PopupMenu types;
+        for (int c = 0; c < static_cast<int>(ChordType::numChords); ++c)
+        {
+            const SectionChord candidate { root, static_cast<ChordType>(c) };
+            types.addItem(100 + root * 8 + c, chordLabel(candidate), true,
+                          current.set() && current.root == root && current.type == candidate.type);
+        }
+        menu.addSubMenu(keyName(root), types);
+    }
+    menu.showMenuAsync(juce::PopupMenu::Options().withMousePosition(),
+        [safe = juce::Component::SafePointer<ArrangementView>(this), section](int result) {
+            if (safe == nullptr || result == 0)
+                return;
+            using K = ArrangementAction::Kind;
+            if (result == 1)
+                safe->emit({ K::SetChord, section, -1, 0 });
+            else if (result >= 100)
+            {
+                const int v = result - 100;
+                const int root = v / 8, type = v % 8;
+                safe->emit({ K::SetChord, section, -1, (root + 1) * 16 + type });
+            }
         });
 }
 }

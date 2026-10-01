@@ -359,7 +359,7 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
         bool finished = false;
         if (songMode)
             finished = scheduler.processSong(active.tracks, active.song, block.numSamples,
-                                             tracksChanged || tempoChanged, emitNote);
+                                             tracksChanged || tempoChanged, emitNote, active.musicKey);
         else
         {
             for (int track = 0; track < maxTracks; ++track)
