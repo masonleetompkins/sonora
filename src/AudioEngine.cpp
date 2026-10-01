@@ -190,13 +190,30 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
         sendDelayFx.reset();
         sendReverbFx.reset();
     }
+    // Automation rides the loop tick (per-section slot in song mode), so
+    // curves follow their loops wherever they play.
+    const double tickAtBlockStart = scheduler.tickPosition();
+    const int sectionAtBlockStart = active.songMode
+        ? std::clamp(static_cast<int>(tickAtBlockStart) / patternTicks, 0, active.song.sections - 1) : 0;
+    const int loopTickAtBlockStart = std::clamp(
+        static_cast<int>(tickAtBlockStart) - sectionAtBlockStart * patternTicks, 0, patternTicks - 1);
     for (int track = 0; track < maxTracks; ++track)
     {
         auto& unit = units[static_cast<std::size_t>(track)];
-        if (!(incoming.tracks[static_cast<std::size_t>(track)].fx == unit.activeFx))
+        const auto laneSlot = automationSlot(track, sectionAtBlockStart);
+        auto effectiveFx = incoming.tracks[static_cast<std::size_t>(track)].fx;
+        effectiveFx.drive.amount = incoming.tracks[static_cast<std::size_t>(track)]
+                                       .automation[static_cast<std::size_t>(laneSlot)]
+                                       [static_cast<std::size_t>(AutomationTarget::Drive)]
+                                           .eval(loopTickAtBlockStart, effectiveFx.drive.amount);
+        effectiveFx.delay.mix = incoming.tracks[static_cast<std::size_t>(track)]
+                                    .automation[static_cast<std::size_t>(laneSlot)]
+                                    [static_cast<std::size_t>(AutomationTarget::DelayMix)]
+                                        .eval(loopTickAtBlockStart, effectiveFx.delay.mix);
+        if (!(effectiveFx == unit.activeFx))
         {
-            unit.chain.setParams(incoming.tracks[static_cast<std::size_t>(track)].fx);
-            unit.activeFx = incoming.tracks[static_cast<std::size_t>(track)].fx;
+            unit.chain.setParams(effectiveFx);
+            unit.activeFx = effectiveFx;
         }
     }
     for (int track = 0; track < maxTracks; ++track)
@@ -436,13 +453,22 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
         unit.sampled.select(active.tracks[static_cast<std::size_t>(track)].instrumentPreset);
         // Render into an isolated, preallocated stereo buffer. Applying an
         // insert or fader to the master buffer would alter earlier tracks.
-        const float target = kind == TrackKind::Synth && audible(track, active)
-            ? active.tracks[static_cast<std::size_t>(track)].mix.volume : 0.0f;
-        unit.gain.setTargetValue(kind == TrackKind::Drums ? 1.0f : target);
         const auto& mix = active.tracks[static_cast<std::size_t>(track)].mix;
-        const float panL = std::min(1.0f, 1.0f - mix.pan), panR = std::min(1.0f, 1.0f + mix.pan);
-        sendSmooth[static_cast<std::size_t>(track)][0].setTargetValue(mix.sendDelay);
-        sendSmooth[static_cast<std::size_t>(track)][1].setTargetValue(mix.sendReverb);
+        const auto& lanes = active.tracks[static_cast<std::size_t>(track)]
+                                .automation[static_cast<std::size_t>(
+                                    automationSlot(track, sectionAtBlockStart))];
+        const auto laneValue = [&](AutomationTarget target, float base) {
+            return lanes[static_cast<std::size_t>(target)].eval(loopTickAtBlockStart, base);
+        };
+        const float autoVolume = laneValue(AutomationTarget::Volume, mix.volume);
+        const float autoPan = laneValue(AutomationTarget::Pan, mix.pan);
+        const float target = kind == TrackKind::Synth && audible(track, active) ? autoVolume : 0.0f;
+        unit.gain.setTargetValue(kind == TrackKind::Drums ? 1.0f : target);
+        const float panL = std::min(1.0f, 1.0f - autoPan), panR = std::min(1.0f, 1.0f + autoPan);
+        sendSmooth[static_cast<std::size_t>(track)][0].setTargetValue(
+            laneValue(AutomationTarget::SendDelay, mix.sendDelay));
+        sendSmooth[static_cast<std::size_t>(track)][1].setTargetValue(
+            laneValue(AutomationTarget::SendReverb, mix.sendReverb));
         for (int offset = 0; offset < block.numSamples; offset += 512)
         {
             const int count = std::min(512, block.numSamples - offset);
@@ -462,7 +488,7 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
             }
             else
                 unit.drums.render(trackBuffer, 0, count, renderEvents,
-                    audible(track, active) ? active.tracks[static_cast<std::size_t>(track)].mix.volume : 0.0f);
+                    audible(track, active) ? autoVolume : 0.0f);
             unit.chain.process(trackBuffer, 0, count);
             for (int frame = 0; frame < count; ++frame)
             {

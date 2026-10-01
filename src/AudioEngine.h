@@ -76,6 +76,16 @@ public:
 
 private:
     bool audible(int track, const ProjectState& state) const;
+    // Loop slot whose automation rides this track this block.
+    int automationSlot(int track, int section) const
+    {
+        const auto t = static_cast<std::size_t>(std::clamp(track, 0, maxTracks - 1));
+        const auto s = static_cast<std::size_t>(std::clamp(section, 0, maxSections - 1));
+        if (active.songMode)
+            return std::clamp(static_cast<int>(active.song.slots[s][t]), 0, numPatterns - 1);
+        const bool drums = active.tracks[t].kind == TrackKind::Drums;
+        return std::clamp((drums ? loopDrumSlots[t] : loopMelodySlots[t]).load(), 0, numPatterns - 1);
+    }
     std::array<TrackUnit, maxTracks> units;
     BrickLimiter master;
     juce::MidiBuffer midi;

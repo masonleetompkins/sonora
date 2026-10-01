@@ -18,6 +18,8 @@ Build 1-8, skip the rest.
    DONE (post-fader delay/reverb sends, return buses, pan, mixer view,
    format v19).
 7. **Automation lanes** (volume/pan/FX; format bump).
+   DONE (per-loop curves for volume/pan/sends/drive/delay-mix, lane
+   editor, engine following, format v20).
 8. **Time-stretch for takes** (Rubber Band library integration).
 
 Deferred (do not build): stem separation (ML model weight, giants do it

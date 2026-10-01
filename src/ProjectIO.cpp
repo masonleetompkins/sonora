@@ -352,6 +352,29 @@ std::unique_ptr<juce::DynamicObject> encodeTrackState(const Track& track)
     object->setProperty("pan", static_cast<double>(track.mix.pan));
     object->setProperty("sendDelay", static_cast<double>(track.mix.sendDelay));
     object->setProperty("sendReverb", static_cast<double>(track.mix.sendReverb));
+    juce::Array<juce::var> automation;
+    for (int slot = 0; slot < numPatterns; ++slot)
+        for (int t = 0; t < static_cast<int>(AutomationTarget::numTargets); ++t)
+        {
+            const auto& lane = track.automation[static_cast<std::size_t>(slot)][static_cast<std::size_t>(t)];
+            if (lane.count <= 0)
+                continue;
+            auto* laneObject = new juce::DynamicObject();
+            laneObject->setProperty("slot", slot);
+            laneObject->setProperty("target", t);
+            juce::Array<juce::var> points;
+            for (int i = 0; i < lane.count; ++i)
+            {
+                const auto& point = lane.points[static_cast<std::size_t>(i)];
+                juce::Array<juce::var> pair;
+                pair.add(point.tick);
+                pair.add(static_cast<double>(point.value));
+                points.add(pair);
+            }
+            laneObject->setProperty("points", points);
+            automation.add(juce::var(laneObject));
+        }
+    object->setProperty("automation", automation);
     juce::Array<juce::var> melodies;
     for (const auto& pattern : track.melodies)
         melodies.add(encodeNotes(pattern));
@@ -388,7 +411,7 @@ std::unique_ptr<juce::DynamicObject> encodeTrackState(const Track& track)
 
 juce::Result decodeTrackState(const juce::var& value, Track& track, bool requirePreset, bool requireSynth,
                               bool requireExtendedFx, bool requireGroove, bool requireLiveFx,
-                              bool requireMix)
+                              bool requireMix, bool requireAutomation)
 {
     const auto* object = value.getDynamicObject();
     if (object == nullptr)
@@ -452,6 +475,49 @@ juce::Result decodeTrackState(const juce::var& value, Track& track, bool require
     if (!mix.valid())
         return juce::Result::fail("Track mix out of range.");
     candidate.mix = mix;
+    if (requireAutomation)
+    {
+        const auto* automation = object->getProperty("automation").getArray();
+        if (automation == nullptr)
+            return juce::Result::fail("Invalid track automation.");
+        for (const auto& item : *automation)
+        {
+            const auto* laneObject = item.getDynamicObject();
+            if (laneObject == nullptr)
+                return juce::Result::fail("Invalid automation lane.");
+            const auto slot = laneObject->getProperty("slot");
+            const auto target = laneObject->getProperty("target");
+            const auto* points = laneObject->getProperty("points").getArray();
+            if (!integer(slot) || !integer(target) || points == nullptr
+                || static_cast<juce::int64>(slot) < 0 || static_cast<juce::int64>(slot) >= numPatterns
+                || static_cast<juce::int64>(target) < 0
+                || static_cast<juce::int64>(target) >= static_cast<juce::int64>(AutomationTarget::numTargets)
+                || points->size() > maxAutomationPoints)
+                return juce::Result::fail("Invalid automation lane.");
+            const auto laneTarget = static_cast<AutomationTarget>(static_cast<int>(target));
+            const auto [lo, hi] = automationRange(laneTarget);
+            AutomationLane lane;
+            for (const auto& pair : *points)
+            {
+                const auto* entry = pair.getArray();
+                if (entry == nullptr || entry->size() != 2 || !integer((*entry)[0]) || !number((*entry)[1]))
+                    return juce::Result::fail("Invalid automation point.");
+                const int tick = static_cast<int>((*entry)[0]);
+                const float pointValue = static_cast<float>((*entry)[1]);
+                if (tick < 0 || tick > patternTicks || pointValue < lo || pointValue > hi)
+                    return juce::Result::fail("Automation point out of range.");
+                lane.points[static_cast<std::size_t>(lane.count++)] = { tick, pointValue };
+            }
+            std::stable_sort(lane.points.begin(), lane.points.begin() + lane.count,
+                             [](const AutomationPoint& a, const AutomationPoint& b) {
+                                 return a.tick < b.tick;
+                             });
+            if (!lane.valid())
+                return juce::Result::fail("Automation lane out of range.");
+            candidate.automation[static_cast<std::size_t>(static_cast<int>(slot))]
+                                [static_cast<std::size_t>(static_cast<int>(laneTarget))] = lane;
+        }
+    }
     const auto* patterns = object->getProperty("patterns").getArray();
     if (patterns == nullptr || patterns->size() != numPatterns)
         return juce::Result::fail("Invalid track pattern library.");
@@ -524,7 +590,7 @@ juce::String ProjectIO::encode(const ProjectState& state)
 {
     auto root = std::make_unique<juce::DynamicObject>();
     root->setProperty("format", "sonora-project");
-    root->setProperty("version", 19);
+    root->setProperty("version", 20);
     root->setProperty("bpm", state.bpm);
     root->setProperty("musicKey", state.musicKey);
     root->setProperty("musicScale", static_cast<int>(state.musicScale));
@@ -797,7 +863,7 @@ juce::Result ProjectIO::decode(const juce::String& json, ProjectState& destinati
     if (!integer(version))
         return juce::Result::fail("Unsupported project version.");
     const auto versionNumber = static_cast<juce::int64>(version);
-    if (versionNumber < 1 || versionNumber > 19)
+    if (versionNumber < 1 || versionNumber > 20)
         return juce::Result::fail("Unsupported project version.");
     if (!integer(root->getProperty("ticksPerQuarter")) || !integer(root->getProperty("lengthTicks"))
         || static_cast<juce::int64>(root->getProperty("ticksPerQuarter")) != ticksPerQuarter
@@ -910,7 +976,7 @@ juce::Result ProjectIO::decode(const juce::String& json, ProjectState& destinati
         {
             result = decodeTrackState((*tracks)[track], candidate.tracks[static_cast<std::size_t>(track)],
                                       versionNumber >= 10, versionNumber >= 11, versionNumber >= 12, versionNumber >= 14,
-                                      versionNumber >= 16, versionNumber >= 19);
+                                      versionNumber >= 16, versionNumber >= 19, versionNumber >= 20);
             if (result.failed())
                 return result;
         }

@@ -412,6 +412,98 @@ struct LiveFx
     bool operator==(const LiveFx&) const = default;
 };
 
+// Automation lanes: per-track, per-loop-slot point curves for mix and key FX
+// parameters, evaluated at the loop tick in both loop and song playback.
+// Empty lanes defer to the stored mix/FX values. Fixed capacity keeps the
+// project trivially copyable for the engine snapshot queue.
+enum class AutomationTarget : std::uint8_t
+{
+    Volume = 0, Pan, SendDelay, SendReverb, Drive, DelayMix, numTargets
+};
+
+inline const char* automationTargetName(AutomationTarget target)
+{
+    switch (target)
+    {
+        case AutomationTarget::Volume: return "Volume";
+        case AutomationTarget::Pan: return "Pan";
+        case AutomationTarget::SendDelay: return "Send delay";
+        case AutomationTarget::SendReverb: return "Send reverb";
+        case AutomationTarget::Drive: return "Drive";
+        case AutomationTarget::DelayMix: return "Delay mix";
+        case AutomationTarget::numTargets: break;
+    }
+    return "Volume";
+}
+
+inline std::pair<float, float> automationRange(AutomationTarget target)
+{
+    switch (target)
+    {
+        case AutomationTarget::Volume: return { 0.0f, 1.5f };
+        case AutomationTarget::Pan: return { -1.0f, 1.0f };
+        case AutomationTarget::SendDelay:
+        case AutomationTarget::SendReverb:
+        case AutomationTarget::Drive:
+        case AutomationTarget::DelayMix:
+        case AutomationTarget::numTargets: break;
+    }
+    return { 0.0f, 1.0f };
+}
+
+inline constexpr int maxAutomationPoints = 32;
+
+struct AutomationPoint
+{
+    int tick = 0;
+    float value = 0.0f;
+    bool operator==(const AutomationPoint&) const = default;
+};
+
+struct AutomationLane
+{
+    std::array<AutomationPoint, maxAutomationPoints> points {};
+    int count = 0;
+    bool valid() const
+    {
+        if (count < 0 || count > maxAutomationPoints)
+            return false;
+        for (int i = 0; i < count; ++i)
+        {
+            const auto& point = points[static_cast<std::size_t>(i)];
+            if (point.tick < 0 || point.tick > patternTicks || !std::isfinite(point.value))
+                return false;
+            if (i > 0 && point.tick < points[static_cast<std::size_t>(i - 1)].tick)
+                return false;
+        }
+        return true;
+    }
+    // Piecewise-linear at tick, ends held; empty lanes return the base value.
+    float eval(int tick, float base) const
+    {
+        if (count <= 0)
+            return base;
+        const auto& first = points[0];
+        if (tick <= first.tick)
+            return first.value;
+        for (int i = 1; i < count; ++i)
+        {
+            const auto& point = points[static_cast<std::size_t>(i)];
+            if (tick <= point.tick)
+            {
+                const auto& previous = points[static_cast<std::size_t>(i - 1)];
+                const int span = point.tick - previous.tick;
+                if (span <= 0)
+                    return point.value;
+                const float t = static_cast<float>(tick - previous.tick) / static_cast<float>(span);
+                return previous.value + (point.value - previous.value) * t;
+            }
+        }
+        return points[static_cast<std::size_t>(count - 1)].value;
+    }
+    bool operator==(const AutomationLane&) const = default;
+};
+
 struct TrackMix
 {
     float volume = 0.8f;
@@ -477,6 +569,8 @@ struct Track
     TrackFx fx;
     float swing = 0.0f;
     LiveFx liveFx;
+    // Automation lanes per loop slot, then target.
+    std::array<std::array<AutomationLane, static_cast<std::size_t>(AutomationTarget::numTargets)>, numPatterns> automation {};
     bool valid() const
     {
         // Empty slots carry no identity and their content is ignored.
@@ -494,6 +588,21 @@ struct Track
             return false;
         if (!liveFx.valid())
             return false;
+        for (int slot = 0; slot < numPatterns; ++slot)
+            for (int t = 0; t < static_cast<int>(AutomationTarget::numTargets); ++t)
+            {
+                const auto target = static_cast<AutomationTarget>(t);
+                const auto& lane = automation[static_cast<std::size_t>(slot)][static_cast<std::size_t>(t)];
+                if (!lane.valid())
+                    return false;
+                const auto [lo, hi] = automationRange(target);
+                for (int i = 0; i < lane.count; ++i)
+                {
+                    const auto v = lane.points[static_cast<std::size_t>(i)].value;
+                    if (v < lo || v > hi)
+                        return false;
+                }
+            }
         for (const auto& pattern : melodies)
             if (!pattern.valid())
                 return false;

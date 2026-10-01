@@ -2104,6 +2104,294 @@ private:
     juce::String lastSignature = "none";
 };
 
+// Automation lane editor: point curves per loop for mix/FX targets. Click
+// adds a point, dragging moves it (order preserved), right-click deletes.
+// All mutations leave through onLaneChange so the owner applies undo.
+class AutomationView final : public juce::Component
+{
+public:
+    std::function<void(AutomationTarget)> onTargetChange;
+    std::function<void(AutomationLane)> onLaneChange;
+    std::function<void()> onGestureBegin, onGestureEnd;
+
+    AutomationView()
+    {
+        for (int t = 0; t < static_cast<int>(AutomationTarget::numTargets); ++t)
+        {
+            auto& tab = tabs[static_cast<std::size_t>(t)];
+            addAndMakeVisible(tab);
+            tab.setButtonText(automationTargetName(static_cast<AutomationTarget>(t)));
+            tab.setWantsKeyboardFocus(false);
+            tab.onClick = [this, t] {
+                if (onTargetChange) onTargetChange(static_cast<AutomationTarget>(t));
+            };
+        }
+        addAndMakeVisible(clear);
+        clear.setButtonText("Clear");
+        clear.setWantsKeyboardFocus(false);
+        clear.setTooltip("Delete every point in this lane (undoable).");
+        clear.onClick = [this] {
+            if (onLaneChange) onLaneChange(AutomationLane {});
+        };
+        addAndMakeVisible(readout);
+        readout.setFont(ui::font(11.0f));
+        readout.setColour(juce::Label::textColourId, ui::muted);
+        readout.setJustificationType(juce::Justification::centredRight);
+    }
+
+    void setTarget(AutomationTarget next)
+    {
+        target = next < AutomationTarget::numTargets ? next : AutomationTarget::Volume;
+        for (int t = 0; t < static_cast<int>(AutomationTarget::numTargets); ++t)
+            tabs[static_cast<std::size_t>(t)].setToggleState(
+                static_cast<AutomationTarget>(t) == target, juce::dontSendNotification);
+        selected = -1;
+        repaint();
+    }
+
+    void setLane(const AutomationLane& next, int playTick, bool running)
+    {
+        lane = next.count <= maxAutomationPoints ? next : AutomationLane {};
+        playhead = playTick;
+        playing = running;
+        if (selected >= lane.count)
+            selected = -1;
+        refreshReadout();
+        repaint(canvasArea().toNearestInt());
+    }
+
+    void resized() override
+    {
+        const int tabW = 92;
+        int y = 6;
+        for (auto& tab : tabs)
+        {
+            tab.setBounds(8, y, tabW, 22);
+            y += 26;
+        }
+        clear.setBounds(8, y + 2, tabW, 22);
+        readout.setBounds(getWidth() - 220, getHeight() - 22, 212, 18);
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        ui::surface(g, getLocalBounds().toFloat(), 10.0f);
+        ui::caption(g, "AUTOMATION  /  CLICK ADD  DRAG MOVE  RIGHT-CLICK DELETE",
+                    { 108, 8, 400, 16 }, ui::muted, 9.0f);
+        const auto canvas = canvasArea();
+        g.setColour(juce::Colour(0xff0c111b));
+        g.fillRoundedRectangle(canvas, 6.0f);
+        const auto [lo, hi] = automationRange(target);
+        // Center line for bipolar targets.
+        if (lo < 0.0f)
+        {
+            const auto cy = valueY(0.0f);
+            g.setColour(ui::border.withAlpha(0.7f));
+            g.drawHorizontalLine(static_cast<int>(cy), canvas.getX() + 4.0f, canvas.getRight() - 4.0f);
+        }
+        // Playhead.
+        if (playing && playhead >= 0)
+        {
+            g.setColour(ui::cyan.withAlpha(0.5f));
+            const auto x = tickX(playhead);
+            g.drawVerticalLine(static_cast<int>(x), canvas.getY() + 4.0f, canvas.getBottom() - 4.0f);
+        }
+        // Curve.
+        g.setColour(ui::cyan.withAlpha(0.9f));
+        const auto point = [&](int i) {
+            const auto& p = lane.points[static_cast<std::size_t>(i)];
+            return juce::Point<float>(tickX(p.tick), valueY(p.value));
+        };
+        if (lane.count == 1)
+        {
+            const auto dot = point(0);
+            g.fillEllipse(dot.x - 3.0f, dot.y - 3.0f, 6.0f, 6.0f);
+            g.drawHorizontalLine(static_cast<int>(dot.y), canvas.getX() + 4.0f, canvas.getRight() - 4.0f);
+        }
+        else
+        {
+            juce::Path curve;
+            curve.startNewSubPath(juce::Point<float>(canvas.getX() + 4.0f, point(0).y));
+            curve.lineTo(point(0));
+            for (int i = 1; i < lane.count; ++i)
+                curve.lineTo(point(i));
+            curve.lineTo(juce::Point<float>(canvas.getRight() - 4.0f, point(lane.count - 1).y));
+            g.strokePath(curve, juce::PathStrokeType(1.5f));
+        }
+        for (int i = 0; i < lane.count; ++i)
+        {
+            const auto c = point(i);
+            g.setColour(i == selected ? ui::text : ui::cyan);
+            g.fillEllipse(c.x - 4.0f, c.y - 4.0f, 8.0f, 8.0f);
+            g.setColour(juce::Colour(0xff0c111b));
+            g.fillEllipse(c.x - 1.5f, c.y - 1.5f, 3.0f, 3.0f);
+        }
+        if (lane.count == 0)
+        {
+            g.setColour(ui::muted.withAlpha(0.7f));
+            g.setFont(ui::font(11.0f));
+            g.drawText("No automation: this loop uses the mixer and FX settings.",
+                       canvas.toNearestInt(), juce::Justification::centred);
+        }
+    }
+
+    void mouseDown(const juce::MouseEvent& event) override
+    {
+        if (!canvasArea().contains(event.position))
+            return;
+        if (onGestureBegin) onGestureBegin();
+        gestureOpen = true;
+        const int hit = pointAt(event.position);
+        if (event.mods.isRightButtonDown())
+        {
+            if (hit >= 0)
+            {
+                auto next = lane;
+                for (int i = hit; i + 1 < next.count; ++i)
+                    next.points[static_cast<std::size_t>(i)] = next.points[static_cast<std::size_t>(i + 1)];
+                --next.count;
+                selected = -1;
+                publish(next);
+            }
+            endGesture();
+            return;
+        }
+        if (hit >= 0)
+        {
+            selected = hit;
+            refreshReadout();
+            repaint(canvasArea().toNearestInt());
+            return;
+        }
+        if (lane.count >= maxAutomationPoints)
+        {
+            endGesture();
+            return;
+        }
+        auto next = lane;
+        const AutomationPoint made { xTick(event.position.x), yValue(event.position.y) };
+        int at = next.count;
+        for (int i = 0; i < next.count; ++i)
+            if (made.tick < next.points[static_cast<std::size_t>(i)].tick)
+            {
+                at = i;
+                break;
+            }
+        for (int i = next.count; i > at; --i)
+            next.points[static_cast<std::size_t>(i)] = next.points[static_cast<std::size_t>(i - 1)];
+        next.points[static_cast<std::size_t>(at)] = made;
+        ++next.count;
+        selected = at;
+        publish(next);
+    }
+
+    void mouseDrag(const juce::MouseEvent& event) override
+    {
+        if (!gestureOpen || selected < 0 || selected >= lane.count)
+            return;
+        const auto [lo, hi] = automationRange(target);
+        const int prevTick = selected > 0 ? lane.points[static_cast<std::size_t>(selected - 1)].tick : 0;
+        const int nextTick = selected + 1 < lane.count ? lane.points[static_cast<std::size_t>(selected + 1)].tick
+                                                       : patternTicks;
+        auto next = lane;
+        auto& point = next.points[static_cast<std::size_t>(selected)];
+        point.tick = std::clamp(xTick(event.position.x), prevTick, nextTick);
+        point.value = std::clamp(yValue(event.position.y), lo, hi);
+        publish(next);
+    }
+
+    void mouseUp(const juce::MouseEvent&) override { endGesture(); }
+
+private:
+    juce::Rectangle<float> canvasArea() const
+    {
+        return { 108.0f, 28.0f, static_cast<float>(getWidth()) - 118, static_cast<float>(getHeight()) - 56 };
+    }
+    float tickX(int tick) const
+    {
+        const auto canvas = canvasArea();
+        return canvas.getX() + 4.0f
+            + static_cast<float>(tick) / static_cast<float>(patternTicks) * (canvas.getWidth() - 8.0f);
+    }
+    float valueY(float value) const
+    {
+        const auto canvas = canvasArea();
+        const auto [lo, hi] = automationRange(target);
+        const float t = hi > lo ? (value - lo) / (hi - lo) : 0.0f;
+        return canvas.getBottom() - 4.0f - std::clamp(t, 0.0f, 1.0f) * (canvas.getHeight() - 8.0f);
+    }
+    int xTick(float x) const
+    {
+        const auto canvas = canvasArea();
+        const float t = (x - canvas.getX() - 4.0f) / (canvas.getWidth() - 8.0f);
+        return std::clamp(static_cast<int>(std::round(t * patternTicks)), 0, patternTicks);
+    }
+    float yValue(float y) const
+    {
+        const auto canvas = canvasArea();
+        const auto [lo, hi] = automationRange(target);
+        const float t = (canvas.getBottom() - 4.0f - y) / (canvas.getHeight() - 8.0f);
+        const float v = lo + std::clamp(t, 0.0f, 1.0f) * (hi - lo);
+        return target == AutomationTarget::Volume ? std::round(v * 100.0f) / 100.0f
+                                                  : std::round(v * 200.0f) / 200.0f;
+    }
+    int pointAt(juce::Point<float> p) const
+    {
+        int best = -1;
+        float bestDist = 9.0f;
+        for (int i = 0; i < lane.count; ++i)
+        {
+            const auto& point = lane.points[static_cast<std::size_t>(i)];
+            const float dist = p.getDistanceFrom({ tickX(point.tick), valueY(point.value) });
+            if (dist < bestDist)
+            {
+                bestDist = dist;
+                best = i;
+            }
+        }
+        return best;
+    }
+    void publish(const AutomationLane& next)
+    {
+        lane = next;
+        if (selected >= lane.count)
+            selected = -1;
+        refreshReadout();
+        repaint(canvasArea().toNearestInt());
+        if (onLaneChange) onLaneChange(next);
+    }
+    void endGesture()
+    {
+        if (gestureOpen)
+        {
+            gestureOpen = false;
+            if (onGestureEnd) onGestureEnd();
+        }
+    }
+    void refreshReadout()
+    {
+        if (selected >= 0 && selected < lane.count)
+        {
+            const auto& point = lane.points[static_cast<std::size_t>(selected)];
+            readout.setText("bar " + juce::String(point.tick / (patternTicks / 4) + 1) + "  /  "
+                                + juce::String(point.value, 2),
+                            juce::dontSendNotification);
+        }
+        else
+            readout.setText(juce::String(lane.count) + (lane.count == 1 ? " point" : " points"),
+                            juce::dontSendNotification);
+    }
+
+    std::array<juce::TextButton, static_cast<std::size_t>(AutomationTarget::numTargets)> tabs;
+    juce::TextButton clear;
+    juce::Label readout;
+    AutomationTarget target = AutomationTarget::Volume;
+    AutomationLane lane;
+    int selected = -1;
+    int playhead = -1;
+    bool playing = false, gestureOpen = false;
+};
+
 // Groove popup: per-track swing plus destructive quantize/humanize for
 // the selected loop. Lives in a CallOutBox so the toolbar stays compact.
 struct GroovePanel : public juce::Component
@@ -2217,7 +2505,7 @@ MainComponent::MainComponent()
              &open, &save, &saveAs, &exportButton, &clear, &demo, &tempo, &drumSequencer,
              &audioTab, &mute, &solo, &trackVolume, &repeatBar, &kitButton, &outputMeter,
              &loopView, &songView, &mixView, &duplicatePattern, &themeButton, &grooveButton,
-             &keyButton, &chordButton, &arpButton, &rampButton })
+             &keyButton, &chordButton, &arpButton, &rampButton, &autoButton })
         addAndMakeVisible(component);
     for (auto* component : std::initializer_list<juce::Component*> { &songTemplate, &partChoice, &partTrackOn, &partHint })
         addChildComponent(component);
@@ -2423,7 +2711,7 @@ MainComponent::MainComponent()
              &newProject, &open, &save, &saveAs, &exportButton, &clear, &demo, &duplicatePattern,
              &audioTab, &mute, &solo, &repeatBar, &kitButton,
              &loopView, &songView, &mixView, &partTrackOn, &themeButton, &grooveButton,
-             &keyButton, &chordButton, &arpButton, &rampButton })
+             &keyButton, &chordButton, &arpButton, &rampButton, &autoButton })
         button->setWantsKeyboardFocus(false);
     for (int i = 0; i < numPatterns; ++i)
     {
@@ -2498,6 +2786,37 @@ MainComponent::MainComponent()
         });
         panel->refresh(project.tracks[sel].liveFx);
         juce::CallOutBox::launchAsynchronously(std::move(panel), arpButton.getScreenBounds(), this);
+    };
+    automationLane = std::make_unique<AutomationView>();
+    addChildComponent(automationLane.get());
+    automationLane->onTargetChange = [this](AutomationTarget target) {
+        automationTarget = target < AutomationTarget::numTargets ? target : AutomationTarget::Volume;
+        refreshAutomation();
+    };
+    automationLane->onLaneChange = [this](AutomationLane lane) {
+        const auto sel = std::clamp(selectedTrack, 0, maxTracks - 1);
+        auto& track = project.tracks[static_cast<std::size_t>(sel)];
+        if (track.kind == TrackKind::None || audioSelected)
+            return;
+        const int slot = std::clamp(drumsSelected ? trackDrumSlot[static_cast<std::size_t>(sel)]
+                                                  : trackMelodySlot[static_cast<std::size_t>(sel)],
+                                    0, numPatterns - 1);
+        const bool own = !editing;
+        if (own)
+            beginEdit();
+        track.automation[static_cast<std::size_t>(slot)][static_cast<std::size_t>(automationTarget)] = lane;
+        projectChanged();
+        if (own)
+            endEdit();
+    };
+    automationLane->onGestureBegin = [this] { beginEdit(); };
+    automationLane->onGestureEnd = [this] { endEdit(); };
+    autoButton.setTooltip("Automation lanes: draw volume, pan, send, and FX curves for this loop (undoable).");
+    autoButton.onClick = [this] {
+        automationVisible = !automationVisible;
+        updateSongControls();
+        resized();
+        repaint();
     };
     grooveButton.onClick = [this] {
         auto panel = std::make_unique<GroovePanel>(
@@ -3520,6 +3839,7 @@ void MainComponent::projectChanged()
     chordButton.setVisible(!audioSelected && !drumsSelected);
     arpButton.setVisible(!audioSelected && !drumsSelected);
     rampButton.setVisible(!audioSelected && !drumsSelected);
+    autoButton.setVisible(!audioSelected);
     for (int track = 0; track < maxTracks; ++track)
         engine.setLoopSelection(track, trackMelodySlot[static_cast<std::size_t>(track)],
                                 trackDrumSlot[static_cast<std::size_t>(track)]);
@@ -3627,6 +3947,22 @@ void MainComponent::refreshKeyButton()
     pianoRoll.setScale(project.musicKey, project.musicScale, snapScale);
 }
 
+void MainComponent::refreshAutomation()
+{
+    if (automationLane == nullptr)
+        return;
+    const auto sel = std::clamp(selectedTrack, 0, maxTracks - 1);
+    const auto& track = project.tracks[static_cast<std::size_t>(sel)];
+    const int slot = std::clamp(drumsSelected ? trackDrumSlot[static_cast<std::size_t>(sel)]
+                                              : trackMelodySlot[static_cast<std::size_t>(sel)],
+                                0, numPatterns - 1);
+    automationLane->setTarget(automationTarget);
+    automationLane->setLane(track.automation[static_cast<std::size_t>(slot)]
+                                              [static_cast<std::size_t>(automationTarget)],
+                            static_cast<int>(std::fmod(engine.getTickPosition(), patternTicks)),
+                            engine.isPlaying());
+}
+
 void MainComponent::refreshArpButton()
 {
     const auto sel = static_cast<std::size_t>(std::clamp(selectedTrack, 0, maxTracks - 1));
@@ -3713,6 +4049,7 @@ void MainComponent::selectChannel(int channel)
     chordButton.setVisible(!audio && !drums);
     arpButton.setVisible(!audio && !drums);
     rampButton.setVisible(!audio && !drums);
+    autoButton.setVisible(!audio);
     kitButton.setVisible(drumsSelected);
     for (int i = 0; i < numPatterns; ++i)
     {
@@ -5334,6 +5671,8 @@ void MainComponent::timerCallback()
     }
     pianoRoll.setPlayhead(std::fmod(engine.getTickPosition(), patternTicks), running);
     drumSequencer.setPlayhead(std::fmod(engine.getTickPosition(), patternTicks), running);
+    if (automationLane != nullptr && automationLane->isVisible() && running)
+        refreshAutomation();
     // Highlight keys held on the MiniLab (or virtual keyboard) in the roll.
     {
         std::vector<int> held;
@@ -5720,8 +6059,13 @@ void MainComponent::resized()
     chordButton.setBounds(724, 256, 64, 28);
     arpButton.setBounds(794, 256, 60, 28);
     rampButton.setBounds(860, 256, 60, 28);
-    pianoRoll.setBounds(254, 354, contentWidth() - 292, getHeight() - 634);
+    autoButton.setBounds(926, 256, 56, 28);
+    const bool laneShown = automationLane != nullptr && automationLane->isVisible();
+    const int editorHeight = getHeight() - 634 - (laneShown ? 158 : 0);
+    pianoRoll.setBounds(254, 354, contentWidth() - 292, editorHeight);
     drumSequencer.setBounds(pianoRoll.getBounds());
+    if (automationLane != nullptr)
+        automationLane->setBounds(254, 354 + editorHeight + 8, contentWidth() - 292, 150);
     if (audioView != nullptr)
         audioView->setBounds(254, 258, contentWidth() - 292, getHeight() - 444);
     if (fxBar != nullptr)
@@ -5952,6 +6296,10 @@ void MainComponent::updateSongControls()
     loopView.setToggleState(!song, juce::dontSendNotification);
     songView.setToggleState(song, juce::dontSendNotification);
     mixView.setToggleState(mixerVisible && !audioSelected, juce::dontSendNotification);
+    autoButton.setToggleState(automationVisible && !audioSelected && !song, juce::dontSendNotification);
+    const bool showAutomation = automationVisible && !audioSelected && !song;
+    if (automationLane != nullptr)
+        automationLane->setVisible(showAutomation);
     if (arrangement == nullptr)
         return;
     arrangement->setVisible(song);
@@ -5960,7 +6308,8 @@ void MainComponent::updateSongControls()
     {
         for (juce::Component* c : std::initializer_list<juce::Component*> {
                  &pianoRoll, &drumSequencer, audioView.get(), &duplicatePattern, &clear, &kitButton,
-                 &repeatBar, &description, &instrumentChoice, &editSynth, &partChoice, &partTrackOn, &partHint })
+                 &repeatBar, &description, &instrumentChoice, &editSynth, &partChoice, &partTrackOn, &partHint,
+                 automationLane.get() })
             if (c != nullptr)
                 c->setVisible(false);
         for (auto& tab : patternTabs)
@@ -6000,6 +6349,8 @@ void MainComponent::updateSongControls()
     partHint.setText(hint, juce::dontSendNotification);
     const int hintX = partTrackOn.isVisible() ? 820 : 662;
     partHint.setBounds(hintX, 292, std::max(120, getWidth() - hintX - 200), 28);
+    if (showAutomation)
+        refreshAutomation();
     // Mixer replaces the editor (and the song board) but never the transport.
     const bool showMixer = mixerVisible && !audioSelected;
     if (mixer != nullptr)
@@ -6011,7 +6362,8 @@ void MainComponent::updateSongControls()
         for (juce::Component* c : std::initializer_list<juce::Component*> {
                  &pianoRoll, &drumSequencer, &duplicatePattern, &clear, &kitButton,
                  &repeatBar, &description, &instrumentChoice, &editSynth, &partChoice, &partTrackOn,
-                 &partHint, &grooveButton, &keyButton, &chordButton, &arpButton, &rampButton })
+                 &partHint, &grooveButton, &keyButton, &chordButton, &arpButton, &rampButton,
+                 automationLane.get() })
             if (c != nullptr)
                 c->setVisible(false);
         for (auto& tab : patternTabs)

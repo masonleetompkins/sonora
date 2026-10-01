@@ -130,6 +130,9 @@ a fallback or for direct hardware access.
   follow, and the AI composer writes new loops to fit the progression.
 - Mixer (MIX button): per-track faders, pan, mute/solo, and post-fader
   delay/reverb sends into two shared return buses, all live during playback.
+- Automation (AUTO button): per-loop curves for volume, pan, both sends,
+  drive, and delay mix, drawn under the editor and followed in loop and
+  song playback.
 - AI assistant sidebar (AI assistant button or Ctrl+I): chat with Claude on
   the right while you work. It writes or edits the selected track's melody
   or drum beat, sees the whole song structure and the other tracks in the
@@ -307,7 +310,8 @@ live arp/chord settings (older projects play MiniLab notes straight
 through), v17 adds per-take solos (older projects open unsoloed),
 and v18 adds the per-section chord track (older projects play as written).
 Format v19 adds per-track pan/sends and the return buses (older projects
-open centered and dry). It contains tempo, timing metadata, two
+open centered and dry), and v20 adds automation lanes (older projects
+follow the knob values). It contains tempo, timing metadata, two
 stable track IDs/instrument identifiers, track mix settings, per-track effect
 chains, master limiter settings, four melody patterns and four drum patterns
 per track, per-pad custom sample filenames, the factory kit variant, audio take

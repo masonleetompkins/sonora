@@ -22,6 +22,7 @@
 namespace sonora
 {
 class MixerView;
+class AutomationView;
 
 class MainComponent final : public juce::AudioAppComponent,
                               private juce::Timer,
@@ -115,6 +116,7 @@ private:
     juce::TextButton grooveButton { "Groove" };
     juce::TextButton keyButton { "Key: C Major" }, chordButton { "Chord" }, rampButton { "Ramp" };
     juce::TextButton arpButton { "Arp" };
+    juce::TextButton autoButton { "AUTO" };
     bool snapScale = true;
     std::array<juce::TextButton, numPatterns> patternTabs;
     std::array<juce::TextButton, maxTracks> trackButtons;
@@ -249,6 +251,10 @@ private:
     void applyVelocityRampToSelected(int startVel, int endVel);
     void refreshKeyButton();
     void refreshArpButton();
+    void refreshAutomation();
+    std::unique_ptr<AutomationView> automationLane;
+    bool automationVisible = false;
+    AutomationTarget automationTarget = AutomationTarget::Volume;
     void selectTrackIndex(int track);
     void setTrackIcon(int track, int icon);
     void moveTrack(int from, int to);

@@ -15,6 +15,7 @@
 #include "ProjectIO.h"
 #include <algorithm>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <thread>
 #include <tuple>
@@ -291,7 +292,8 @@ void testGroove()
     // Engine: a lone offbeat hit renders a full swung delay later.
     {
         auto render = [](float swing) {
-            sonora::AudioEngine engine;
+            auto engineStorage = std::make_unique<sonora::AudioEngine>();
+            auto& engine = *engineStorage;
             engine.prepare(48000.0);
             auto project = fixture();
             project.tracks[0].melodies[0] = {};
@@ -557,16 +559,16 @@ void testMixer()
     require(!sends.valid(), "clipping return validated");
 
     // Hard-left pan silences the right channel exactly; center is symmetric.
-    auto render = [](sonora::ProjectState project, int blocks) {
-        sonora::AudioEngine engine;
-        engine.prepare(48000.0);
-        require(engine.submit(project), "mix project rejected");
-        engine.setPlaying(true);
+    auto render = [](const sonora::ProjectState& project, int blocks) {
+        auto engine = std::make_unique<sonora::AudioEngine>();
+        engine->prepare(48000.0);
+        require(engine->submit(project), "mix project rejected");
+        engine->setPlaying(true);
         juce::AudioBuffer<float> buffer(2, 512);
         float peakL = 0.0f, peakR = 0.0f;
         for (int i = 0; i < blocks; ++i)
         {
-            engine.process({ &buffer, 0, 512 });
+            engine->process({ &buffer, 0, 512 });
             peakL = std::max(peakL, buffer.getMagnitude(0, 0, 512));
             peakR = std::max(peakR, buffer.getMagnitude(1, 0, 512));
         }
@@ -588,25 +590,24 @@ void testMixer()
     project.sends.delay.timeMs = 100.0f;
     project.sends.delay.feedback = 0.0f;
     project.sends.delayReturn = 1.0f;
-    sonora::AudioEngine dryEngine, wetEngine;
     auto dryProject = project;
     dryProject.tracks[0].mix.sendDelay = 0.0f;
-    auto renderInto = [](sonora::AudioEngine& engine, const sonora::ProjectState& state,
-                         std::vector<float>& out) {
-        engine.prepare(48000.0);
-        require(engine.submit(state), "send project rejected");
-        engine.setPlaying(true);
+    auto renderInto = [](const sonora::ProjectState& state, std::vector<float>& out) {
+        auto engine = std::make_unique<sonora::AudioEngine>();
+        engine->prepare(48000.0);
+        require(engine->submit(state), "send project rejected");
+        engine->setPlaying(true);
         juce::AudioBuffer<float> buffer(2, 512);
         for (int i = 0; i < 200; ++i)
         {
-            engine.process({ &buffer, 0, 512 });
+            engine->process({ &buffer, 0, 512 });
             for (int s = 0; s < 512; ++s)
                 out.push_back(buffer.getSample(0, s));
         }
     };
     std::vector<float> dry, wet;
-    renderInto(dryEngine, dryProject, dry);
-    renderInto(wetEngine, project, wet);
+    renderInto(dryProject, dry);
+    renderInto(project, wet);
     require(dry.size() == wet.size(), "render length mismatch");
     float diff = 0.0f;
     for (std::size_t i = 0; i < dry.size(); ++i)
@@ -615,11 +616,96 @@ void testMixer()
     // Return at zero with a live send stays bit-transparent past the ramp.
     project.sends.delayReturn = 0.0f;
     std::vector<float> gated;
-    renderInto(wetEngine, project, gated);
+    renderInto(project, gated);
     float tail = 0.0f;
     for (std::size_t i = 48000; i < dry.size(); ++i)
         tail = std::max(tail, std::abs(dry[i] - gated[i]));
     require(tail < 1.0e-6f, "zero return colours the mix");
+}
+
+void testAutomation()
+{
+    using sonora::AutomationTarget;
+    // Curve evaluation.
+    sonora::AutomationLane empty;
+    require(empty.eval(500, 0.8f) == 0.8f, "empty lane ignored base");
+    sonora::AutomationLane flat;
+    flat.count = 1;
+    flat.points[0] = { 0, 0.25f };
+    require(flat.eval(0, 0.8f) == 0.25f && flat.eval(9999, 0.8f) == 0.25f, "single point not held");
+    sonora::AutomationLane ramp;
+    ramp.count = 2;
+    ramp.points[0] = { 0, 0.0f };
+    ramp.points[1] = { 100, 1.0f };
+    require(ramp.eval(25, 9.0f) == 0.25f, "ramp interpolation wrong");
+    require(ramp.eval(-5, 9.0f) == 0.0f && ramp.eval(101, 9.0f) == 1.0f, "ramp ends not held");
+    sonora::AutomationLane bad;
+    bad.count = 2;
+    bad.points[0] = { 50, 0.0f };
+    bad.points[1] = { 40, 1.0f };
+    require(!bad.valid(), "unsorted lane validated");
+    bad.count = sonora::maxAutomationPoints + 1;
+    require(!bad.valid(), "overfull lane validated");
+    require(juce::String(sonora::automationTargetName(AutomationTarget::DelayMix)) == "Delay mix",
+            "target name wrong");
+
+    // The engine follows lanes: gated volume, panned sends, wet delay throws.
+    auto project = fixture();
+    project.tracks[1].mix.mute = true; // drums out; sine loop only
+    project.songMode = false;
+    auto& volumeLane = project.tracks[0]
+                           .automation[0][static_cast<std::size_t>(AutomationTarget::Volume)];
+    volumeLane.count = 1;
+    volumeLane.points[0] = { 0, 0.0f };
+    auto gateEngine = std::make_unique<sonora::AudioEngine>();
+    gateEngine->prepare(48000.0);
+    require(gateEngine->submit(project), "gated project rejected");
+    gateEngine->setPlaying(true);
+    juce::AudioBuffer<float> buffer(2, 512);
+    float tail = 0.0f;
+    for (int i = 0; i < 100; ++i)
+    {
+        gateEngine->process({ &buffer, 0, 512 });
+        if (i >= 30)
+            tail = std::max({ tail, buffer.getMagnitude(0, 0, 512), buffer.getMagnitude(1, 0, 512) });
+    }
+    require(tail < 1.0e-4f, "volume lane did not gate the loop");
+    // A delay-throw lane is audible against the dry mix.
+    auto thrown = fixture();
+    thrown.tracks[1].mix.mute = true;
+    thrown.songMode = false;
+    thrown.tracks[0].mix.sendDelay = 0.0f;
+    auto& throwLane = thrown.tracks[0]
+                          .automation[0][static_cast<std::size_t>(AutomationTarget::DelayMix)];
+    throwLane.count = 1;
+    throwLane.points[0] = { 0, 1.0f };
+    thrown.tracks[0].fx.delay.timeMs = 100.0f;
+    thrown.tracks[0].fx.delay.feedback = 0.0f;
+    auto renderDryWet = [](const sonora::ProjectState& state, std::vector<float>& out) {
+        auto mixEngine = std::make_unique<sonora::AudioEngine>();
+        mixEngine->prepare(48000.0);
+        require(mixEngine->submit(state), "throw project rejected");
+        mixEngine->setPlaying(true);
+        juce::AudioBuffer<float> mixBuffer(2, 512);
+        for (int i = 0; i < 200; ++i)
+        {
+            mixEngine->process({ &mixBuffer, 0, 512 });
+            for (int s = 0; s < 512; ++s)
+                out.push_back(mixBuffer.getSample(0, s));
+        }
+    };
+    auto dry = fixture();
+    dry.tracks[1].mix.mute = true;
+    dry.songMode = false;
+    dry.tracks[0].fx.delay.timeMs = 100.0f;
+    dry.tracks[0].fx.delay.feedback = 0.0f;
+    std::vector<float> dryOut, wetOut;
+    renderDryWet(dry, dryOut);
+    renderDryWet(thrown, wetOut);
+    float diff = 0.0f;
+    for (std::size_t i = 0; i < dryOut.size(); ++i)
+        diff = std::max(diff, std::abs(dryOut[i] - wetOut[i]));
+    require(diff > 0.01f, "delay throw inaudible");
 }
 
 void testKeyTools()
@@ -686,9 +772,9 @@ void testPersistence()
     require(sonora::ProjectIO::decode("{broken json", loaded).failed(), "malformed JSON accepted");
     require(loaded == good, "failed load mutated the project");
     auto json = sonora::ProjectIO::encode(original);
-    require(sonora::ProjectIO::decode(json.replace("\"version\": 19", "\"version\": 20"), loaded).failed(),
+    require(sonora::ProjectIO::decode(json.replace("\"version\": 20", "\"version\": 21"), loaded).failed(),
             "unknown version accepted");
-    require(sonora::ProjectIO::decode(json.replace("\"version\": 19", "\"version\": 4294967297"), loaded).failed(),
+    require(sonora::ProjectIO::decode(json.replace("\"version\": 20", "\"version\": 4294967297"), loaded).failed(),
             "overflowed version accepted");
     require(sonora::ProjectIO::decode(json.replace("\"velocity\": 100", "\"velocity\": 0"), loaded).failed(),
             "zero velocity accepted");
@@ -808,7 +894,8 @@ void testQueue()
 
 std::vector<float> render(int blockSize, const sonora::ProjectState& project = fixture(), double sampleRate = 48000)
 {
-    sonora::AudioEngine engine;
+    auto engineStorage = std::make_unique<sonora::AudioEngine>();
+    auto& engine = *engineStorage;
     engine.prepare(sampleRate);
     require(engine.submit(project), "engine rejected valid pattern");
     engine.setPlaying(true);
@@ -854,7 +941,8 @@ void testAudio()
             require(std::abs(candidate[i] - reference[i]) < 1.0e-6f, "audio depends on callback size");
     }
 
-    sonora::AudioEngine engine;
+    auto engineStorage = std::make_unique<sonora::AudioEngine>();
+    auto& engine = *engineStorage;
     engine.prepare(48000);
     sonora::ProjectState shortNote = sonora::defaultProject();
     shortNote.bpm = 120.0;
@@ -882,7 +970,8 @@ void testDrumAudio()
     // Loop preview follows per-track slots: two drum tracks with hits in
     // different slots must both sound at once.
     {
-        sonora::AudioEngine engine;
+        auto engineStorage = std::make_unique<sonora::AudioEngine>();
+        auto& engine = *engineStorage;
         engine.prepare(48000.0);
         auto project = fixture();
         project.tracks[0].melodies[0] = {};
@@ -977,7 +1066,8 @@ void testDrumAudio()
     bothSolo.tracks[0].mix.solo = bothSolo.tracks[1].mix.solo = true;
     require(render(256, bothSolo) == render(256), "two soloed tracks should play together");
 
-    sonora::AudioEngine engine;
+    auto engineStorage = std::make_unique<sonora::AudioEngine>();
+    auto& engine = *engineStorage;
     engine.prepare(48000);
     require(engine.submit(fixture()), "audition project rejected");
     require(engine.auditionDrum(1, 0), "pad audition rejected");
@@ -1132,7 +1222,8 @@ void testArrangement()
     require(sonora::ProjectIO::decode(juce::JSON::toString(bad), loaded).failed(), "oversized song accepted");
 
     // Engine: song mode stops at the end; loop mode keeps playing.
-    sonora::AudioEngine engine;
+    auto engineStorage = std::make_unique<sonora::AudioEngine>();
+    auto& engine = *engineStorage;
     engine.prepare(48000);
     songProject.tracks[0].melodies[0] = {};
     songProject.song.sections = 1;
@@ -1410,7 +1501,7 @@ void testFxPersistence()
     original.master.releaseMs = 120.0f;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 19"), "projects must save as v19");
+    require(json.contains("\"version\": 20"), "projects must save as v20");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "fx round-trip changed parameters");
 
@@ -1485,7 +1576,7 @@ void testTakePersistence()
     original.takes[1].mute = true;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 19"), "take projects must save as v19");
+    require(json.contains("\"version\": 20"), "take projects must save as v20");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "take round-trip changed metadata");
 
@@ -1590,7 +1681,8 @@ void testTakePlayback()
     project.tracks[1].drumPatterns[0] = {};
     project.song.sections = 1;
     project.songMode = true;
-    sonora::AudioEngine engine;
+    auto engineStorage = std::make_unique<sonora::AudioEngine>();
+    auto& engine = *engineStorage;
     engine.prepare(48000.0);
     auto* set = new sonora::TakeSet();
     sonora::PreloadedTake take;
@@ -1657,7 +1749,8 @@ void testTakeSolo()
         project.takes[static_cast<std::size_t>(t)].setFileName("take" + juce::String(t + 1) + ".wav");
         project.takes[static_cast<std::size_t>(t)].frames = 48000;
     }
-    sonora::AudioEngine engine;
+    auto engineStorage = std::make_unique<sonora::AudioEngine>();
+    auto& engine = *engineStorage;
     engine.prepare(48000.0);
     auto* set = new sonora::TakeSet();
     for (int t = 0; t < 2; ++t)
@@ -1902,7 +1995,8 @@ void testExpression()
     // Pitch bend center, full up (+2 st -> B4), full down (-2 st -> G4).
     for (auto [bend, expected] : { std::pair<int, double> { 8192, 440.0 }, { 16383, 493.88 }, { 0, 392.0 } })
     {
-        sonora::AudioEngine engine;
+        auto engineStorage = std::make_unique<sonora::AudioEngine>();
+        auto& engine = *engineStorage;
         engine.prepare(rate);
         require(engine.submit(liveProject()), "live project rejected");
         addMessageToQueueAt(engine.midiCollector, juce::MidiMessage::noteOn(1, 69, (juce::uint8) 100));
@@ -1914,7 +2008,8 @@ void testExpression()
     }
     // Mod wheel keeps center pitch while staying audible.
     {
-        sonora::AudioEngine engine;
+        auto engineStorage = std::make_unique<sonora::AudioEngine>();
+        auto& engine = *engineStorage;
         engine.prepare(rate);
         require(engine.submit(liveProject()), "live project rejected");
         addMessageToQueueAt(engine.midiCollector, juce::MidiMessage::noteOn(1, 69, (juce::uint8) 100));
@@ -1927,7 +2022,8 @@ void testExpression()
     }
     // Sustain pedal holds the note past note-off, releases on pedal-up.
     {
-        sonora::AudioEngine engine;
+        auto engineStorage = std::make_unique<sonora::AudioEngine>();
+        auto& engine = *engineStorage;
         engine.prepare(rate);
         require(engine.submit(liveProject()), "live project rejected");
         auto& collector = engine.midiCollector;
@@ -1966,7 +2062,7 @@ void testVariations()
     original.song.sections = 4;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 19"), "variation projects must save as v19");
+    require(json.contains("\"version\": 20"), "variation projects must save as v20");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "variation round-trip changed slots or indices");
 
@@ -2197,7 +2293,8 @@ void testKitSamples()
 
     // Engine: an injected bank renders custom content; retiring to null
     // restores the starters.
-    sonora::AudioEngine engine;
+    auto engineStorage = std::make_unique<sonora::AudioEngine>();
+    auto& engine = *engineStorage;
     engine.prepare(48000.0);
     auto project = fixture();
     project.tracks[0].melodies[0] = {};
@@ -2231,7 +2328,7 @@ void testKitPersistence()
     original.tracks[1].kitVariant = 1;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 19"), "kit projects must save as v19");
+    require(json.contains("\"version\": 20"), "kit projects must save as v20");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "kit round-trip changed pad samples");
     // Version 6 documents migrate to the built-in kit.
@@ -2476,7 +2573,8 @@ void testOmarchyTheme()
 
 void testInstruments()
 {
-    sonora::AudioEngine probe;
+    auto probeStorage = std::make_unique<sonora::AudioEngine>();
+    auto& probe = *probeStorage;
     require(probe.instrumentsAvailable(), "bundled GeneralUser GS bank failed to load");
     for (std::size_t i = 0; i < sonora::instruments.size(); ++i)
         for (std::size_t j = 0; j < i; ++j)
@@ -2490,7 +2588,8 @@ void testInstruments()
     project.tracks[0].melodies[0].notes[0] = { 1, 0, 3840, 60, 110 };
     project.tracks[1].drumPatterns[0] = {};
     auto render = [](const sonora::ProjectState& state, int blocks) {
-        sonora::AudioEngine engine;
+        auto engineStorage = std::make_unique<sonora::AudioEngine>();
+        auto& engine = *engineStorage;
         engine.prepare(48000.0);
         require(engine.submit(state), "instrument project rejected");
         engine.setPlaying(true);
@@ -2548,7 +2647,8 @@ void testInstruments()
     {
         auto piano = project;
         piano.tracks[0].instrumentPreset = 1;
-        sonora::AudioEngine engine;
+        auto engineStorage = std::make_unique<sonora::AudioEngine>();
+        auto& engine = *engineStorage;
         engine.prepare(48000.0);
         require(engine.submit(piano), "piano project rejected");
         engine.setPlaying(true);
@@ -2597,7 +2697,7 @@ void testInstruments()
     saved.tracks[2].instrumentPreset = 16;
     const auto json = sonora::ProjectIO::encode(saved);
     sonora::ProjectState loaded;
-    require(json.contains("\"version\": 19"), "instrument projects must save as v19");
+    require(json.contains("\"version\": 20"), "instrument projects must save as v20");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "instrument round-trip failed");
     auto legacy = juce::JSON::parse(json);
     legacy.getDynamicObject()->setProperty("version", 9);
@@ -2638,7 +2738,8 @@ void testSynthEngine()
     project.tracks[1].drumPatterns[0] = {};
     struct Stereo { std::vector<float> left, right; };
     auto render = [](const sonora::ProjectState& state, int blocks) {
-        sonora::AudioEngine engine;
+        auto engineStorage = std::make_unique<sonora::AudioEngine>();
+        auto& engine = *engineStorage;
         engine.prepare(48000.0);
         require(engine.submit(state), "synth project rejected");
         engine.setPlaying(true);
@@ -2754,7 +2855,7 @@ void testSynthEngine()
     saved.tracks[0].synth = sonora::synthPatches()[3].params;
     const auto json = sonora::ProjectIO::encode(saved);
     sonora::ProjectState loaded;
-    require(json.contains("\"version\": 19"), "synth projects must save as v19");
+    require(json.contains("\"version\": 20"), "synth projects must save as v20");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "synth round-trip failed");
     auto legacy = juce::JSON::parse(json);
     legacy.getDynamicObject()->setProperty("version", 10);
@@ -2859,7 +2960,8 @@ void testKnobs()
     melody.tracks[0].melodies[0].notes[0] = { 1, 0, 3840, 52, 110 };
     melody.tracks[1].drumPatterns[0] = {};
     auto render = [](const sonora::ProjectState& state) {
-        sonora::AudioEngine engine;
+        auto engineStorage = std::make_unique<sonora::AudioEngine>();
+        auto& engine = *engineStorage;
         engine.prepare(48000.0);
         require(engine.submit(state), "knob project rejected");
         engine.setPlaying(true);
@@ -2910,7 +3012,7 @@ void testKnobs()
     saved.tracks[0].fx.chorus = { 0.4f, 1.2f, 0.8f, false };
     const auto json = sonora::ProjectIO::encode(saved);
     sonora::ProjectState loaded;
-    require(json.contains("\"version\": 19"), "fx projects must save as v19");
+    require(json.contains("\"version\": 20"), "fx projects must save as v20");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "drive/chorus round-trip failed");
     auto legacy = juce::JSON::parse(json);
     legacy.getDynamicObject()->setProperty("version", 11);
@@ -3299,7 +3401,7 @@ void testSongComposition()
     saved.song.insertSection(pop.sections, 0);
     const auto json = sonora::ProjectIO::encode(saved);
     sonora::ProjectState loaded;
-    require(json.contains("\"version\": 19"), "song projects must save as v19");
+    require(json.contains("\"version\": 20"), "song projects must save as v20");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "song parts round-trip failed");
     auto big = project;
     big.song.sections = sonora::maxSections;
@@ -3338,7 +3440,7 @@ void testSongComposition()
     missingSwing.getDynamicObject()->getProperty("tracks").getArray()->getReference(0)
         .getDynamicObject()->removeProperty("swing");
     loaded = swung;
-    require(sonora::ProjectIO::decode(juce::JSON::toString(missingSwing), loaded).failed(), "v19 without swing accepted");
+    require(sonora::ProjectIO::decode(juce::JSON::toString(missingSwing), loaded).failed(), "v20 without swing accepted");
     auto invalidSwing = swung;
     invalidSwing.tracks[0].swing = -0.5f;
     require(!invalidSwing.valid(), "negative swing validated");
@@ -3370,7 +3472,7 @@ void testSongComposition()
     auto missingKey = juce::JSON::parse(keyJson);
     missingKey.getDynamicObject()->removeProperty("musicKey");
     loaded = keyed;
-    require(sonora::ProjectIO::decode(juce::JSON::toString(missingKey), loaded).failed(), "v19 without key accepted");
+    require(sonora::ProjectIO::decode(juce::JSON::toString(missingKey), loaded).failed(), "v20 without key accepted");
     auto invalidKey = keyed;
     invalidKey.musicKey = -1;
     require(!invalidKey.valid(), "negative key validated");
@@ -3411,7 +3513,7 @@ void testSongComposition()
         .getDynamicObject()->removeProperty("liveArpRate");
     loaded = lively;
     require(sonora::ProjectIO::decode(juce::JSON::toString(missingArp), loaded).failed(),
-            "v19 without arp rate accepted");
+            "v20 without arp rate accepted");
     auto invalidLive = lively;
     invalidLive.tracks[0].liveFx.octaves = 4;
     require(!invalidLive.valid(), "arp octave validated");
@@ -3446,7 +3548,7 @@ void testSongComposition()
     missingChords.getDynamicObject()->getProperty("song").getDynamicObject()->removeProperty("chords");
     loaded = chorded;
     require(sonora::ProjectIO::decode(juce::JSON::toString(missingChords), loaded).failed(),
-            "v19 without chords accepted");
+            "v20 without chords accepted");
 
     // v19 persists pan/sends and the return buses; older files mix dry.
     auto mixed = project;
@@ -3491,7 +3593,61 @@ void testSongComposition()
         .getDynamicObject()->removeProperty("sendReverb");
     loaded = mixed;
     require(sonora::ProjectIO::decode(juce::JSON::toString(missingPan), loaded).failed(),
-            "v19 without sends accepted");
+            "v20 without sends accepted");
+
+    // v20 persists automation lanes; older files play the knob values.
+    auto curved = project;
+    auto& swell = curved.tracks[0]
+                      .automation[0][static_cast<std::size_t>(sonora::AutomationTarget::Volume)];
+    swell.count = 2;
+    swell.points[0] = { 0, 0.8f };
+    swell.points[1] = { 1000, 0.2f };
+    auto& sweep = curved.tracks[0]
+                      .automation[1][static_cast<std::size_t>(sonora::AutomationTarget::Pan)];
+    sweep.count = 1;
+    sweep.points[0] = { 0, -1.0f };
+    require(curved.valid(), "automation fixture rejected");
+    const auto curveJson = sonora::ProjectIO::encode(curved);
+    require(sonora::ProjectIO::decode(curveJson, loaded).wasOk() && loaded == curved
+            && std::abs(loaded.tracks[0].automation[0][static_cast<std::size_t>(sonora::AutomationTarget::Volume)]
+                            .eval(500, 9.0f)
+                        - 0.5f)
+                   < 1.0e-6f,
+            "automation round-trip failed");
+    auto legacyCurve = juce::JSON::parse(curveJson);
+    legacyCurve.getDynamicObject()->setProperty("version", 19);
+    legacyCurve.getDynamicObject()->getProperty("tracks").getArray()->getReference(0)
+        .getDynamicObject()->removeProperty("automation");
+    require(sonora::ProjectIO::decode(juce::JSON::toString(legacyCurve), loaded).wasOk()
+            && loaded.tracks[0].automation[0][static_cast<std::size_t>(sonora::AutomationTarget::Volume)]
+                       .count == 0,
+            "v19 did not open with empty lanes");
+    auto badTickArray = juce::JSON::parse(curveJson);
+    badTickArray.getDynamicObject()->getProperty("tracks").getArray()->getReference(0)
+        .getDynamicObject()->getProperty("automation").getArray()->getReference(0)
+        .getDynamicObject()->getProperty("points").getArray()->getReference(0)
+        = juce::var(juce::Array<juce::var> { 99999999, 0.5 });
+    loaded = curved;
+    require(sonora::ProjectIO::decode(juce::JSON::toString(badTickArray), loaded).failed(),
+            "out-of-range automation tick accepted");
+    require(loaded == curved, "bad tick destroyed current state");
+    auto badValue = juce::JSON::parse(curveJson);
+    badValue.getDynamicObject()->getProperty("tracks").getArray()->getReference(0)
+        .getDynamicObject()->getProperty("automation").getArray()->getReference(0)
+        .getDynamicObject()->getProperty("points").getArray()->getReference(0)
+        = juce::var(juce::Array<juce::var> { 0, 5.0 });
+    loaded = curved;
+    require(sonora::ProjectIO::decode(juce::JSON::toString(badValue), loaded).failed(),
+            "out-of-range automation value accepted");
+    auto missingAutomation = juce::JSON::parse(curveJson);
+    missingAutomation.getDynamicObject()->getProperty("tracks").getArray()->getReference(0)
+        .getDynamicObject()->removeProperty("automation");
+    loaded = curved;
+    require(sonora::ProjectIO::decode(juce::JSON::toString(missingAutomation), loaded).failed(),
+            "v20 without automation accepted");
+    auto invalidLane = curved;
+    invalidLane.tracks[0].automation[0][static_cast<std::size_t>(sonora::AutomationTarget::Volume)].count = 99;
+    require(!invalidLane.valid(), "overfull lane validated");
 
     // v17 persists take solos; older files open with solos off.
     auto comped = project;
@@ -3531,7 +3687,8 @@ void testSongComposition()
     for (int s = 0; s < 3; ++s)
         songProject.song.trackOn[static_cast<std::size_t>(s)][0] = s == 2;
     auto firstBlocks = [&](int startSection, unsigned mask, const sonora::ProjectState& state) {
-        sonora::AudioEngine engine;
+        auto engineStorage = std::make_unique<sonora::AudioEngine>();
+        auto& engine = *engineStorage;
         engine.prepare(48000.0);
         engine.setSongStartSection(startSection);
         engine.setLoopTrackMask(mask);
@@ -3860,6 +4017,7 @@ int main()
         testTakePlayback(); std::cout << "PASS song-mode take offset/level, mute, loop-mode silence\n";
         testTakeSolo(); std::cout << "PASS take solo comping\n";
         testMixer(); std::cout << "PASS mixer pan, sends, returns\n";
+        testAutomation(); std::cout << "PASS automation curves and engine lanes\n";
         testChordTrack(); std::cout << "PASS chord track, follow transpose, AI chords\n";
         testVariations(); std::cout << "PASS pattern library round-trip, v5 migration, malformed slots\n";
         testInstances(); std::cout << "PASS make-unique detach, full-library refusal, sharing queries\n";
