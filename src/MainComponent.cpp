@@ -2638,21 +2638,27 @@ MainComponent::MainComponent()
         addAndMakeVisible(button);
     addAndMakeVisible(addTrack);
     addAndMakeVisible(instrumentChoice);
-    juce::String family;
-    for (std::size_t i = 0; i < instruments.size(); ++i)
+    // Grouped by family in first-appearance order. Persisted indices are
+    // identity only, so presets appended later still land under their family.
+    std::vector<juce::String> families;
+    for (const auto& preset : instruments)
+        if (std::find(families.begin(), families.end(), juce::String(preset.family)) == families.end())
+            families.emplace_back(preset.family);
+    for (const auto& family : families)
     {
-        const auto& preset = instruments[i];
-        if (family != preset.family)
+        instrumentChoice.addSectionHeading(family);
+        for (std::size_t i = 0; i < instruments.size(); ++i)
         {
-            family = preset.family;
-            instrumentChoice.addSectionHeading(family);
+            const auto& preset = instruments[i];
+            if (family != preset.family)
+                continue;
+            // Item 0 is the editable synth; its saved name stays "Sine Keys" so
+            // existing tracks keep following instrument/patch renames.
+            instrumentChoice.addItem(i == 0 ? juce::String("Sonora Synth (editable)") : juce::String(preset.name),
+                                     static_cast<int>(i) + 1);
+            if (i > 0 && !engine.instrumentsAvailable())
+                instrumentChoice.setItemEnabled(static_cast<int>(i) + 1, false);
         }
-        // Item 0 is the editable synth; its saved name stays "Sine Keys" so
-        // existing tracks keep following instrument/patch renames.
-        instrumentChoice.addItem(i == 0 ? juce::String("Sonora Synth (editable)") : juce::String(preset.name),
-                                 static_cast<int>(i) + 1);
-        if (i > 0 && !engine.instrumentsAvailable())
-            instrumentChoice.setItemEnabled(static_cast<int>(i) + 1, false);
     }
     instrumentChoice.setTooltip(engine.instrumentsAvailable()
         ? "Choose this track's instrument. Notes stay the same; TRACK effects shape the selected sound."

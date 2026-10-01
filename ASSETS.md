@@ -9,7 +9,7 @@ follow its licensing choice; no additional sample-pack license is required.
 
 ### Factory variants (Sonora 0.12+)
 
-The Deep and Crisp kits re-voice the same recipes with pitch/decay/seed
+The Deep, Crisp, Tight, Boom, and Warm kits re-voice the same recipes with pitch/decay/seed
 parameters (`KitVariant` in `DrumSampler.h`). They are generated, not recorded,
 and share the starter kit's licensing. The default variant reproduces the
 original v1 buffers bit-exactly.

@@ -2186,11 +2186,9 @@ void testVariations()
 void testKitVariants()
 {
     // Factory variants are deterministic, bounded, audible, and distinct.
-    std::array<sonora::SampleBank, sonora::numKitVariants> kits {
-        sonora::buildStarterBank(sonora::kitVariantParams(0)),
-        sonora::buildStarterBank(sonora::kitVariantParams(1)),
-        sonora::buildStarterBank(sonora::kitVariantParams(2))
-    };
+    std::vector<sonora::SampleBank> kits;
+    for (int variant = 0; variant < sonora::numKitVariants; ++variant)
+        kits.push_back(sonora::buildStarterBank(sonora::kitVariantParams(variant)));
     require(kits[0].data[0] == sonora::buildStarterBank().data[0], "default variant changed the starter kit");
     for (int variant = 0; variant < sonora::numKitVariants; ++variant)
     {
@@ -2220,6 +2218,17 @@ void testKitVariants()
         return flips / (data.size() / 48000.0);
     };
     require(zeroCrossings(deep) < zeroCrossings(starter), "Deep kit not lower than Starter");
+    // The later voicings are distinct from each other and from Starter, and
+    // Tight is shorter / Boom longer than Starter on the kick.
+    for (int a = 0; a < sonora::numKitVariants; ++a)
+        for (int b = 0; b < a; ++b)
+            require(kits[static_cast<std::size_t>(a)].data[0] != kits[static_cast<std::size_t>(b)].data[0],
+                    "kit variants not distinct");
+    require(kits[3].data[0].size() < starter.size() && kits[4].data[0].size() > starter.size(),
+            "Tight/Boom lengths wrong");
+    require(zeroCrossings(kits[4].data[0]) < zeroCrossings(deep), "Boom not lower than Deep");
+    for (int variant = 0; variant < sonora::numKitVariants; ++variant)
+        require(juce::String(sonora::kitVariantName(variant)).isNotEmpty(), "unnamed kit variant");
     // Variant persistence round-trips through the drum track field.
     auto project = fixture();
     project.tracks[1].kitVariant = 2;
@@ -2687,19 +2696,38 @@ void testInstruments()
 
     // Every sampled preset plays the full piano roll: SoundFont key ranges
     // are octave-transposed into range instead of going silent.
+    // One engine per preset, each pitch isolated by stop + panic (the 85-preset
+    // table made an engine per pitch too slow for ctest's timeout).
     for (int preset = 1; preset < static_cast<int>(sonora::instruments.size()); ++preset)
+    {
+        auto sweepEngine = std::make_unique<sonora::AudioEngine>();
+        sweepEngine->prepare(48000.0);
+        juce::AudioBuffer<float> sweepBuffer(2, 512);
         for (int pitch : { 0, 12, 21, 36, 60, 84, 96, 108, 120, 127 })
         {
             auto variant = project;
             variant.tracks[0].instrumentPreset = preset;
             variant.tracks[0].melodies[0].notes[0].pitch = pitch;
-            const auto level = peak(render(variant, 40));
+            sweepEngine->stop();
+            sweepEngine->panic();
+            sweepEngine->process({ &sweepBuffer, 0, 512 });
+            require(sweepEngine->submit(variant), "sweep project rejected");
+            sweepEngine->setPlaying(true);
+            float level = 0.0f;
+            for (int block = 0; block < 40; ++block)
+            {
+                sweepEngine->process({ &sweepBuffer, 0, 512 });
+                level = std::max(level, sweepBuffer.getMagnitude(0, 0, 512));
+            }
             // No digital silence anywhere on the roll. (Extremes on some
             // instruments are quiet by nature of the samples, like the
-            // real thing — e.g. a fingered bass at the top MIDI octave.)
-            require(level > 0.001f, ("sampled preset silent out of range: preset "
+            // real thing: a synth bass at MIDI 127 settles near -60 dB. A
+            // fresh engine reads ~25% hotter there only because its track
+            // gain ramps down from 1.0 to the fader during the attack.)
+            require(level > 0.0004f, ("sampled preset silent out of range: preset "
                 + juce::String(preset) + " pitch " + juce::String(pitch)).toRawUTF8());
         }
+    }
 
     // Panic cuts sampled voices at once; no release tail in the next block.
     {
@@ -2779,8 +2807,104 @@ void testInstruments()
         .getDynamicObject()->removeProperty("preset");
     require(sonora::ProjectIO::decode(juce::JSON::toString(missing), loaded).failed(), "v10 without preset accepted");
     auto invalid = saved;
-    invalid.tracks[0].instrumentPreset = 99;
+    invalid.tracks[0].instrumentPreset = static_cast<int>(sonora::instruments.size());
     require(!invalid.valid(), "out-of-range preset validated");
+}
+
+// Pulse and Noise oscillators. Kept out of testSynthEngine on purpose: a
+// ProjectState is ~300 KB, and that function already holds a dozen of them on
+// the stack, so every state here lives on the heap.
+void testSynthOscillators()
+{
+    using sonora::ProjectState;
+    auto make = [](int wave, int wave2 = sonora::WaveSine) {
+        auto state = std::make_unique<ProjectState>(fixture());
+        state->tracks[0].melodies[0] = {};
+        state->tracks[0].melodies[0].count = 1;
+        state->tracks[0].melodies[0].notes[0] = { 1, 0, 3840, 57, 110 };
+        state->tracks[1].drumPatterns[0] = {};
+        state->tracks[0].synth.wave = wave;
+        state->tracks[0].synth.wave2 = wave2;
+        return state;
+    };
+    auto render = [](const ProjectState& state, int blocks) {
+        auto engine = std::make_unique<sonora::AudioEngine>();
+        engine->prepare(48000.0);
+        require(engine->submit(state), "oscillator project rejected");
+        engine->setPlaying(true);
+        std::vector<float> out;
+        juce::AudioBuffer<float> buffer(2, 512);
+        for (int i = 0; i < blocks; ++i)
+        {
+            engine->process({ &buffer, 0, 512 });
+            for (int s = 0; s < 512; ++s)
+            {
+                require(std::isfinite(buffer.getSample(0, s)), "oscillator produced non-finite audio");
+                out.push_back(buffer.getSample(0, s));
+            }
+        }
+        return out;
+    };
+    auto peak = [](const std::vector<float>& a) {
+        float value = 0.0f;
+        for (const auto x : a)
+            value = std::max(value, std::abs(x));
+        return value;
+    };
+    auto brightness = [](const std::vector<float>& a) {
+        double diff = 0.0, energy = 1.0e-12;
+        for (std::size_t i = 1; i < a.size(); ++i)
+        {
+            diff += (a[i] - a[i - 1]) * (a[i] - a[i - 1]);
+            energy += a[i] * a[i];
+        }
+        return diff / energy;
+    };
+
+    const auto sine = render(*make(sonora::WaveSine), 30);
+    const auto pulse = render(*make(sonora::WavePulse), 30);
+    require(peak(pulse) > 0.005f && peak(pulse) < 1.0f, "pulse level wrong");
+    require(pulse != sine, "pulse rendered as sine");
+    require(pulse != render(*make(sonora::WaveSquare), 30), "pulse rendered as square");
+    require(brightness(pulse) > brightness(sine) * 1.5, "pulse not brighter than sine");
+
+    const auto noise = render(*make(sonora::WaveNoise), 30);
+    require(peak(noise) > 0.005f && peak(noise) < 1.0f, "noise level wrong");
+    require(brightness(noise) > brightness(sine) * 5.0, "noise not broadband");
+    require(noise == render(*make(sonora::WaveNoise), 30), "noise not reproducible");
+    // Filtered noise darkens like any other source.
+    auto soft = make(sonora::WaveNoise);
+    soft->tracks[0].synth.cutoff = 300.0f;
+    require(brightness(render(*soft, 30)) < brightness(noise) * 0.5, "filter did not shape noise");
+
+    // Generated track names must be unambiguous: patch names are unique and
+    // never collide with a sampled instrument name (they drive rename-following).
+    // The editable synth (instrument 0) deliberately shares its saved name,
+    // "Sine Keys", with patch 0 so existing tracks keep following renames.
+    const auto& patches = sonora::synthPatches();
+    require(juce::String(sonora::instruments[0].name) == patches[0].name, "synth/patch 0 names diverged");
+    for (std::size_t i = 0; i < patches.size(); ++i)
+    {
+        for (std::size_t j = 0; j < i; ++j)
+            require(juce::String(patches[i].name) != patches[j].name, "duplicate synth patch name");
+        for (std::size_t k = 1; k < sonora::instruments.size(); ++k)
+            require(juce::String(patches[i].name) != sonora::instruments[k].name,
+                    "patch name collides with a sampled instrument");
+        require(patches[i].params.valid(), "factory patch invalid");
+    }
+
+    // The new waveforms persist; an id past the table is rejected.
+    auto persisted = make(sonora::WaveNoise, sonora::WavePulse);
+    auto reloaded = std::make_unique<ProjectState>();
+    require(sonora::ProjectIO::decode(sonora::ProjectIO::encode(*persisted), *reloaded).wasOk()
+                && reloaded->tracks[0].synth.wave == sonora::WaveNoise
+                && reloaded->tracks[0].synth.wave2 == sonora::WavePulse,
+            "new waveforms did not round-trip");
+    persisted->tracks[0].synth.wave = sonora::numSynthWaves;
+    require(!persisted->valid(), "unknown waveform validated");
+    require(juce::String(sonora::synthWaveName(sonora::WaveNoise)) == "Noise"
+                && juce::String(sonora::synthWaveName(sonora::WavePulse)) == "Pulse",
+            "waveform names wrong");
 }
 
 void testSynthEngine()
@@ -2932,7 +3056,7 @@ void testSynthEngine()
                 ("bad synth field accepted: " + juce::String(field)).toRawUTF8());
         require(loaded == saved, "bad synth destroyed current state");
     };
-    reject("wave", 4);
+    reject("wave", sonora::numSynthWaves); // one past the last waveform
     reject("wave2", -1);
     reject("cutoff", 10.0);
     reject("resonance", 1.5);
@@ -4136,6 +4260,7 @@ int main()
         testExport(); std::cout << "PASS loop/song bounce, live parity, normalize, cancel, WAV round-trip\n";
         testInstruments(); std::cout << "PASS sampled instruments, panic, FX isolation, export, v10 presets\n";
         testSynthEngine(); std::cout << "PASS synth patches, waves, filter, envelopes, chorus, live edits, v11\n";
+        testSynthOscillators(); std::cout << "PASS pulse and noise oscillators\n";
         testKnobs(); std::cout << "PASS MiniLab knob maps, CC sets, drive/chorus DSP, v12 fx\n";
         testAiMelody(); std::cout << "PASS AI melody sandbox, context, parsing, sanitizing, fake CLI\n";
         testMiniLabDisplay(); std::cout << "PASS MiniLab 3 screen/pad SysEx, replies, screen text\n";

@@ -2,6 +2,7 @@
 #include "SynthParams.h"
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <cmath>
+#include <cstdint>
 #include <vector>
 
 namespace sonora
@@ -33,6 +34,10 @@ public:
         const auto rate = getSampleRate();
         phase = 0.0;
         phase2 = 0.0;
+        // Deterministic per-note noise seed: renders are reproducible.
+        noiseState = 0x9E3779B9u ^ (static_cast<std::uint32_t>(note) * 2654435761u);
+        if (noiseState == 0)
+            noiseState = 1;
         lfoPhase = 0.0;
         synthLfoPhase = 0.0;
         ic1 = ic2 = 0.0f;
@@ -113,10 +118,10 @@ public:
                     pitchMult *= std::pow(2.0f, p.lfoPitch * lfoValue / 12.0f);
             }
             const auto step = increment * bendMult * pitchMult;
-            float sample = oscillator(p.wave, phase, step);
+            float sample = voiceOscillator(p.wave, phase, step);
             if (useOsc2)
             {
-                sample += p.mix2 * oscillator(p.wave2, phase2, step * ratio2);
+                sample += p.mix2 * voiceOscillator(p.wave2, phase2, step * ratio2);
                 phase2 += step * ratio2;
                 if (phase2 >= juce::MathConstants<double>::twoPi)
                     phase2 = std::fmod(phase2, juce::MathConstants<double>::twoPi);
@@ -176,6 +181,20 @@ private:
         return 0.0f;
     }
 
+    // White noise (xorshift32), scaled to sit with the other oscillators.
+    float nextNoise()
+    {
+        noiseState ^= noiseState << 13;
+        noiseState ^= noiseState >> 17;
+        noiseState ^= noiseState << 5;
+        return 0.5f * (static_cast<float>(noiseState) * (2.0f / 4294967296.0f) - 1.0f);
+    }
+
+    float voiceOscillator(int wave, double phaseRadians, double step)
+    {
+        return wave == WaveNoise ? nextNoise() : oscillator(wave, phaseRadians, step);
+    }
+
     // phase in radians [0, 2pi); step in radians per sample.
     static float oscillator(int wave, double phaseRadians, double step)
     {
@@ -187,6 +206,15 @@ private:
         {
             case WaveTriangle: return static_cast<float>(4.0 * std::abs(t - 0.5) - 1.0);
             case WaveSaw: return 0.8f * (static_cast<float>(2.0 * t - 1.0) - polyBlep(t, dt));
+            case WavePulse:
+            {
+                // 25% duty with the DC offset removed (a raw pulse leans -0.5).
+                float pulse = t < 0.25 ? 1.0f : -1.0f;
+                pulse += polyBlep(t, dt);
+                pulse -= polyBlep(std::fmod(t + 0.75, 1.0), dt);
+                return 0.7f * (pulse + 0.5f);
+            }
+            case WaveNoise: return 0.0f; // handled per voice (needs state)
             default:
             {
                 float square = t < 0.5 ? 1.0f : -1.0f;
@@ -202,6 +230,7 @@ private:
     juce::ADSR envelope, filterEnvelope;
     double phase = 0.0, phase2 = 0.0, increment = 0.0, lfoPhase = 0.0, lfoIncrement = 0.0;
     double synthLfoPhase = 0.0, noteHz = 440.0;
+    std::uint32_t noiseState = 0x9E3779B9u;
     float amplitude = 0.0f, bendSemis = 0.0f, modDepth = 0.0f;
     float ic1 = 0.0f, ic2 = 0.0f, a1 = 1.0f, a2 = 0.0f, a3 = 0.0f;
     int coefficientCountdown = 0;

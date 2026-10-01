@@ -7,7 +7,9 @@ namespace sonora
 // Editable subtractive synth for "Sine Keys" (instrument 0). Plain floats so
 // ProjectState stays trivially copyable for the realtime snapshot queue.
 // Defaults reproduce the original fixed sine voice exactly.
-enum SynthWave : int { WaveSine = 0, WaveTriangle, WaveSaw, WaveSquare, numSynthWaves };
+// Pulse (25% duty) and Noise were appended later; ids are persisted, so keep
+// adding at the end.
+enum SynthWave : int { WaveSine = 0, WaveTriangle, WaveSaw, WaveSquare, WavePulse, WaveNoise, numSynthWaves };
 
 struct SynthParams
 {
@@ -51,9 +53,9 @@ inline SynthParams makePatch(int w1, int w2, float mix2, float semis2, float det
 }
 
 // Starting points for sound design. Index 0 is always the default sine.
-inline const std::array<SynthPatch, 10>& synthPatches()
+inline const std::array<SynthPatch, 26>& synthPatches()
 {
-    static const std::array<SynthPatch, 10> patches {{
+    static const std::array<SynthPatch, 26> patches {{
         { "Sine Keys", SynthParams {} },
         { "Warm Pad", makePatch(WaveSaw, WaveSaw, 0.8f, 0, 9, 1800, 0.2f, 1.0f,
                                 0.8f, 1.5f, 0.6f, 1.2f, 0.6f, 0.5f, 0.8f, 1.2f, 0.3f, 0, 0.3f, 0, 0.6f, 0.9f) },
@@ -73,13 +75,46 @@ inline const std::array<SynthPatch, 10>& synthPatches()
                                   0.01f, 0.3f, 1.0f, 0.3f, 0.005f, 0.1f, 1.0f, 0.08f, 6.0f, 0.05f, 0, 0.05f, 0.45f, 0.9f) },
         { "Chip Lead", makePatch(WaveSquare, WaveSquare, 0.4f, 12, 0, 20000, 0, 0,
                                  0.01f, 0.3f, 1.0f, 0.3f, 0.002f, 0.1f, 0.7f, 0.05f, 6.0f, 0.15f, 0, 0, 0, 0.7f) },
+        // Added in 0.34 (some use the Pulse and Noise oscillators).
+        { "Super Saw", makePatch(WaveSaw, WaveSaw, 0.9f, 0, 14, 6000, 0.1f, 0.5f,
+                                 0.01f, 0.4f, 0.8f, 0.3f, 0.01f, 0.2f, 0.9f, 0.3f, 5, 0, 0, 0.1f, 0.7f, 0.75f) },
+        { "Reese Bass", makePatch(WaveSaw, WaveSaw, 1.0f, 0, 18, 450, 0.3f, 0.5f,
+                                  0.01f, 0.6f, 0.5f, 0.2f, 0.005f, 0.2f, 1.0f, 0.15f, 0.5f, 0, 1.0f, 0.3f, 0.3f, 0.8f) },
+        { "Sub Bass", makePatch(WaveSine, WaveTriangle, 0.4f, -12, 0, 400, 0, 0,
+                                0.01f, 0.3f, 1.0f, 0.3f, 0.005f, 0.1f, 1.0f, 0.12f, 5, 0, 0, 0.1f, 0, 1.0f) },
+        { "Acid Bass", makePatch(WaveSaw, WaveSaw, 0.0f, 0, 0, 350, 0.8f, 3.0f,
+                                 0.001f, 0.22f, 0.0f, 0.1f, 0.001f, 0.25f, 0.7f, 0.06f, 5, 0, 0, 0.4f, 0, 0.75f) },
+        { "Electric Keys", makePatch(WaveTriangle, WaveSine, 0.5f, 12, 0, 5000, 0, 1.0f,
+                                     0.001f, 0.5f, 0.3f, 0.2f, 0.002f, 0.9f, 0.35f, 0.35f, 4.5f, 0, 0, 0, 0.5f, 1.0f) },
+        { "Vibes", makePatch(WaveSine, WaveSine, 0.3f, 12, 0, 20000, 0, 0,
+                             0.01f, 0.3f, 1.0f, 0.3f, 0.002f, 1.8f, 0.0f, 1.2f, 5.5f, 0.04f, 0, 0, 0.3f, 1.0f) },
+        { "Dream Pad", makePatch(WaveSaw, WaveTriangle, 0.7f, 7, 8, 1400, 0.15f, 1.2f,
+                                 1.5f, 2.0f, 0.6f, 1.5f, 1.2f, 1.0f, 0.85f, 2.0f, 0.25f, 0, 0.8f, 0, 0.8f, 0.85f) },
+        { "Vox Pad", makePatch(WaveTriangle, WaveSine, 0.6f, 12, 0, 1600, 0.2f, 0.5f,
+                               0.5f, 0.8f, 0.7f, 0.8f, 0.5f, 0.5f, 0.9f, 1.0f, 5.2f, 0.1f, 0, 0, 0.6f, 0.95f) },
+        { "String Machine", makePatch(WaveSaw, WaveSaw, 0.7f, 0, 12, 2600, 0.05f, 0.4f,
+                                      0.3f, 0.5f, 0.8f, 0.5f, 0.35f, 0.4f, 0.9f, 0.6f, 5.8f, 0.06f, 0, 0, 0.9f, 0.8f) },
+        { "Pulse Pluck", makePatch(WavePulse, WaveTriangle, 0.4f, 12, 0, 2500, 0.3f, 2.5f,
+                                   0.001f, 0.15f, 0.0f, 0.1f, 0.001f, 0.3f, 0.0f, 0.2f, 5, 0, 0, 0, 0.3f, 0.9f) },
+        { "Pulse Lead", makePatch(WavePulse, WavePulse, 0.6f, 0, 8, 5000, 0.2f, 1.0f,
+                                  0.01f, 0.3f, 0.8f, 0.2f, 0.005f, 0.2f, 0.8f, 0.15f, 5.5f, 0.1f, 0, 0.1f, 0.3f, 0.75f) },
+        { "Ocean Wind", makePatch(WaveNoise, WaveSine, 0.0f, 0, 0, 900, 0.5f, 0.0f,
+                                  0.01f, 0.3f, 1.0f, 0.3f, 1.5f, 1.0f, 1.0f, 1.5f, 0.3f, 0, 1.2f, 0, 0.3f, 0.7f) },
+        { "Noise Hit", makePatch(WaveNoise, WaveTriangle, 0.5f, 0, 0, 3000, 0.3f, 2.0f,
+                                 0.001f, 0.1f, 0.0f, 0.1f, 0.001f, 0.15f, 0.0f, 0.1f, 5, 0, 0, 0, 0, 0.9f) },
+        { "Whistle", makePatch(WaveSine, WaveSine, 0.15f, 12, 0, 20000, 0, 0,
+                               0.01f, 0.3f, 1.0f, 0.3f, 0.05f, 0.1f, 1.0f, 0.2f, 5.5f, 0.25f, 0, 0, 0.2f, 0.9f) },
+        { "Synth Stab", makePatch(WaveSaw, WaveSaw, 0.6f, 0, 4, 700, 0.15f, 3.0f,
+                                  0.005f, 0.25f, 0.3f, 0.15f, 0.005f, 0.25f, 0.5f, 0.15f, 5, 0, 0, 0.1f, 0.25f, 0.8f) },
+        { "Riser", makePatch(WaveNoise, WaveSaw, 0.3f, 0, 0, 300, 0.5f, 4.0f,
+                             2.0f, 1.0f, 1.0f, 0.5f, 2.0f, 0.5f, 1.0f, 0.8f, 5, 0, 0, 0.1f, 0.4f, 0.7f) },
     }};
     return patches;
 }
 
 inline const char* synthWaveName(int wave)
 {
-    static constexpr const char* names[] { "Sine", "Triangle", "Saw", "Square" };
+    static constexpr const char* names[] { "Sine", "Triangle", "Saw", "Square", "Pulse", "Noise" };
     return wave >= 0 && wave < numSynthWaves ? names[wave] : "Sine";
 }
 }

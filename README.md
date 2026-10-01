@@ -159,16 +159,25 @@ a fallback or for direct hardware access.
   Ctrl+Z restores its previous contents. On-screen REC continues to record
   regular song audio takes; MiniLab's Shift+Record is reserved for ideas.
 - Editable synth (Sine Keys, "Edit sound"): two oscillators (sine/triangle/
-  saw/square, blend, semitone, fine), resonant low-pass filter with its own
-  ADSR, amp ADSR, LFO vibrato/filter wobble, drive, stereo chorus, output
-  level, a live waveform preview, and 10 factory patches (pads, leads, basses,
-  plucks, brass, bells, organ, chip). Edits play instantly on held notes and
-  are undoable; synth, FX, and volume tweaks never cut sounding notes.
-- Per-track instrument selector: Sine Keys (editable synth) or sampled Grand/
-  Bright/Electric Piano, Nylon/Steel/Jazz/Clean/Overdriven Guitar, Acoustic/
-  Fingered/Picked/Synth Bass, Trumpet, Trombone, French Horn, Brass Section,
-  and String Ensemble. Notes stay put when you switch; TRACK effects shape the
-  chosen sound, and exports render the same instrument.
+  saw/square/pulse/noise, blend, semitone, fine), resonant low-pass filter
+  with its own ADSR, amp ADSR, LFO vibrato/filter wobble, drive, stereo
+  chorus, output level, a live waveform preview, and 26 factory patches
+  (pads, leads, basses, plucks, brass, bells, keys, organ, chip, string
+  machine, riser, wind and noise hits). Edits play instantly on held notes
+  and are undoable; synth, FX, and volume tweaks never cut sounding notes.
+- Per-track instrument selector, grouped by family: the editable synth plus
+  84 sampled instruments from the bundled GM bank. Piano (grand, bright,
+  electric, honky-tonk, FM, harpsichord, clavinet), mallets (celesta, bells,
+  vibes, marimba, xylophone, steel drums), organ and accordion, guitars
+  (nylon, steel, jazz, clean, muted, overdriven, distortion), basses
+  (acoustic, fingered, picked, fretless, slap, synth), strings (ensemble,
+  violin, viola, cello, contrabass, tremolo, pizzicato, harp, synth),
+  choir and voices, brass (trumpet, muted, trombone, horn, tuba, section,
+  analog), woodwinds (four saxes, oboe, clarinet, bassoon, flute, piccolo,
+  recorder, pan flute), synth leads and pads, world (harmonica, sitar,
+  banjo, koto, kalimba, fiddle), and percussion (timpani, woodblock, taiko).
+  Notes stay put when you switch; TRACK effects shape the chosen sound, and
+  exports render the same instrument.
 - On-screen/computer keyboard and external MIDI input.
 - Output selection, sample-rate/buffer controls, CPU status, and panic button.
 - Four-bar, 4/4 looping transport with 40-240 BPM tempo control and playhead.
@@ -192,8 +201,8 @@ a fallback or for direct hardware access.
   WAV/AIFF/FLAC/MP3/OGG (up to 10 seconds) from the Kit panel. Files are mixed
   to mono, resampled, level-matched, and gathered into the project media folder
   on save; missing files fall back to the starter sound.
-- Kit presets: three factory kits (Starter, Deep, Crisp — re-voiced generator
-  recipes) plus your own named presets saved under
+- Kit presets: six factory kits (Starter, Deep, Crisp, Tight, Boom, Warm —
+  re-voiced generator recipes) plus your own named presets saved under
   `~/.local/share/sonora/kits/`. A preset stores the variant and its samples
   as a portable folder; loading one is undoable, and per-pad imports still
   override individual pads afterwards.

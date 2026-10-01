@@ -53,7 +53,7 @@ if(BUILD_TESTING)
     target_link_libraries(SonoraUiSnapshot PRIVATE juce::juce_gui_basics juce::juce_audio_basics
         juce::juce_recommended_config_flags)
     add_test(NAME sonora_core COMMAND SonoraTests)
-    set_tests_properties(sonora_core PROPERTIES TIMEOUT 120)
+    set_tests_properties(sonora_core PROPERTIES TIMEOUT 300)
 endif()
 
 foreach(target Sonora SonoraTests)

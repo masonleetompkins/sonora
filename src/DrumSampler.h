@@ -31,6 +31,9 @@ inline const char* kitVariantName(int variant)
     {
         case 1: return "Deep";
         case 2: return "Crisp";
+        case 3: return "Tight";
+        case 4: return "Boom";
+        case 5: return "Warm";
         default: return "Starter";
     }
 }
@@ -40,6 +43,9 @@ inline KitVariant kitVariantParams(int variant)
     {
         case 1: return { 0.65, 1.5, 0x1111u };
         case 2: return { 1.5, 0.6, 0x2222u };
+        case 3: return { 1.25, 0.5, 0x3333u };
+        case 4: return { 0.5, 2.0, 0x4444u };
+        case 5: return { 0.85, 1.25, 0x5555u };
         default: return { 1.0, 1.0, 0u };
     }
 }

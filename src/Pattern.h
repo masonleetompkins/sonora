@@ -542,7 +542,7 @@ inline constexpr int maxSections = 16;      // parts per song (4 bars each)
 inline constexpr int legacyMaxSections = 8; // files before v13 store 8 rows
 inline constexpr int numPatterns = 4;
 inline constexpr int sampleFileCapacity = 260;
-inline constexpr int numKitVariants = 3;
+inline constexpr int numKitVariants = 6;
 inline constexpr int maxTracks = 8;
 inline constexpr int trackNameCapacity = 64;
 
