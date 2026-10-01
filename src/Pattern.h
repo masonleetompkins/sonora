@@ -415,10 +415,35 @@ struct LiveFx
 struct TrackMix
 {
     float volume = 0.8f;
+    float pan = 0.0f; // -1 left .. +1 right (balance; center passes through)
+    float sendDelay = 0.0f, sendReverb = 0.0f; // 0..1 post-fader sends
     bool mute = false, solo = false;
-    bool valid() const { return std::isfinite(volume) && volume >= 0.0f && volume <= 1.5f; }
+    bool valid() const
+    {
+        return std::isfinite(volume) && volume >= 0.0f && volume <= 1.5f
+            && std::isfinite(pan) && pan >= -1.0f && pan <= 1.0f
+            && std::isfinite(sendDelay) && sendDelay >= 0.0f && sendDelay <= 1.0f
+            && std::isfinite(sendReverb) && sendReverb >= 0.0f && sendReverb <= 1.0f;
+    }
     bool audible(const TrackMix& other) const { return !mute && (solo || !other.solo); }
     bool operator==(const TrackMix&) const = default;
+};
+
+// Shared send/return buses: delay (bus 0) and reverb (bus 1). Buses run fully
+// wet; the return levels are the mix control.
+struct ProjectSends
+{
+    DelayParams delay;
+    float delayReturn = 0.8f;
+    ReverbParams reverb;
+    float reverbReturn = 0.8f;
+    bool valid() const
+    {
+        return delay.valid() && reverb.valid() && std::isfinite(delayReturn)
+            && delayReturn >= 0.0f && delayReturn <= 1.5f && std::isfinite(reverbReturn)
+            && reverbReturn >= 0.0f && reverbReturn <= 1.5f;
+    }
+    bool operator==(const ProjectSends&) const = default;
 };
 
 inline constexpr int maxSections = 16;      // parts per song (4 bars each)
@@ -759,6 +784,7 @@ struct ProjectState
 {
     std::array<Track, maxTracks> tracks {};
     LimiterParams master;
+    ProjectSends sends;
     Arrangement song;
     bool songMode = false;
     std::array<AudioTakeMeta, maxTakes> takes {};
@@ -776,7 +802,7 @@ struct ProjectState
     bool valid() const
     {
         if (!(std::isfinite(bpm) && bpm >= 40.0 && bpm <= 240.0
-            && master.valid() && song.valid()))
+            && master.valid() && song.valid() && sends.valid()))
             return false;
         if (musicKey < 0 || musicKey > 11 || musicScale >= MusicScale::numScales)
             return false;

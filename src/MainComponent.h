@@ -21,6 +21,8 @@
 
 namespace sonora
 {
+class MixerView;
+
 class MainComponent final : public juce::AudioAppComponent,
                               private juce::Timer,
                               private juce::AudioIODeviceCallback,
@@ -124,11 +126,15 @@ private:
     juce::TextButton editSynth { "Edit sound" };
     // LOOP edits 4-bar patterns; SONG shows the arrangement board. The view
     // also sets playback (loop vs whole song).
-    juce::TextButton loopView { "LOOP" }, songView { "SONG" };
+    juce::TextButton loopView { "LOOP" }, songView { "SONG" }, mixView { "MIX" };
     juce::ComboBox songTemplate, partChoice;
     juce::TextButton partTrackOn { "Plays in this part" };
     juce::Label partHint;
     std::unique_ptr<ArrangementView> arrangement;
+    std::unique_ptr<MixerView> mixer;
+    bool mixerVisible = false;
+    void setMixerView(bool show);
+    void refreshMixer();
     // editPart >= 0: LOOP view previews and edits that song part (all tracks
     // use its loops; tracks silent in it are muted). songStartPart: where
     // song playback starts.

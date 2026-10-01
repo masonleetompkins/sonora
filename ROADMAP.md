@@ -15,6 +15,8 @@ Build 1-8, skip the rest.
    DONE (per-section chords, follow-transpose in song playback, AI writes
    in-chord, format v18).
 6. **Sends/returns + mixer view**.
+   DONE (post-fader delay/reverb sends, return buses, pan, mixer view,
+   format v19).
 7. **Automation lanes** (volume/pan/FX; format bump).
 8. **Time-stretch for takes** (Rubber Band library integration).
 

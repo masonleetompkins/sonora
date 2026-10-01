@@ -71,6 +71,24 @@ void AudioEngine::prepare(double sampleRate)
         unit.gain.setCurrentAndTargetValue(1.0f);
     }
     master.prepare(rate);
+    sendDelayFx.prepare(rate);
+    sendReverbFx.prepare(rate);
+    delayBus.setSize(2, 8192);
+    reverbBus.setSize(2, 8192);
+    delayBus.clear();
+    reverbBus.clear();
+    busDelay = {};
+    busReverb = {};
+    for (auto& track : sendSmooth)
+        for (auto& send : track)
+        {
+            send.reset(rate, 0.02);
+            send.setCurrentAndTargetValue(0.0f);
+        }
+    delayReturnSmooth.reset(rate, 0.02);
+    reverbReturnSmooth.reset(rate, 0.02);
+    delayReturnSmooth.setCurrentAndTargetValue(active.sends.delayReturn);
+    reverbReturnSmooth.setCurrentAndTargetValue(active.sends.reverbReturn);
     liveFx.reset(0);
     liveFxTrack = -1;
     liveFxPosition = 0;
@@ -167,7 +185,11 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
             unit.chorus.reset();
         }
     if (reset || panicNow)
+    {
         master.reset();
+        sendDelayFx.reset();
+        sendReverbFx.reset();
+    }
     for (int track = 0; track < maxTracks; ++track)
     {
         auto& unit = units[static_cast<std::size_t>(track)];
@@ -399,6 +421,11 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
         if (finished)
             playing.store(false);
     }
+    // Send buses accumulate post-fader taps below; size (once) before use.
+    delayBus.setSize(2, block.numSamples, false, false, true);
+    reverbBus.setSize(2, block.numSamples, false, false, true);
+    delayBus.clear();
+    reverbBus.clear();
     // Render every track through its own voices, chain, and fader.
     for (int track = 0; track < maxTracks; ++track)
     {
@@ -412,6 +439,10 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
         const float target = kind == TrackKind::Synth && audible(track, active)
             ? active.tracks[static_cast<std::size_t>(track)].mix.volume : 0.0f;
         unit.gain.setTargetValue(kind == TrackKind::Drums ? 1.0f : target);
+        const auto& mix = active.tracks[static_cast<std::size_t>(track)].mix;
+        const float panL = std::min(1.0f, 1.0f - mix.pan), panR = std::min(1.0f, 1.0f + mix.pan);
+        sendSmooth[static_cast<std::size_t>(track)][0].setTargetValue(mix.sendDelay);
+        sendSmooth[static_cast<std::size_t>(track)][1].setTargetValue(mix.sendReverb);
         for (int offset = 0; offset < block.numSamples; offset += 512)
         {
             const int count = std::min(512, block.numSamples - offset);
@@ -436,11 +467,53 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
             for (int frame = 0; frame < count; ++frame)
             {
                 const auto gain = unit.gain.getNextValue();
+                const auto sendD = sendSmooth[static_cast<std::size_t>(track)][0].getNextValue();
+                const auto sendR = sendSmooth[static_cast<std::size_t>(track)][1].getNextValue();
+                const float left = trackBuffer.getSample(0, frame) * gain * panL;
+                const float right = trackBuffer.getSample(1, frame) * gain * panR;
+                const int at = offset + frame;
                 for (int channel = 0; channel < block.buffer->getNumChannels(); ++channel)
-                    block.buffer->addSample(channel, start + frame, trackBuffer.getSample(channel % 2, frame) * gain);
+                    block.buffer->addSample(channel, start + frame,
+                                            channel % 2 == 0 ? left : right);
+                delayBus.addSample(0, at, left * sendD);
+                delayBus.addSample(1, at, right * sendD);
+                reverbBus.addSample(0, at, left * sendR);
+                reverbBus.addSample(1, at, right * sendR);
             }
         }
     }
+    // Send returns: fully wet buses scaled by their return faders.
+    {
+        DelayParams wet = active.sends.delay;
+        wet.mix = 1.0f;
+        if (!(wet == busDelay))
+        {
+            sendDelayFx.setParams(wet);
+            busDelay = wet;
+        }
+        ReverbParams soak = active.sends.reverb;
+        soak.mix = 1.0f;
+        if (!(soak == busReverb))
+        {
+            sendReverbFx.setParams(soak);
+            busReverb = soak;
+        }
+    }
+    delayReturnSmooth.setTargetValue(active.sends.delayReturn);
+    reverbReturnSmooth.setTargetValue(active.sends.reverbReturn);
+    sendDelayFx.process(delayBus.getWritePointer(0), delayBus.getWritePointer(1), block.numSamples);
+    sendReverbFx.process(reverbBus.getWritePointer(0), reverbBus.getWritePointer(1), block.numSamples);
+    for (int frame = 0; frame < block.numSamples; ++frame)
+    {
+        const auto wetD = delayReturnSmooth.getNextValue();
+        const auto wetR = reverbReturnSmooth.getNextValue();
+        for (int channel = 0; channel < block.buffer->getNumChannels(); ++channel)
+            block.buffer->addSample(channel, block.startSample + frame,
+                                    delayBus.getSample(channel % 2, frame) * wetD
+                                        + reverbBus.getSample(channel % 2, frame) * wetR);
+    }
+    delayBus.clear();
+    reverbBus.clear();
     // Recorded takes play in song mode from their punch-in position. Takes are
     // preloaded PCM owned by the RCU set; this loop only reads, never allocates.
     // blockStartPosition was captured before the schedulers advanced above.

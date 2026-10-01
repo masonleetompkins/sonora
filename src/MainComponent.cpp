@@ -1871,6 +1871,239 @@ struct RampPanel : public juce::Component
     std::function<void(int, int)> onApply;
 };
 
+// Mixer: one strip per used track (fader, pan, mute/solo, two sends) plus
+// the delay/reverb return strips. Dumb view: setState rebuilds or refreshes,
+// every gesture leaves through callbacks so the owner can apply undo.
+struct MixerState
+{
+    std::array<TrackMix, maxTracks> mix {};
+    std::array<juce::String, maxTracks> names;
+    std::array<juce::Colour, maxTracks> colours;
+    std::array<bool, maxTracks> used {}, drums {};
+    ProjectSends sends;
+};
+
+class MixerView final : public juce::Component
+{
+public:
+    std::function<void(int, float)> onVolume, onPan, onSendDelay, onSendReverb;
+    std::function<void(int)> onMute, onSolo;
+    std::function<void(int, float)> onReturn;
+    std::function<void(float)> onDelayTime, onReverbSize;
+    std::function<void()> onGestureBegin, onGestureEnd;
+
+    void setState(const MixerState& next)
+    {
+        juce::String signature;
+        for (int t = 0; t < maxTracks; ++t)
+            if (next.used[static_cast<std::size_t>(t)])
+                signature += juce::String(t) + (next.drums[static_cast<std::size_t>(t)] ? "d" : "");
+        if (signature != lastSignature)
+        {
+            lastSignature = signature;
+            strips.clear();
+            for (int t = 0; t < maxTracks; ++t)
+            {
+                if (!next.used[static_cast<std::size_t>(t)])
+                    continue;
+                auto strip = std::make_unique<Strip>();
+                strip->track = t;
+                strip->drums = next.drums[static_cast<std::size_t>(t)];
+                addAndMakeVisible(strip->name.get());
+                strip->name->setText(next.names[static_cast<std::size_t>(t)], juce::dontSendNotification);
+                strip->name->setFont(ui::font(12.0f, true));
+                strip->name->setColour(juce::Label::textColourId,
+                                       next.colours[static_cast<std::size_t>(t)]);
+                strip->name->setJustificationType(juce::Justification::centred);
+                addAndMakeVisible(strip->mute.get());
+                strip->mute->setButtonText("M");
+                strip->mute->setClickingTogglesState(true);
+                strip->mute->setWantsKeyboardFocus(false);
+                strip->mute->setColour(juce::TextButton::buttonOnColourId, ui::danger);
+                strip->mute->onClick = [this, t] { if (onMute) onMute(t); };
+                addAndMakeVisible(strip->solo.get());
+                strip->solo->setButtonText("S");
+                strip->solo->setClickingTogglesState(true);
+                strip->solo->setWantsKeyboardFocus(false);
+                strip->solo->setColour(juce::TextButton::buttonOnColourId, ui::cyan);
+                strip->solo->onClick = [this, t] { if (onSolo) onSolo(t); };
+                wireFader(strip->volume, 0.0, 150.0, true,
+                          [this, t](float v) { if (onVolume) onVolume(t, v / 100.0f); });
+                wireFader(strip->pan, -100.0, 100.0, false,
+                          [this, t](float v) { if (onPan) onPan(t, v / 100.0f); });
+                wireFader(strip->sendDelay, 0.0, 100.0, false,
+                          [this, t](float v) { if (onSendDelay) onSendDelay(t, v / 100.0f); });
+                wireFader(strip->sendReverb, 0.0, 100.0, false,
+                          [this, t](float v) { if (onSendReverb) onSendReverb(t, v / 100.0f); });
+                for (auto [box, text] : { std::pair<juce::Label*, const char*> { strip->panLabel.get(), "PAN" },
+                                                 { strip->dlyLabel.get(), "DLY" }, { strip->rvbLabel.get(), "RVB" } })
+                {
+                    box->setText(text, juce::dontSendNotification);
+                    box->setFont(ui::font(9.0f, true));
+                    box->setColour(juce::Label::textColourId, ui::muted);
+                    addAndMakeVisible(box);
+                }
+                addAndMakeVisible(strip->volume.get());
+                addAndMakeVisible(strip->pan.get());
+                addAndMakeVisible(strip->sendDelay.get());
+                addAndMakeVisible(strip->sendReverb.get());
+                strips.push_back(std::move(strip));
+            }
+            returns.clear();
+            for (int bus = 0; bus < 2; ++bus)
+            {
+                auto ret = std::make_unique<Return>();
+                ret->bus = bus;
+                addAndMakeVisible(ret->name.get());
+                ret->name->setText(bus == 0 ? "DELAY" : "REVERB", juce::dontSendNotification);
+                ret->name->setFont(ui::font(12.0f, true));
+                ret->name->setColour(juce::Label::textColourId, ui::violet);
+                ret->name->setJustificationType(juce::Justification::centred);
+                wireFader(ret->level, 0.0, 150.0, true,
+                          [this, bus](float v) { if (onReturn) onReturn(bus, v / 100.0f); });
+                wireFader(ret->tone, bus == 0 ? 20.0 : 0.0, bus == 0 ? 1000.0 : 100.0, false,
+                          [this, bus](float v) {
+                              if (bus == 0)
+                              {
+                                  if (onDelayTime) onDelayTime(v);
+                              }
+                              else if (onReverbSize)
+                                  onReverbSize(v / 100.0f);
+                          });
+                ret->toneLabel->setText(bus == 0 ? "MS" : "SIZE", juce::dontSendNotification);
+                ret->toneLabel->setFont(ui::font(9.0f, true));
+                ret->toneLabel->setColour(juce::Label::textColourId, ui::muted);
+                addAndMakeVisible(ret->toneLabel.get());
+                addAndMakeVisible(ret->level.get());
+                addAndMakeVisible(ret->tone.get());
+                returns.push_back(std::move(ret));
+            }
+            resized();
+        }
+        for (auto& strip : strips)
+        {
+            const auto& mix = next.mix[static_cast<std::size_t>(strip->track)];
+            strip->mute->setToggleState(mix.mute, juce::dontSendNotification);
+            strip->solo->setToggleState(mix.solo, juce::dontSendNotification);
+            strip->volume->setValue(mix.volume * 100.0, juce::dontSendNotification);
+            strip->pan->setValue(mix.pan * 100.0, juce::dontSendNotification);
+            strip->sendDelay->setValue(mix.sendDelay * 100.0, juce::dontSendNotification);
+            strip->sendReverb->setValue(mix.sendReverb * 100.0, juce::dontSendNotification);
+        }
+        for (auto& ret : returns)
+        {
+            const bool delay = ret->bus == 0;
+            ret->level->setValue((delay ? next.sends.delayReturn : next.sends.reverbReturn) * 100.0,
+                                 juce::dontSendNotification);
+            ret->tone->setValue(delay ? next.sends.delay.timeMs : next.sends.reverb.size * 100.0,
+                                juce::dontSendNotification);
+        }
+        repaint();
+    }
+
+    void resized() override
+    {
+        const int count = static_cast<int>(strips.size() + returns.size());
+        if (count == 0)
+            return;
+        const float w = std::min(116.0f, static_cast<float>(getWidth()) / static_cast<float>(count));
+        int x = 4;
+        for (auto& strip : strips)
+        {
+            const int sw = static_cast<int>(w) - 8;
+            strip->name->setBounds(x, 6, sw, 20);
+            strip->mute->setBounds(x, 30, (sw - 4) / 2, 24);
+            strip->solo->setBounds(x + (sw - 4) / 2 + 4, 30, (sw - 4) / 2, 24);
+            strip->volume->setBounds(x, 58, sw, 150);
+            strip->panLabel->setBounds(x, 212, 30, 34);
+            strip->pan->setBounds(x + 30, 212, sw - 30, 34);
+            strip->dlyLabel->setBounds(x, 250, 30, 34);
+            strip->sendDelay->setBounds(x + 30, 250, sw - 30, 34);
+            strip->rvbLabel->setBounds(x, 288, 30, 34);
+            strip->sendReverb->setBounds(x + 30, 288, sw - 30, 34);
+            x += static_cast<int>(w);
+        }
+        for (auto& ret : returns)
+        {
+            const int sw = static_cast<int>(w) - 8;
+            ret->name->setBounds(x, 6, sw, 20);
+            ret->level->setBounds(x, 58, sw, 150);
+            ret->toneLabel->setBounds(x, 212, 34, 34);
+            ret->tone->setBounds(x + 34, 212, sw - 34, 34);
+            x += static_cast<int>(w);
+        }
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        g.fillAll(juce::Colour(0xff0c111b));
+        ui::caption(g, "MIXER  /  FADER  PAN  SENDS  RETURNS", { 12, getHeight() - 22, 400, 18 }, ui::muted, 10.0f);
+        int x = 4;
+        const int count = static_cast<int>(strips.size() + returns.size());
+        if (count == 0)
+        {
+            g.setColour(ui::muted);
+            g.setFont(ui::font(12.0f));
+            g.drawText("No tracks yet.", getLocalBounds(), juce::Justification::centred);
+            return;
+        }
+        const float w = std::min(116.0f, static_cast<float>(getWidth()) / static_cast<float>(count));
+        for (std::size_t i = 0; i < strips.size() + returns.size(); ++i)
+        {
+            ui::surface(g, juce::Rectangle<float>(static_cast<float>(x), 0.0f, w - 4.0f,
+                                                  static_cast<float>(getHeight() - 26)).toFloat(), 8.0f);
+            x += static_cast<int>(w);
+        }
+    }
+
+private:
+    struct Strip
+    {
+        int track = 0;
+        bool drums = false;
+        std::unique_ptr<juce::Label> name = std::make_unique<juce::Label>();
+        std::unique_ptr<juce::TextButton> mute = std::make_unique<juce::TextButton>();
+        std::unique_ptr<juce::TextButton> solo = std::make_unique<juce::TextButton>();
+        std::unique_ptr<juce::Slider> volume = std::make_unique<juce::Slider>();
+        std::unique_ptr<juce::Label> panLabel = std::make_unique<juce::Label>();
+        std::unique_ptr<juce::Slider> pan = std::make_unique<juce::Slider>();
+        std::unique_ptr<juce::Label> dlyLabel = std::make_unique<juce::Label>();
+        std::unique_ptr<juce::Slider> sendDelay = std::make_unique<juce::Slider>();
+        std::unique_ptr<juce::Label> rvbLabel = std::make_unique<juce::Label>();
+        std::unique_ptr<juce::Slider> sendReverb = std::make_unique<juce::Slider>();
+    };
+    struct Return
+    {
+        int bus = 0;
+        std::unique_ptr<juce::Label> name = std::make_unique<juce::Label>();
+        std::unique_ptr<juce::Slider> level = std::make_unique<juce::Slider>();
+        std::unique_ptr<juce::Label> toneLabel = std::make_unique<juce::Label>();
+        std::unique_ptr<juce::Slider> tone = std::make_unique<juce::Slider>();
+    };
+    void wireFader(std::unique_ptr<juce::Slider>& slider, double min, double max, bool vertical,
+                   std::function<void(float)> change)
+    {
+        slider->setSliderStyle(vertical ? juce::Slider::LinearVertical : juce::Slider::LinearHorizontal);
+        slider->setRange(min, max, min < 0.0 ? 1.0 : (max > 200.0 ? 1.0 : 0.5));
+        if (vertical)
+            slider->setTextBoxStyle(juce::Slider::TextBoxBelow, false, 48, 18);
+        else
+            slider->setTextBoxStyle(juce::Slider::TextBoxRight, false, 44, 18);
+        slider->setColour(juce::Slider::thumbColourId, ui::cyan);
+        slider->setColour(juce::Slider::textBoxTextColourId, ui::text);
+        slider->setWantsKeyboardFocus(false);
+        slider->onValueChange = [change, slider = slider.get()] {
+            change(static_cast<float>(slider->getValue()));
+        };
+        slider->onDragStart = [this] { if (onGestureBegin) onGestureBegin(); };
+        slider->onDragEnd = [this] { if (onGestureEnd) onGestureEnd(); };
+    }
+
+    std::vector<std::unique_ptr<Strip>> strips;
+    std::vector<std::unique_ptr<Return>> returns;
+    juce::String lastSignature = "none";
+};
+
 // Groove popup: per-track swing plus destructive quantize/humanize for
 // the selected loop. Lives in a CallOutBox so the toolbar stays compact.
 struct GroovePanel : public juce::Component
@@ -1983,7 +2216,7 @@ MainComponent::MainComponent()
              &panic, &keyboard, &pianoRoll, &play, &stop, &record, &ideaButton, &undo, &redo, &newProject,
              &open, &save, &saveAs, &exportButton, &clear, &demo, &tempo, &drumSequencer,
              &audioTab, &mute, &solo, &trackVolume, &repeatBar, &kitButton, &outputMeter,
-             &loopView, &songView, &duplicatePattern, &themeButton, &grooveButton,
+             &loopView, &songView, &mixView, &duplicatePattern, &themeButton, &grooveButton,
              &keyButton, &chordButton, &arpButton, &rampButton })
         addAndMakeVisible(component);
     for (auto* component : std::initializer_list<juce::Component*> { &songTemplate, &partChoice, &partTrackOn, &partHint })
@@ -1993,6 +2226,72 @@ MainComponent::MainComponent()
     arrangement->onAction = [this](const ArrangementAction& action) { handleArrangementAction(action); };
     arrangement->onGestureBegin = [this] { beginEdit(); };
     arrangement->onGestureEnd = [this] { endEdit(); };
+    mixer = std::make_unique<MixerView>();
+    addChildComponent(mixer.get());
+    auto mixEdit = [this](int track, auto&& change) {
+        if (track < 0 || track >= maxTracks)
+            return;
+        const bool own = !editing;
+        if (own)
+            beginEdit();
+        change(project.tracks[static_cast<std::size_t>(track)].mix);
+        projectChanged();
+        if (own)
+            endEdit();
+    };
+    mixer->onVolume = [this, mixEdit](int track, float v) {
+        mixEdit(track, [v](TrackMix& mix) { mix.volume = std::clamp(v, 0.0f, 1.5f); });
+    };
+    mixer->onPan = [this, mixEdit](int track, float v) {
+        mixEdit(track, [v](TrackMix& mix) { mix.pan = std::clamp(v, -1.0f, 1.0f); });
+    };
+    mixer->onSendDelay = [this, mixEdit](int track, float v) {
+        mixEdit(track, [v](TrackMix& mix) { mix.sendDelay = std::clamp(v, 0.0f, 1.0f); });
+    };
+    mixer->onSendReverb = [this, mixEdit](int track, float v) {
+        mixEdit(track, [v](TrackMix& mix) { mix.sendReverb = std::clamp(v, 0.0f, 1.0f); });
+    };
+    auto mixOwn = [this](auto&& change) {
+        const bool own = !editing;
+        if (own)
+            beginEdit();
+        change();
+        projectChanged();
+        if (own)
+            endEdit();
+    };
+    mixer->onMute = [this, mixOwn](int track) {
+        if (track < 0 || track >= maxTracks)
+            return;
+        mixOwn([this, track] {
+            auto& mix = project.tracks[static_cast<std::size_t>(track)].mix;
+            mix.mute = !mix.mute;
+        });
+    };
+    mixer->onSolo = [this, mixOwn](int track) {
+        if (track < 0 || track >= maxTracks)
+            return;
+        mixOwn([this, track] {
+            auto& mix = project.tracks[static_cast<std::size_t>(track)].mix;
+            mix.solo = !mix.solo;
+        });
+    };
+    mixer->onReturn = [this, mixOwn](int bus, float v) {
+        mixOwn([this, bus, v] {
+            if (bus == 0)
+                project.sends.delayReturn = std::clamp(v, 0.0f, 1.5f);
+            else
+                project.sends.reverbReturn = std::clamp(v, 0.0f, 1.5f);
+        });
+    };
+    mixer->onDelayTime = [this, mixOwn](float ms) {
+        mixOwn([this, ms] { project.sends.delay.timeMs = std::clamp(ms, 20.0f, 1000.0f); });
+    };
+    mixer->onReverbSize = [this, mixOwn](float size) {
+        mixOwn([this, size] { project.sends.reverb.size = std::clamp(size, 0.0f, 1.0f); });
+    };
+    mixer->onGestureBegin = [this] { beginEdit(); };
+    mixer->onGestureEnd = [this] { endEdit(); };
     for (auto& button : trackButtons)
         addAndMakeVisible(button);
     addAndMakeVisible(addTrack);
@@ -2123,7 +2422,7 @@ MainComponent::MainComponent()
              &play, &stop, &record, &ideaButton, &panic, &audioSettings, &undo, &redo,
              &newProject, &open, &save, &saveAs, &exportButton, &clear, &demo, &duplicatePattern,
              &audioTab, &mute, &solo, &repeatBar, &kitButton,
-             &loopView, &songView, &partTrackOn, &themeButton, &grooveButton,
+             &loopView, &songView, &mixView, &partTrackOn, &themeButton, &grooveButton,
              &keyButton, &chordButton, &arpButton, &rampButton })
         button->setWantsKeyboardFocus(false);
     for (int i = 0; i < numPatterns; ++i)
@@ -2234,13 +2533,19 @@ MainComponent::MainComponent()
         projectChanged();
         endEdit();
     };
-    for (auto* button : { &loopView, &songView })
+    for (auto* button : { &loopView, &songView, &mixView })
     {
         button->setClickingTogglesState(false);
         button->setColour(juce::TextButton::buttonOnColourId, ui::cyan);
     }
     loopView.onClick = [this] { setSongView(false); };
     songView.onClick = [this] { setSongView(true); };
+    mixView.onClick = [this] {
+        if (audioSelected)
+            selectChannel(selectedTrack);
+        setMixerView(!mixerVisible);
+    };
+    mixView.setTooltip("Mixer: track faders, pan, mute/solo, and the delay/reverb sends. Playback keeps running.");
     loopView.setTooltip("Loop view: write and edit 4-bar patterns. Playback repeats the loop.");
     songView.setTooltip("Song view: arrange your loops into a song (intro, verse, chorus...). Playback plays the song.");
     songTemplate.setTextWhenNothingSelected("Song structure...");
@@ -5370,14 +5675,15 @@ void MainComponent::resized()
     ideaButton.setBounds(266, 138, 80, 34);
     tempo.setBounds(358, 139, 128, 32);
     position.setBounds(506, 134, 186, 42);
-    loopView.setBounds(704, 138, 58, 34);
-    songView.setBounds(764, 138, 58, 34);
+    loopView.setBounds(700, 138, 56, 34);
+    songView.setBounds(758, 138, 56, 34);
+    mixView.setBounds(816, 138, 48, 34);
     undo.setBounds(contentWidth() - 174, 218, 62, 28);
     redo.setBounds(contentWidth() - 104, 218, 62, 28);
     const int instrumentWidth = std::clamp(contentWidth() - 900, 160, 240);
     instrumentChoice.setBounds(580, 218, instrumentWidth, 28);
     editSynth.setBounds(588 + instrumentWidth, 218, 104, 28);
-    panic.setBounds(840, 138, 76, 34);
+    panic.setBounds(872, 138, 72, 34);
     audioSettings.setBounds(contentWidth() - 180, 138, 142, 34);
     int row = 0;
     for (int track = 0; track < maxTracks; ++track)
@@ -5404,6 +5710,8 @@ void MainComponent::resized()
     songTemplate.setBounds(620, 218, std::clamp(contentWidth() - 174 - 136 - 620 - 12, 160, 340), 28);
     if (arrangement != nullptr)
         arrangement->setBounds(254, 262, contentWidth() - 292, getHeight() - 530);
+    if (mixer != nullptr)
+        mixer->setBounds(254, 262, contentWidth() - 292, getHeight() - 530);
     for (int i = 0; i < numPatterns; ++i)
         patternTabs[static_cast<std::size_t>(i)].setBounds(330 + i * 36, 256, 32, 28);
     duplicatePattern.setBounds(480, 256, 60, 28);
@@ -5438,6 +5746,7 @@ void MainComponent::resized()
 
 void MainComponent::setSongView(bool song)
 {
+    mixerVisible = false;
     if (project.songMode != song)
     {
         beginEdit();
@@ -5451,6 +5760,41 @@ void MainComponent::setSongView(bool song)
     updateSongControls();
     resized();
     repaint();
+}
+
+void MainComponent::setMixerView(bool show)
+{
+    if (mixerVisible == show)
+    {
+        updateSongControls();
+        return;
+    }
+    mixerVisible = show;
+    // Re-apply the editor, then the mixer branch of updateSongControls hides
+    // it again when needed. Playback is untouched so mixing stays live.
+    selectChannel(audioSelected ? -1 : selectedTrack);
+    updateSongControls();
+    resized();
+    repaint();
+}
+
+void MainComponent::refreshMixer()
+{
+    if (mixer == nullptr)
+        return;
+    MixerState view;
+    for (int track = 0; track < maxTracks; ++track)
+    {
+        const auto t = static_cast<std::size_t>(track);
+        const auto& state = project.tracks[t];
+        view.used[t] = state.kind != TrackKind::None;
+        view.drums[t] = state.kind == TrackKind::Drums;
+        view.names[t] = state.trackName();
+        view.colours[t] = trackColour(state.icon);
+        view.mix[t] = state.mix;
+    }
+    view.sends = project.sends;
+    mixer->setState(view);
 }
 
 void MainComponent::refreshArrangement()
@@ -5607,6 +5951,7 @@ void MainComponent::updateSongControls()
     const bool song = project.songMode;
     loopView.setToggleState(!song, juce::dontSendNotification);
     songView.setToggleState(song, juce::dontSendNotification);
+    mixView.setToggleState(mixerVisible && !audioSelected, juce::dontSendNotification);
     if (arrangement == nullptr)
         return;
     arrangement->setVisible(song);
@@ -5655,5 +6000,25 @@ void MainComponent::updateSongControls()
     partHint.setText(hint, juce::dontSendNotification);
     const int hintX = partTrackOn.isVisible() ? 820 : 662;
     partHint.setBounds(hintX, 292, std::max(120, getWidth() - hintX - 200), 28);
+    // Mixer replaces the editor (and the song board) but never the transport.
+    const bool showMixer = mixerVisible && !audioSelected;
+    if (mixer != nullptr)
+        mixer->setVisible(showMixer);
+    if (arrangement != nullptr && showMixer)
+        arrangement->setVisible(false);
+    if (showMixer)
+    {
+        for (juce::Component* c : std::initializer_list<juce::Component*> {
+                 &pianoRoll, &drumSequencer, &duplicatePattern, &clear, &kitButton,
+                 &repeatBar, &description, &instrumentChoice, &editSynth, &partChoice, &partTrackOn,
+                 &partHint, &grooveButton, &keyButton, &chordButton, &arpButton, &rampButton })
+            if (c != nullptr)
+                c->setVisible(false);
+        for (auto& tab : patternTabs)
+            tab.setVisible(false);
+        for (auto& button : padButtons)
+            button.setVisible(false);
+        refreshMixer();
+    }
 }
 }

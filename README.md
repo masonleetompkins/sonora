@@ -128,6 +128,8 @@ a fallback or for direct hardware access.
 - Chord track: every song section can carry a chord (click the chord strip
   under a part in Song view). Chorded sections transpose synth loops to
   follow, and the AI composer writes new loops to fit the progression.
+- Mixer (MIX button): per-track faders, pan, mute/solo, and post-fader
+  delay/reverb sends into two shared return buses, all live during playback.
 - AI assistant sidebar (AI assistant button or Ctrl+I): chat with Claude on
   the right while you work. It writes or edits the selected track's melody
   or drum beat, sees the whole song structure and the other tracks in the
@@ -303,7 +305,9 @@ with Sine Keys and the default sine patch. Format v15 adds the song-wide
 key and scale (older projects open in C major), and v16 adds per-track
 live arp/chord settings (older projects play MiniLab notes straight
 through), v17 adds per-take solos (older projects open unsoloed),
-and v18 adds the per-section chord track (older projects play as written). It contains tempo, timing metadata, two
+and v18 adds the per-section chord track (older projects play as written).
+Format v19 adds per-track pan/sends and the return buses (older projects
+open centered and dry). It contains tempo, timing metadata, two
 stable track IDs/instrument identifiers, track mix settings, per-track effect
 chains, master limiter settings, four melody patterns and four drum patterns
 per track, per-pad custom sample filenames, the factory kit variant, audio take

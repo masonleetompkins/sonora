@@ -58,7 +58,9 @@ juce::Result decodeMix(const juce::DynamicObject& track, TrackMix& mix)
     const auto mute = track.getProperty("mute"), solo = track.getProperty("solo");
     if (!number(volume) || !mute.isBool() || !solo.isBool())
         return juce::Result::fail("Invalid track volume/mute/solo fields.");
-    mix = { static_cast<float>(volume), static_cast<bool>(mute), static_cast<bool>(solo) };
+    mix.volume = static_cast<float>(volume);
+    mix.mute = static_cast<bool>(mute);
+    mix.solo = static_cast<bool>(solo);
     return mix.valid() ? juce::Result::ok() : juce::Result::fail("Track volume is out of range.");
 }
 
@@ -212,6 +214,38 @@ juce::Result decodeMaster(const juce::var& value, LimiterParams& master)
     return juce::Result::ok();
 }
 
+juce::var encodeSends(const ProjectSends& sends)
+{
+    auto* root = new juce::DynamicObject();
+    root->setProperty("delayTimeMs", static_cast<double>(sends.delay.timeMs));
+    root->setProperty("delayFeedback", static_cast<double>(sends.delay.feedback));
+    root->setProperty("delayReturn", static_cast<double>(sends.delayReturn));
+    root->setProperty("reverbSize", static_cast<double>(sends.reverb.size));
+    root->setProperty("reverbDamping", static_cast<double>(sends.reverb.damping));
+    root->setProperty("reverbReturn", static_cast<double>(sends.reverbReturn));
+    return juce::var(root);
+}
+
+juce::Result decodeSends(const juce::var& value, ProjectSends& sends)
+{
+    const auto* root = value.getDynamicObject();
+    if (root == nullptr)
+        return juce::Result::fail("Invalid send section.");
+    ProjectSends candidate;
+    auto ok = decodeNumbered(*root, "delayTimeMs", candidate.delay.timeMs);
+    if (ok.wasOk()) ok = decodeNumbered(*root, "delayFeedback", candidate.delay.feedback);
+    if (ok.wasOk()) ok = decodeNumbered(*root, "delayReturn", candidate.delayReturn);
+    if (ok.wasOk()) ok = decodeNumbered(*root, "reverbSize", candidate.reverb.size);
+    if (ok.wasOk()) ok = decodeNumbered(*root, "reverbDamping", candidate.reverb.damping);
+    if (ok.wasOk()) ok = decodeNumbered(*root, "reverbReturn", candidate.reverbReturn);
+    if (ok.failed())
+        return ok;
+    if (!candidate.valid())
+        return juce::Result::fail("Send parameters out of range.");
+    sends = candidate;
+    return juce::Result::ok();
+}
+
 juce::Result decodeDrumGrid(const juce::var& value, DrumPattern& grid)
 {
     const auto* rows = value.getArray();
@@ -315,6 +349,9 @@ std::unique_ptr<juce::DynamicObject> encodeTrackState(const Track& track)
     object->setProperty("volume", static_cast<double>(track.mix.volume));
     object->setProperty("mute", track.mix.mute);
     object->setProperty("solo", track.mix.solo);
+    object->setProperty("pan", static_cast<double>(track.mix.pan));
+    object->setProperty("sendDelay", static_cast<double>(track.mix.sendDelay));
+    object->setProperty("sendReverb", static_cast<double>(track.mix.sendReverb));
     juce::Array<juce::var> melodies;
     for (const auto& pattern : track.melodies)
         melodies.add(encodeNotes(pattern));
@@ -350,7 +387,8 @@ std::unique_ptr<juce::DynamicObject> encodeTrackState(const Track& track)
 }
 
 juce::Result decodeTrackState(const juce::var& value, Track& track, bool requirePreset, bool requireSynth,
-                              bool requireExtendedFx, bool requireGroove, bool requireLiveFx)
+                              bool requireExtendedFx, bool requireGroove, bool requireLiveFx,
+                              bool requireMix)
 {
     const auto* object = value.getDynamicObject();
     if (object == nullptr)
@@ -398,9 +436,21 @@ juce::Result decodeTrackState(const juce::var& value, Track& track, bool require
     const auto mute = object->getProperty("mute"), solo = object->getProperty("solo");
     if (!number(volume) || !mute.isBool() || !solo.isBool())
         return juce::Result::fail("Invalid track volume/mute/solo fields.");
-    mix = { static_cast<float>(volume), static_cast<bool>(mute), static_cast<bool>(solo) };
+    mix.volume = static_cast<float>(volume);
+    mix.mute = static_cast<bool>(mute);
+    mix.solo = static_cast<bool>(solo);
+    if (requireMix)
+    {
+        const auto pan = object->getProperty("pan"), sendDelay = object->getProperty("sendDelay"),
+                   sendReverb = object->getProperty("sendReverb");
+        if (!number(pan) || !number(sendDelay) || !number(sendReverb))
+            return juce::Result::fail("Invalid track pan/send fields.");
+        mix.pan = static_cast<float>(pan);
+        mix.sendDelay = static_cast<float>(sendDelay);
+        mix.sendReverb = static_cast<float>(sendReverb);
+    }
     if (!mix.valid())
-        return juce::Result::fail("Track volume is out of range.");
+        return juce::Result::fail("Track mix out of range.");
     candidate.mix = mix;
     const auto* patterns = object->getProperty("patterns").getArray();
     if (patterns == nullptr || patterns->size() != numPatterns)
@@ -474,7 +524,7 @@ juce::String ProjectIO::encode(const ProjectState& state)
 {
     auto root = std::make_unique<juce::DynamicObject>();
     root->setProperty("format", "sonora-project");
-    root->setProperty("version", 18);
+    root->setProperty("version", 19);
     root->setProperty("bpm", state.bpm);
     root->setProperty("musicKey", state.musicKey);
     root->setProperty("musicScale", static_cast<int>(state.musicScale));
@@ -516,6 +566,7 @@ juce::String ProjectIO::encode(const ProjectState& state)
         tracks.add(juce::var(encodeTrackState(track).release()));
     root->setProperty("tracks", tracks);
     root->setProperty("master", encodeMaster(state.master));
+    root->setProperty("sends", encodeSends(state.sends));
     juce::Array<juce::var> takes;
     for (int i = 0; i < state.takeCount; ++i)
     {
@@ -746,7 +797,7 @@ juce::Result ProjectIO::decode(const juce::String& json, ProjectState& destinati
     if (!integer(version))
         return juce::Result::fail("Unsupported project version.");
     const auto versionNumber = static_cast<juce::int64>(version);
-    if (versionNumber < 1 || versionNumber > 18)
+    if (versionNumber < 1 || versionNumber > 19)
         return juce::Result::fail("Unsupported project version.");
     if (!integer(root->getProperty("ticksPerQuarter")) || !integer(root->getProperty("lengthTicks"))
         || static_cast<juce::int64>(root->getProperty("ticksPerQuarter")) != ticksPerQuarter
@@ -820,15 +871,15 @@ juce::Result ProjectIO::decode(const juce::String& json, ProjectState& destinati
                 const auto* chordObject = (*chords)[s].getDynamicObject();
                 if (chordObject == nullptr)
                     return juce::Result::fail("Invalid song chord.");
-                const auto root = chordObject->getProperty("root");
-                const auto type = chordObject->getProperty("type");
-                if (!integer(root) || !integer(type) || static_cast<juce::int64>(root) < -1
-                    || static_cast<juce::int64>(root) > 11
-                    || static_cast<juce::int64>(type) < 0
-                    || static_cast<juce::int64>(type) >= static_cast<juce::int64>(ChordType::numChords))
+                const auto chordRoot = chordObject->getProperty("root");
+                const auto chordType = chordObject->getProperty("type");
+                if (!integer(chordRoot) || !integer(chordType) || static_cast<juce::int64>(chordRoot) < -1
+                    || static_cast<juce::int64>(chordRoot) > 11
+                    || static_cast<juce::int64>(chordType) < 0
+                    || static_cast<juce::int64>(chordType) >= static_cast<juce::int64>(ChordType::numChords))
                     return juce::Result::fail("Song chord out of range.");
                 candidate.song.chords[static_cast<std::size_t>(s)] = {
-                    static_cast<int>(root), static_cast<ChordType>(static_cast<int>(type))
+                    static_cast<int>(chordRoot), static_cast<ChordType>(static_cast<int>(chordType))
                 };
             }
         }
@@ -859,7 +910,7 @@ juce::Result ProjectIO::decode(const juce::String& json, ProjectState& destinati
         {
             result = decodeTrackState((*tracks)[track], candidate.tracks[static_cast<std::size_t>(track)],
                                       versionNumber >= 10, versionNumber >= 11, versionNumber >= 12, versionNumber >= 14,
-                                      versionNumber >= 16);
+                                      versionNumber >= 16, versionNumber >= 19);
             if (result.failed())
                 return result;
         }
@@ -872,6 +923,13 @@ juce::Result ProjectIO::decode(const juce::String& json, ProjectState& destinati
         result = decodeMaster(root->getProperty("master"), candidate.master);
         if (result.failed())
             return result;
+        // Versions before v19 have no send buses; zero sends keep the old mix.
+        if (versionNumber >= 19)
+        {
+            result = decodeSends(root->getProperty("sends"), candidate.sends);
+            if (result.failed())
+                return result;
+        }
         const auto* takes = root->getProperty("takes").getArray();
         if (takes == nullptr || takes->size() > maxTakes)
             return juce::Result::fail("Invalid take list.");

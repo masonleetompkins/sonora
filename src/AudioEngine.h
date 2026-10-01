@@ -92,6 +92,14 @@ private:
     int liveFxTrack = -1;
     std::int64_t liveFxPosition = 0;
     juce::MidiBuffer fxUi;
+    // Shared send buses: delay (0) and reverb (1), fully wet, fed post-fader.
+    TempoDelay sendDelayFx;
+    SimpleReverb sendReverbFx;
+    DelayParams busDelay;
+    ReverbParams busReverb;
+    juce::AudioBuffer<float> delayBus { 2, 512 }, reverbBus { 2, 512 };
+    std::array<std::array<juce::SmoothedValue<float>, 2>, maxTracks> sendSmooth;
+    juce::SmoothedValue<float> delayReturnSmooth, reverbReturnSmooth;
     // Last submitted project, message thread only: validates auditions against
     // the editor state even before the audio thread picks the block up.
     ProjectState latest;
