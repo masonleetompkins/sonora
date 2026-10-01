@@ -25,6 +25,7 @@ struct AudioTakeMeta
     float gain = 1.0f;
     bool mute = false;
     bool solo = false; // comping: when any take is soloed, only solos play.
+    float stretch = 1.0f; // Rubber Band time ratio at load (pitch preserved)
     int channels = 1;
     bool offline = false;
     bool valid() const
@@ -33,7 +34,8 @@ struct AudioTakeMeta
         // very top still compensates input latency by trimming leading frames.
         return id > 0 && id <= 2147483647u && file[0] != '\0' && startTick >= -patternTicks
             && frames > 0 && frames <= 48000 * 60 * 10 && std::isfinite(gain)
-            && gain >= 0.0f && gain <= 2.0f && (channels == 1 || channels == 2);
+            && gain >= 0.0f && gain <= 2.0f && (channels == 1 || channels == 2)
+            && std::isfinite(stretch) && stretch >= 0.5f && stretch <= 2.0f;
     }
     bool operator==(const AudioTakeMeta&) const = default;
     juce::String fileName() const { return juce::String(file); }

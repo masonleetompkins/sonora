@@ -1236,12 +1236,16 @@ struct MainComponent::AudioView final : public juce::Component
               std::function<void(std::uint32_t)> muteCb, std::function<void(std::uint32_t)> deleteCb,
               std::function<void(std::uint32_t)> selectCb, std::function<void()> pitchChangedCb,
               std::function<void()> analyzeCb, std::function<void()> applyCb,
-              std::function<void(std::uint32_t)> soloCb, std::function<void(std::uint32_t)> keepCb)
+              std::function<void(std::uint32_t)> soloCb, std::function<void(std::uint32_t)> keepCb,
+              std::function<void(std::uint32_t, float)> stretchCb, std::function<void()> stretchBeginCb,
+              std::function<void()> stretchEndCb)
         : onInputMode(std::move(inputModeCb)), onMonitor(std::move(monitorCb)),
           onMuteTake(std::move(muteCb)), onDeleteTake(std::move(deleteCb)),
           onSelectTake(std::move(selectCb)), onPitchChanged(std::move(pitchChangedCb)),
           onAnalyze(std::move(analyzeCb)), onApply(std::move(applyCb)),
-          onSoloTake(std::move(soloCb)), onKeepTake(std::move(keepCb))
+          onSoloTake(std::move(soloCb)), onKeepTake(std::move(keepCb)),
+          onStretchTake(std::move(stretchCb)), onStretchBegin(std::move(stretchBeginCb)),
+          onStretchEnd(std::move(stretchEndCb))
     {
         setWantsKeyboardFocus(true);
         inputMode.addItem("Input 1 (mono)", 1);
@@ -1300,6 +1304,27 @@ struct MainComponent::AudioView final : public juce::Component
         }
         pitchAmount.setTextValueSuffix(" %");
         pitchSpeed.setTextValueSuffix(" ms");
+        stretchLabel.setText("Stretch", juce::dontSendNotification);
+        stretchLabel.setFont(ui::font(12.0f, true));
+        stretchLabel.setColour(juce::Label::textColourId, ui::text);
+        addAndMakeVisible(stretchLabel);
+        stretch.setRange(50.0, 200.0, 1.0);
+        stretch.setValue(100.0, juce::dontSendNotification);
+        stretch.setSliderStyle(juce::Slider::LinearHorizontal);
+        stretch.setTextBoxStyle(juce::Slider::TextBoxRight, false, 56, 20);
+        stretch.setColour(juce::Slider::thumbColourId, ui::cyan);
+        stretch.setColour(juce::Slider::textBoxTextColourId, ui::text);
+        stretch.setWantsKeyboardFocus(false);
+        stretch.setTooltip("Time-stretch the selected take without changing its pitch (Rubber Band).");
+        addAndMakeVisible(stretch);
+        stretch.onValueChange = [this] {
+            if (onStretchTake) onStretchTake(stretchTake, static_cast<float>(stretch.getValue()) / 100.0f);
+        };
+        stretch.onDragStart = [this] { if (onStretchBegin) onStretchBegin(); };
+        stretch.onDragEnd = [this] { if (onStretchEnd) onStretchEnd(); };
+        addAndMakeVisible(stretchValue);
+        stretchValue.setFont(ui::font(11.0f));
+        stretchValue.setColour(juce::Label::textColourId, ui::muted);
         analyze.setButtonText("Analyze");
         apply.setButtonText("Tune take");
         apply.setColour(juce::TextButton::buttonOnColourId, ui::violet);
@@ -1348,7 +1373,7 @@ struct MainComponent::AudioView final : public juce::Component
                 row.name->setColour(juce::Label::textColourId,
                     take.offline ? ui::danger : take.id == selected ? ui::cyan : ui::text);
                 const auto bars = juce::String(take.startTick / 3840 + 1) + "." + juce::String((take.startTick / 960) % 4 + 1);
-                const auto seconds = juce::String(take.frames / 48000.0, 1);
+                const auto seconds = juce::String(take.frames * take.stretch / 48000.0, 1);
                 row.name->setText("Take " + juce::String(take.id) + "   @ bar " + bars + "   " + seconds + " s   "
                     + (take.channels == 2 ? "stereo" : "mono") + (take.offline ? "   (file missing)" : "")
                     + (take.solo ? "   SOLO" : ""),
@@ -1399,6 +1424,27 @@ struct MainComponent::AudioView final : public juce::Component
         if (extra.isNotEmpty())
             info += "   /   " + extra;
         status.setText(info, juce::dontSendNotification);
+        // Stretch control follows the selected take.
+        stretchTake = 0;
+        float stretchRatio = 1.0f;
+        int stretchFrames = 0;
+        for (int i = 0; i < project.takeCount; ++i)
+        {
+            const auto& take = project.takes[static_cast<std::size_t>(i)];
+            if (take.id == selected)
+            {
+                stretchTake = take.id;
+                stretchRatio = take.stretch;
+                stretchFrames = take.frames;
+                break;
+            }
+        }
+        stretch.setValue(stretchRatio * 100.0, juce::dontSendNotification);
+        stretch.setEnabled(stretchTake != 0);
+        stretchValue.setText(stretchTake == 0 ? juce::String("--")
+                             : "x" + juce::String(stretchRatio, 2) + "  ("
+                                 + juce::String(stretchFrames * stretchRatio / 48000.0, 1) + " s)",
+                             juce::dontSendNotification);
         takeHint.setText(project.takeCount == 0
             ? (isRecording ? "Recording... press Stop to finish the take."
                            : "Press REC to record from the song start. Takes play back in SONG mode.")
@@ -1486,6 +1532,10 @@ struct MainComponent::AudioView final : public juce::Component
         analyze.setBounds(getWidth() - 268, y, 76, 26);
         apply.setBounds(getWidth() - 184, y, 92, 26);
         pitchStatus.setBounds(getWidth() - 84, y, 72, 26);
+        y += 30;
+        stretchLabel.setBounds(12, y, 64, 26);
+        stretch.setBounds(84, y, 200, 26);
+        stretchValue.setBounds(292, y, 220, 26);
         waveTop = y + 32;
     }
 
@@ -1603,7 +1653,9 @@ struct MainComponent::AudioView final : public juce::Component
         std::unique_ptr<WaveStrip> wave;
     };
     juce::ComboBox inputMode, pitchKey, pitchScale;
-    juce::Slider pitchAmount, pitchSpeed;
+    juce::Slider pitchAmount, pitchSpeed, stretch;
+    juce::Label stretchLabel, stretchValue;
+    std::uint32_t stretchTake = 0;
     juce::TextButton monitor, analyze, apply;
     juce::Label status, takeHint, pitchStatus;
     std::vector<Row> takeRows;
@@ -1621,6 +1673,8 @@ struct MainComponent::AudioView final : public juce::Component
     std::function<void(std::uint32_t)> onMuteTake, onDeleteTake, onSelectTake;
     std::function<void()> onPitchChanged, onAnalyze, onApply;
     std::function<void(std::uint32_t)> onSoloTake, onKeepTake;
+    std::function<void(std::uint32_t, float)> onStretchTake;
+    std::function<void()> onStretchBegin, onStretchEnd;
 };
 
 static int activeInputCount(juce::AudioDeviceManager& manager)
@@ -3122,6 +3176,29 @@ MainComponent::MainComponent()
             }
             projectChanged();
             endEdit();
+        },
+        [this](std::uint32_t id, float ratio) {
+            const float clamped = std::clamp(ratio, 0.5f, 2.0f);
+            const bool own = !editing;
+            if (own)
+                beginEdit();
+            for (int i = 0; i < project.takeCount; ++i)
+            {
+                auto& take = project.takes[static_cast<std::size_t>(i)];
+                if (take.id == id)
+                    take.stretch = clamped;
+            }
+            projectChanged();
+            if (own)
+            {
+                endEdit();
+                refreshTakes();
+            }
+        },
+        [this] { beginEdit(); },
+        [this] {
+            endEdit();
+            refreshTakes();
         });
     addAndMakeVisible(audioView.get());
     keyboard.setAvailableRange(lowestPitch, highestPitch);
@@ -4825,6 +4902,7 @@ juce::String MainComponent::takeSignature() const
         const auto& take = project.takes[static_cast<std::size_t>(i)];
         signature += juce::String(take.id) + ":" + take.fileName() + ":" + juce::String(take.startTick)
             + ":" + juce::String(take.frames) + ":" + juce::String(take.gain, 2)
+            + ":" + juce::String(take.stretch, 3)
             + (take.mute ? "m" : "") + (take.offline ? "x" : "") + ";";
     }
     return signature;

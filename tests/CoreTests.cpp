@@ -5,6 +5,7 @@
 #include "KitSamples.h"
 #include "KnobMaps.h"
 #include "LiveFx.h"
+#include "TimeStretch.h"
 #include "AiMelody.h"
 #include "AiDictation.h"
 #include "IdeaCapture.h"
@@ -708,6 +709,63 @@ void testAutomation()
     require(diff > 0.01f, "delay throw inaudible");
 }
 
+void testTimeStretch()
+{
+    // A 1-second 440 Hz sine doubled in time stays 440 Hz and twice as long.
+    constexpr int rate = 48000;
+    juce::AudioBuffer<float> sine(1, rate);
+    for (int i = 0; i < rate; ++i)
+        sine.setSample(0, i, 0.5f * std::sin(juce::MathConstants<double>::twoPi * 440 * i / rate));
+    const auto doubled = sonora::stretchAudio(sine, rate, 2.0);
+    require(doubled.getNumChannels() == 1
+                && std::abs(doubled.getNumSamples() - 2 * rate) < rate / 20,
+            "stretched length wrong");
+    int crossings = 0;
+    for (int i = 1; i < doubled.getNumSamples(); ++i)
+        if ((doubled.getSample(0, i - 1) < 0.0f) != (doubled.getSample(0, i) < 0.0f))
+            ++crossings;
+    // 440 Hz over ~2 s gives ~1760 zero crossings; allow wide wobble room.
+    require(crossings > 1500 && crossings < 2100, "stretched pitch drifted");
+    const auto halved = sonora::stretchAudio(sine, rate, 0.5);
+    require(std::abs(halved.getNumSamples() - rate / 2) < rate / 20, "compressed length wrong");
+    // Degenerate inputs fail safe.
+    require(sonora::stretchAudio(sine, rate, 1.0).getNumSamples() == rate, "unity copy wrong");
+    require(sonora::stretchAudio(sine, rate, 0.01).getNumSamples() == 0, "absurd ratio accepted");
+    require(sonora::stretchAudio(juce::AudioBuffer<float>(1, 0), rate, 2.0).getNumSamples() == 0,
+            "empty input accepted");
+
+    // Takes stretch at load: a x2 take renders twice as long.
+    const auto media = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                           .getNonexistentChildFile("sonora-stretch-media", "");
+    require(media.createDirectory().wasOk(), "stretch media dir creation failed");
+    {
+        juce::WavAudioFormat takeFormat;
+        std::unique_ptr<juce::AudioFormatWriter> writer(takeFormat.createWriterFor(
+            new juce::FileOutputStream(media.getChildFile("take-1.wav")), 48000.0, 1, 16, {}, 0));
+        require(writer != nullptr, "stretch fixture write failed");
+        juce::AudioBuffer<float> tone(1, 4800);
+        for (int i = 0; i < 4800; ++i)
+            tone.setSample(0, i, 0.3f * std::sin(juce::MathConstants<double>::twoPi * 440 * i / 48000.0));
+        require(writer->writeFromAudioSampleBuffer(tone, 0, 4800), "stretch fixture samples failed");
+    }
+    std::array<sonora::AudioTakeMeta, sonora::maxTakes> metas {};
+    metas[0].id = 1;
+    metas[0].setFileName("take-1.wav");
+    metas[0].frames = 4800;
+    metas[0].stretch = 2.0f;
+    const auto stretched = sonora::loadTakes(metas, 1, media, 48000.0);
+    require(stretched != nullptr && stretched->takes.size() == 1
+                && std::abs(stretched->takes[0].audio.getNumSamples() - 9600) < 960,
+            "take did not stretch at load");
+    // Unity stretch passes the PCM through untouched.
+    metas[0].stretch = 1.0f;
+    const auto plain = sonora::loadTakes(metas, 1, media, 48000.0);
+    require(plain != nullptr && plain->takes.size() == 1
+                && plain->takes[0].audio.getNumSamples() == 4800 + 64,
+            "unity stretch altered the take");
+    require(media.deleteRecursively(), "stretch media cleanup failed");
+}
+
 void testKeyTools()
 {
     using sonora::MusicScale;
@@ -772,9 +830,9 @@ void testPersistence()
     require(sonora::ProjectIO::decode("{broken json", loaded).failed(), "malformed JSON accepted");
     require(loaded == good, "failed load mutated the project");
     auto json = sonora::ProjectIO::encode(original);
-    require(sonora::ProjectIO::decode(json.replace("\"version\": 20", "\"version\": 21"), loaded).failed(),
+    require(sonora::ProjectIO::decode(json.replace("\"version\": 21", "\"version\": 22"), loaded).failed(),
             "unknown version accepted");
-    require(sonora::ProjectIO::decode(json.replace("\"version\": 20", "\"version\": 4294967297"), loaded).failed(),
+    require(sonora::ProjectIO::decode(json.replace("\"version\": 21", "\"version\": 4294967297"), loaded).failed(),
             "overflowed version accepted");
     require(sonora::ProjectIO::decode(json.replace("\"velocity\": 100", "\"velocity\": 0"), loaded).failed(),
             "zero velocity accepted");
@@ -1501,7 +1559,7 @@ void testFxPersistence()
     original.master.releaseMs = 120.0f;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 20"), "projects must save as v20");
+    require(json.contains("\"version\": 21"), "projects must save as v21");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "fx round-trip changed parameters");
 
@@ -1576,7 +1634,7 @@ void testTakePersistence()
     original.takes[1].mute = true;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 20"), "take projects must save as v20");
+    require(json.contains("\"version\": 21"), "take projects must save as v21");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "take round-trip changed metadata");
 
@@ -2062,7 +2120,7 @@ void testVariations()
     original.song.sections = 4;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 20"), "variation projects must save as v20");
+    require(json.contains("\"version\": 21"), "variation projects must save as v21");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "variation round-trip changed slots or indices");
 
@@ -2328,7 +2386,7 @@ void testKitPersistence()
     original.tracks[1].kitVariant = 1;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 20"), "kit projects must save as v20");
+    require(json.contains("\"version\": 21"), "kit projects must save as v21");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "kit round-trip changed pad samples");
     // Version 6 documents migrate to the built-in kit.
@@ -2697,7 +2755,7 @@ void testInstruments()
     saved.tracks[2].instrumentPreset = 16;
     const auto json = sonora::ProjectIO::encode(saved);
     sonora::ProjectState loaded;
-    require(json.contains("\"version\": 20"), "instrument projects must save as v20");
+    require(json.contains("\"version\": 21"), "instrument projects must save as v21");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "instrument round-trip failed");
     auto legacy = juce::JSON::parse(json);
     legacy.getDynamicObject()->setProperty("version", 9);
@@ -2855,7 +2913,7 @@ void testSynthEngine()
     saved.tracks[0].synth = sonora::synthPatches()[3].params;
     const auto json = sonora::ProjectIO::encode(saved);
     sonora::ProjectState loaded;
-    require(json.contains("\"version\": 20"), "synth projects must save as v20");
+    require(json.contains("\"version\": 21"), "synth projects must save as v21");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "synth round-trip failed");
     auto legacy = juce::JSON::parse(json);
     legacy.getDynamicObject()->setProperty("version", 10);
@@ -3012,7 +3070,7 @@ void testKnobs()
     saved.tracks[0].fx.chorus = { 0.4f, 1.2f, 0.8f, false };
     const auto json = sonora::ProjectIO::encode(saved);
     sonora::ProjectState loaded;
-    require(json.contains("\"version\": 20"), "fx projects must save as v20");
+    require(json.contains("\"version\": 21"), "fx projects must save as v21");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "drive/chorus round-trip failed");
     auto legacy = juce::JSON::parse(json);
     legacy.getDynamicObject()->setProperty("version", 11);
@@ -3401,7 +3459,7 @@ void testSongComposition()
     saved.song.insertSection(pop.sections, 0);
     const auto json = sonora::ProjectIO::encode(saved);
     sonora::ProjectState loaded;
-    require(json.contains("\"version\": 20"), "song projects must save as v20");
+    require(json.contains("\"version\": 21"), "song projects must save as v21");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "song parts round-trip failed");
     auto big = project;
     big.song.sections = sonora::maxSections;
@@ -3440,7 +3498,7 @@ void testSongComposition()
     missingSwing.getDynamicObject()->getProperty("tracks").getArray()->getReference(0)
         .getDynamicObject()->removeProperty("swing");
     loaded = swung;
-    require(sonora::ProjectIO::decode(juce::JSON::toString(missingSwing), loaded).failed(), "v20 without swing accepted");
+    require(sonora::ProjectIO::decode(juce::JSON::toString(missingSwing), loaded).failed(), "v21 without swing accepted");
     auto invalidSwing = swung;
     invalidSwing.tracks[0].swing = -0.5f;
     require(!invalidSwing.valid(), "negative swing validated");
@@ -3472,7 +3530,7 @@ void testSongComposition()
     auto missingKey = juce::JSON::parse(keyJson);
     missingKey.getDynamicObject()->removeProperty("musicKey");
     loaded = keyed;
-    require(sonora::ProjectIO::decode(juce::JSON::toString(missingKey), loaded).failed(), "v20 without key accepted");
+    require(sonora::ProjectIO::decode(juce::JSON::toString(missingKey), loaded).failed(), "v21 without key accepted");
     auto invalidKey = keyed;
     invalidKey.musicKey = -1;
     require(!invalidKey.valid(), "negative key validated");
@@ -3513,7 +3571,7 @@ void testSongComposition()
         .getDynamicObject()->removeProperty("liveArpRate");
     loaded = lively;
     require(sonora::ProjectIO::decode(juce::JSON::toString(missingArp), loaded).failed(),
-            "v20 without arp rate accepted");
+            "v21 without arp rate accepted");
     auto invalidLive = lively;
     invalidLive.tracks[0].liveFx.octaves = 4;
     require(!invalidLive.valid(), "arp octave validated");
@@ -3548,7 +3606,7 @@ void testSongComposition()
     missingChords.getDynamicObject()->getProperty("song").getDynamicObject()->removeProperty("chords");
     loaded = chorded;
     require(sonora::ProjectIO::decode(juce::JSON::toString(missingChords), loaded).failed(),
-            "v20 without chords accepted");
+            "v21 without chords accepted");
 
     // v19 persists pan/sends and the return buses; older files mix dry.
     auto mixed = project;
@@ -3593,7 +3651,7 @@ void testSongComposition()
         .getDynamicObject()->removeProperty("sendReverb");
     loaded = mixed;
     require(sonora::ProjectIO::decode(juce::JSON::toString(missingPan), loaded).failed(),
-            "v20 without sends accepted");
+            "v21 without sends accepted");
 
     // v20 persists automation lanes; older files play the knob values.
     auto curved = project;
@@ -3644,7 +3702,43 @@ void testSongComposition()
         .getDynamicObject()->removeProperty("automation");
     loaded = curved;
     require(sonora::ProjectIO::decode(juce::JSON::toString(missingAutomation), loaded).failed(),
-            "v20 without automation accepted");
+            "v21 without automation accepted");
+
+    // v21 persists take stretch; older files play at speed.
+    auto speedy = project;
+    speedy.takeCount = 1;
+    speedy.takes[0].id = 4;
+    speedy.takes[0].setFileName("take4.wav");
+    speedy.takes[0].frames = 4800;
+    speedy.takes[0].stretch = 1.5f;
+    require(speedy.valid(), "stretch fixture rejected");
+    const auto speedyJson = sonora::ProjectIO::encode(speedy);
+    require(sonora::ProjectIO::decode(speedyJson, loaded).wasOk() && loaded == speedy
+            && loaded.takes[0].stretch == 1.5f,
+            "take stretch round-trip failed");
+    auto legacySpeed = juce::JSON::parse(speedyJson);
+    legacySpeed.getDynamicObject()->setProperty("version", 20);
+    legacySpeed.getDynamicObject()->getProperty("takes").getArray()->getReference(0)
+        .getDynamicObject()->removeProperty("stretch");
+    require(sonora::ProjectIO::decode(juce::JSON::toString(legacySpeed), loaded).wasOk()
+            && loaded.takes[0].stretch == 1.0f,
+            "v20 did not open at speed");
+    auto badStretch = juce::JSON::parse(speedyJson);
+    badStretch.getDynamicObject()->getProperty("takes").getArray()->getReference(0)
+        .getDynamicObject()->setProperty("stretch", 0.1);
+    loaded = speedy;
+    require(sonora::ProjectIO::decode(juce::JSON::toString(badStretch), loaded).failed(),
+            "silly stretch accepted");
+    require(loaded == speedy, "bad stretch destroyed current state");
+    auto missingStretch = juce::JSON::parse(speedyJson);
+    missingStretch.getDynamicObject()->getProperty("takes").getArray()->getReference(0)
+        .getDynamicObject()->removeProperty("stretch");
+    loaded = speedy;
+    require(sonora::ProjectIO::decode(juce::JSON::toString(missingStretch), loaded).failed(),
+            "v21 without stretch accepted");
+    auto invalidStretch = speedy;
+    invalidStretch.takes[0].stretch = 3.0f;
+    require(!invalidStretch.valid(), "triple-speed take validated");
     auto invalidLane = curved;
     invalidLane.tracks[0].automation[0][static_cast<std::size_t>(sonora::AutomationTarget::Volume)].count = 99;
     require(!invalidLane.valid(), "overfull lane validated");
@@ -4018,6 +4112,7 @@ int main()
         testTakeSolo(); std::cout << "PASS take solo comping\n";
         testMixer(); std::cout << "PASS mixer pan, sends, returns\n";
         testAutomation(); std::cout << "PASS automation curves and engine lanes\n";
+        testTimeStretch(); std::cout << "PASS rubber-band time stretch\n";
         testChordTrack(); std::cout << "PASS chord track, follow transpose, AI chords\n";
         testVariations(); std::cout << "PASS pattern library round-trip, v5 migration, malformed slots\n";
         testInstances(); std::cout << "PASS make-unique detach, full-library refusal, sharing queries\n";

@@ -1,4 +1,5 @@
 #include "AudioTakes.h"
+#include "TimeStretch.h"
 
 namespace sonora
 {
@@ -185,6 +186,14 @@ std::unique_ptr<TakeSet> loadTakes(const std::array<AudioTakeMeta, maxTakes>& ta
                 interpolator.process(ratio, take.audio.getReadPointer(ch),
                                      resampled.getWritePointer(ch), outLength);
             take.audio = std::move(resampled);
+        }
+        // Time-stretch (pitch preserved) after resampling; the engine plays
+        // whatever PCM lands here, so no realtime cost and no format risk.
+        if (std::abs(meta.stretch - 1.0f) > 1.0e-6f && take.audio.getNumSamples() > 0)
+        {
+            auto stretched = stretchAudio(take.audio, targetRate, meta.stretch);
+            if (stretched.getNumSamples() > 0)
+                take.audio = std::move(stretched);
         }
         set->takes.push_back(std::move(take));
     }

@@ -10,10 +10,17 @@ FetchContent_Declare(JUCE
     GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(JUCE)
 
+# Vendored Rubber Band (single-file build, built-in FFT, no threading):
+# offline take time-stretching on the worker thread.
+add_library(rubberband STATIC third_party/rubberband/single/RubberBandSingle.cpp)
+target_include_directories(rubberband PUBLIC third_party/rubberband)
+target_compile_features(rubberband PUBLIC cxx_std_17)
+
 juce_add_gui_app(Sonora PRODUCT_NAME "Sonora" COMPANY_NAME "Sonora"
     BUNDLE_ID "org.sonora.Sonora")
 target_sources(Sonora PRIVATE src/Main.cpp src/MainComponent.cpp src/AudioEngine.cpp
-    src/PianoRoll.cpp src/ProjectIO.cpp src/DrumSampler.cpp src/DrumSequencer.cpp src/Export.cpp src/Fx.cpp src/AudioTakes.cpp src/PitchCorrect.cpp src/KitSamples.cpp src/ArrangementView.cpp src/AiSidebar.cpp)
+    src/PianoRoll.cpp src/ProjectIO.cpp src/DrumSampler.cpp src/DrumSequencer.cpp src/Export.cpp src/Fx.cpp src/AudioTakes.cpp src/PitchCorrect.cpp src/KitSamples.cpp src/ArrangementView.cpp src/AiSidebar.cpp src/TimeStretch.cpp)
+target_link_libraries(Sonora PRIVATE rubberband)
 target_compile_definitions(Sonora PRIVATE
     JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_JACK=1
     JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:Sonora,JUCE_PRODUCT_NAME>"
@@ -26,13 +33,14 @@ install(FILES assets/sonora.svg DESTINATION share/icons/hicolor/scalable/apps)
 install(FILES packaging/org.sonora.Sonora.metainfo.xml DESTINATION share/metainfo)
 install(FILES LICENSE README.md DESTINATION share/doc/sonora)
 install(FILES assets/GeneralUser-GS.sf2 DESTINATION share/sonora)
-install(FILES assets/GeneralUser-GS-LICENSE.txt third_party/TinySoundFont-LICENSE
+install(FILES assets/GeneralUser-GS-LICENSE.txt third_party/TinySoundFont-LICENSE third_party/rubberband/COPYING
     DESTINATION share/licenses/sonora)
 
 include(CTest)
 if(BUILD_TESTING)
     juce_add_console_app(SonoraTests PRODUCT_NAME "Sonora Core Tests")
-    target_sources(SonoraTests PRIVATE tests/CoreTests.cpp src/ProjectIO.cpp src/AudioEngine.cpp src/DrumSampler.cpp src/Export.cpp src/Fx.cpp src/AudioTakes.cpp src/PitchCorrect.cpp src/KitSamples.cpp)
+    target_sources(SonoraTests PRIVATE tests/CoreTests.cpp src/ProjectIO.cpp src/AudioEngine.cpp src/DrumSampler.cpp src/Export.cpp src/Fx.cpp src/AudioTakes.cpp src/PitchCorrect.cpp src/KitSamples.cpp src/TimeStretch.cpp)
+    target_link_libraries(SonoraTests PRIVATE rubberband)
     target_include_directories(SonoraTests PRIVATE src)
     target_compile_definitions(SonoraTests PRIVATE JUCE_USE_CURL=0 JUCE_JACK=1)
     target_link_libraries(SonoraTests PRIVATE juce::juce_audio_devices juce::juce_audio_formats

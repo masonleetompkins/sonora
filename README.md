@@ -133,6 +133,9 @@ a fallback or for direct hardware access.
 - Automation (AUTO button): per-loop curves for volume, pan, both sends,
   drive, and delay mix, drawn under the editor and followed in loop and
   song playback.
+- Take time-stretch: the Stretch slider under a selected take changes its
+  length without changing its pitch (Rubber Band), from half to double
+  speed. Stretched takes play, export, and tune like any other take.
 - AI assistant sidebar (AI assistant button or Ctrl+I): chat with Claude on
   the right while you work. It writes or edits the selected track's melody
   or drum beat, sees the whole song structure and the other tracks in the
@@ -310,8 +313,9 @@ live arp/chord settings (older projects play MiniLab notes straight
 through), v17 adds per-take solos (older projects open unsoloed),
 and v18 adds the per-section chord track (older projects play as written).
 Format v19 adds per-track pan/sends and the return buses (older projects
-open centered and dry), and v20 adds automation lanes (older projects
-follow the knob values). It contains tempo, timing metadata, two
+open centered and dry), v20 adds automation lanes (older projects
+follow the knob values), and v21 adds per-take stretch (older projects
+play at speed). It contains tempo, timing metadata, two
 stable track IDs/instrument identifiers, track mix settings, per-track effect
 chains, master limiter settings, four melody patterns and four drum patterns
 per track, per-pad custom sample filenames, the factory kit variant, audio take

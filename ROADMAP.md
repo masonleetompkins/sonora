@@ -21,6 +21,8 @@ Build 1-8, skip the rest.
    DONE (per-loop curves for volume/pan/sends/drive/delay-mix, lane
    editor, engine following, format v20).
 8. **Time-stretch for takes** (Rubber Band library integration).
+   DONE (vendored Rubber Band single-file build, offline stretch at take
+   load, per-take ratio 0.5-2.0, format v21).
 
 Deferred (do not build): stem separation (ML model weight, giants do it
 well), plugin hosting (sandbox/licensing complexity), Session Players clone
