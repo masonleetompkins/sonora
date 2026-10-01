@@ -12,19 +12,6 @@ juce::Colour trackColour(int icon)
     return palette[icon & 7];
 }
 
-// Names Sonora generated itself (instrument or synth-patch names). Tracks with
-// these names follow instrument/patch changes; custom names are never touched.
-bool isGeneratedTrackName(const juce::String& name)
-{
-    for (const auto& preset : instruments)
-        if (name == preset.name)
-            return true;
-    for (const auto& patch : synthPatches())
-        if (name == patch.name)
-            return true;
-    return false;
-}
-
 const char* trackIconName(int icon)
 {
     static constexpr const char* names[] {
@@ -611,6 +598,15 @@ struct MainComponent::SynthPanel final : public juce::Component
                 case WaveSine: return std::sin(t * juce::MathConstants<double>::twoPi);
                 case WaveTriangle: return 4.0 * std::abs(t - 0.5) - 1.0;
                 case WaveSaw: return 0.8 * (2.0 * t - 1.0);
+                case WavePulse: return 0.7 * ((t < 0.25 ? 1.0 : -1.0) + 0.5);
+                case WaveNoise:
+                {
+                    // Fixed pseudo-random shape: a preview of "noisy", not the audio.
+                    const auto cell = static_cast<std::uint32_t>(t * 48.0);
+                    std::uint32_t h = cell * 2654435761u;
+                    h ^= h >> 15;
+                    return 0.5 * (static_cast<double>(h & 0xFFFF) / 32768.0 - 1.0);
+                }
                 default: return t < 0.5 ? 0.6 : -0.6;
             }
         };
@@ -666,6 +662,49 @@ void MainComponent::refreshSynthPanel()
     synthPanel->refresh(track.synth, track.trackName());
 }
 
+juce::File MainComponent::favoritesFile()
+{
+    return audioSettingsFile().getSiblingFile("favorites.json");
+}
+
+void MainComponent::refreshInstrumentButton()
+{
+    const auto sel = static_cast<std::size_t>(std::clamp(selectedTrack, 0, maxTracks - 1));
+    instrumentChoice.setText(describeTrackInstrument(project.tracks[sel]), juce::dontSendNotification);
+}
+
+void MainComponent::showInstrumentBrowser()
+{
+    const auto& track = project.tracks[static_cast<std::size_t>(std::clamp(selectedTrack, 0, maxTracks - 1))];
+    if (audioSelected || track.kind != TrackKind::Synth)
+        return;
+    auto browser = std::make_unique<InstrumentBrowser>(buildPickerEntries(listSampleLibrary(sampleLibraryDir())),
+                                                       favorites, currentPickerKey(track));
+    browser->onPick = [this](const PickerEntry& entry) { applyPickerEntry(entry); };
+    browser->onFavoritesChanged = [this](const Favorites& updated) {
+        favorites = updated;
+        const auto saved = favorites.save(favoritesFile());
+        if (saved.failed())
+            status.setText("Could not save favorites: " + saved.getErrorMessage(), juce::dontSendNotification);
+    };
+    juce::Component::SafePointer<InstrumentBrowser> shown(browser.get());
+    juce::CallOutBox::launchAsynchronously(std::move(browser), instrumentChoice.getScreenBounds(), this);
+    juce::MessageManager::callAsync([shown] {
+        if (shown != nullptr)
+            shown->focusSearch();
+    });
+}
+
+void MainComponent::applyPickerEntry(const PickerEntry& entry)
+{
+    switch (entry.kind)
+    {
+        case PickerEntry::Kind::Instrument: setTrackInstrument(entry.index); break;
+        case PickerEntry::Kind::Patch: applySynthPatch(entry.index); break;
+        case PickerEntry::Kind::Sample: useSample(entry.sample); break;
+    }
+}
+
 void MainComponent::applySynthPatch(int patch)
 {
     if (patch < 0 || patch >= static_cast<int>(synthPatches().size()))
@@ -698,6 +737,328 @@ struct MainComponent::BackgroundWorker final : public juce::Thread
     std::atomic<bool> cancel { false };
 };
 
+std::vector<juce::File> MainComponent::sampleSearchDirs() const
+{
+    std::vector<juce::File> dirs;
+    if (projectFile != juce::File())
+        dirs.push_back(mediaDirFor(projectFile));
+    dirs.push_back(sessionDir());
+    dirs.push_back(sampleLibraryDir());
+    return dirs;
+}
+
+juce::String MainComponent::sampleSignature(int track) const
+{
+    const auto& state = project.tracks[static_cast<std::size_t>(std::clamp(track, 0, maxTracks - 1))];
+    if (state.kind != TrackKind::Synth || !isSamplerInstrument(state.instrumentPreset) || state.samplerFile[0] == '\0')
+        return {};
+    // The resolved path and file stamp are part of the identity, so a file
+    // that appears later (after a save gathers it) or changes reloads.
+    const auto file = resolveSampleFile(state.samplerFileName(), sampleSearchDirs());
+    return state.samplerFileName() + "|" + file.getFullPathName() + "|" + juce::String(file.getSize()) + "|"
+        + juce::String(file.getLastModificationTime().toMilliseconds());
+}
+
+void MainComponent::refreshSampleData()
+{
+    if (sampleLoadWorker != nullptr)
+        return;
+    for (int track = 0; track < maxTracks; ++track)
+    {
+        const auto index = static_cast<std::size_t>(track);
+        const auto signature = sampleSignature(track);
+        if (signature == lastSampleSignature[index])
+            continue;
+        if (signature.isEmpty())
+        {
+            // Not a sampler track (any more): unload and free after the grace period.
+            lastSampleSignature[index] = signature;
+            sampleOverview[index] = {};
+            auto* retired = engine.retireSampleData(track, nullptr);
+            const auto* owned = sampleStorage[index].release();
+            if (retired != nullptr)
+                juce::Timer::callAfterDelay(600, [retired] { delete retired; });
+            else
+                delete owned;
+            if (samplerPanel != nullptr && samplerPanel->isVisible() && track == selectedTrack)
+                refreshSamplerPanel(false);
+            continue;
+        }
+        const auto file = resolveSampleFile(project.tracks[index].samplerFileName(), sampleSearchDirs());
+        auto safe = juce::Component::SafePointer<MainComponent>(this);
+        auto job = [safe, track, file, signature](const std::atomic<bool>* cancel) {
+            auto data = loadSampleData(file, cancel);
+            SampleOverview overview;
+            if (data != nullptr)
+                overview = makeOverview(*data, 600);
+            auto shared = std::make_shared<std::unique_ptr<SampleData>>(std::move(data));
+            juce::MessageManager::callAsync([safe, track, shared, overview, signature]() mutable {
+                if (safe != nullptr)
+                    safe->sampleLoadFinished(track, std::move(*shared), std::move(overview), signature);
+            });
+        };
+        sampleLoadWorker = std::make_unique<BackgroundWorker>(std::move(job), "Sonora sample loader");
+        sampleLoadWorker->startThread();
+        return; // one at a time; the timer comes back for the next stale track
+    }
+}
+
+void MainComponent::sampleLoadFinished(int track, std::unique_ptr<SampleData> data, SampleOverview overview,
+                                       const juce::String& signature)
+{
+    if (sampleLoadWorker != nullptr)
+    {
+        sampleLoadWorker->stopThread(2000);
+        sampleLoadWorker.reset();
+    }
+    const auto index = static_cast<std::size_t>(std::clamp(track, 0, maxTracks - 1));
+    if (signature != sampleSignature(track))
+        return; // superseded; the timer relaunches for the current state
+    lastSampleSignature[index] = signature;
+    sampleOverview[index] = overview;
+    // A missing or unreadable file installs "no sample": silence, never a stale sound.
+    auto* retired = engine.retireSampleData(track, data.get());
+    const auto* owned = sampleStorage[index].release();
+    sampleStorage[index] = std::move(data);
+    if (retired != nullptr)
+        juce::Timer::callAfterDelay(600, [retired] { delete retired; });
+    else
+        delete owned;
+    // A sound the user just chose adopts its own pitch as the root key. This
+    // rides on the choice's undo step (the earlier state has the old root).
+    if (adoptSampleRoot[index])
+    {
+        adoptSampleRoot[index] = false;
+        if (overview.loaded && overview.detectedRoot >= 0
+            && project.tracks[index].sampler.rootNote != overview.detectedRoot)
+        {
+            project.tracks[index].sampler.rootNote = overview.detectedRoot;
+            projectChanged();
+            status.setText("Root key set to " + juce::MidiMessage::getMidiNoteName(overview.detectedRoot, true, true, 4)
+                               + " from the sample's pitch.",
+                           juce::dontSendNotification);
+        }
+    }
+    if (!overview.loaded && project.tracks[index].samplerFile[0] != '\0')
+        status.setText("Could not load \"" + project.tracks[index].samplerFileName()
+                           + "\". Is the file still in your sample library?",
+                       juce::dontSendNotification);
+    if (samplerPanel != nullptr && samplerPanel->isVisible() && track == selectedTrack)
+        refreshSamplerPanel(false);
+}
+
+void MainComponent::refreshSamplerPanel(bool relist)
+{
+    if (samplerPanel == nullptr)
+        return;
+    const auto sel = static_cast<std::size_t>(std::clamp(selectedTrack, 0, maxTracks - 1));
+    const auto& track = project.tracks[sel];
+    if (relist)
+    {
+        const auto library = listSampleLibrary(sampleLibraryDir());
+        samplerPanel->refresh(track.sampler, track.trackName(), track.samplerFileName(), sampleOverview[sel], &library);
+    }
+    else
+        samplerPanel->refresh(track.sampler, track.trackName(), track.samplerFileName(), sampleOverview[sel]);
+}
+
+void MainComponent::toggleEditorPanel()
+{
+    if (audioSelected)
+        return;
+    const auto& track = project.tracks[static_cast<std::size_t>(std::clamp(selectedTrack, 0, maxTracks - 1))];
+    const bool sampler = isSamplerInstrument(track.instrumentPreset);
+    juce::Component* panel = sampler ? static_cast<juce::Component*>(samplerPanel.get())
+                                     : static_cast<juce::Component*>(synthPanel.get());
+    if (panel == nullptr)
+        return;
+    if (panel->isVisible())
+    {
+        panel->setVisible(false);
+        return;
+    }
+    for (juce::Component* other : std::initializer_list<juce::Component*> { kitPanel.get(), synthPanel.get(), samplerPanel.get() })
+        if (other != nullptr)
+            other->setVisible(false);
+    if (sampler)
+        refreshSamplerPanel(true);
+    else
+        refreshSynthPanel();
+    panel->setVisible(true);
+    panel->toFront(false);
+}
+
+void MainComponent::setTrackInstrument(int choice)
+{
+    auto& track = project.tracks[static_cast<std::size_t>(std::clamp(selectedTrack, 0, maxTracks - 1))];
+    if (audioSelected || track.kind != TrackKind::Synth || !validInstrument(choice) || track.instrumentPreset == choice)
+        return;
+    beginEdit();
+    if (isGeneratedTrackName(track.trackName()))
+        track.setTrackName(instruments[static_cast<std::size_t>(choice)].name);
+    track.instrumentPreset = choice;
+    engine.keyboardState.allNotesOff(0);
+    projectChanged();
+    endEdit();
+    repaint();
+    // A Sampler with nothing loaded has nothing to play: open the editor so
+    // the first step (add or pick a sound) is right there.
+    if (isSamplerInstrument(choice) && track.samplerFile[0] == '\0')
+        toggleEditorPanel();
+}
+
+void MainComponent::useSample(const juce::String& libraryName)
+{
+    auto& track = project.tracks[static_cast<std::size_t>(std::clamp(selectedTrack, 0, maxTracks - 1))];
+    if (audioSelected || track.kind != TrackKind::Synth || libraryName.isEmpty()
+        || !isSafeSampleName(libraryName.toRawUTF8()) || libraryName.length() >= samplerFileCapacity)
+        return;
+    const bool newFile = track.samplerFileName() != libraryName;
+    beginEdit();
+    track.instrumentPreset = samplerInstrument;
+    track.setSamplerFileName(libraryName);
+    if (newFile)
+    {
+        // Markers belong to the old file; the rest of the sound design stays.
+        track.sampler.start = 0.0f;
+        track.sampler.end = 1.0f;
+        track.sampler.loopStart = 0.0f;
+        track.sampler.loopEnd = 1.0f;
+    }
+    if (isGeneratedTrackName(track.trackName()))
+        track.setTrackName(sampleDisplayName(libraryName).substring(0, 40));
+    adoptSampleRoot[static_cast<std::size_t>(selectedTrack)] = newFile;
+    engine.keyboardState.allNotesOff(0);
+    projectChanged();
+    endEdit();
+    refreshSamplerPanel(false);
+    repaint();
+}
+
+void MainComponent::addSoundsToSampler()
+{
+    if (dialogPending)
+        return;
+    dialogPending = true;
+    chooser = std::make_unique<juce::FileChooser>("Add sounds to the sampler",
+        juce::File::getSpecialLocation(juce::File::userMusicDirectory), "*.wav;*.aiff;*.aif;*.flac;*.mp3;*.ogg");
+    chooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles
+                             | juce::FileBrowserComponent::canSelectMultipleItems
+                             | juce::FileBrowserComponent::canSelectDirectories,
+        [safe = juce::Component::SafePointer<MainComponent>(this)](const juce::FileChooser& selected) {
+            if (safe == nullptr)
+                return;
+            safe->dialogPending = false;
+            const auto library = sampleLibraryDir();
+            juce::StringArray added;
+            constexpr int maxFiles = 400;
+            auto importOne = [&](const juce::File& file, const juce::File& into) {
+                if (added.size() >= maxFiles)
+                    return;
+                const auto name = importSampleToLibrary(file, into);
+                if (name.isNotEmpty())
+                    added.add(into.getChildFile(name).getRelativePathFrom(library).replaceCharacter('\\', '/'));
+            };
+            for (const auto& picked : selected.getResults())
+            {
+                if (picked.isDirectory())
+                {
+                    // A folder keeps its name inside the library, so packs stay together.
+                    const auto into = library.getChildFile(picked.getFileName().retainCharacters(
+                        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 _-.()#").trim());
+                    for (const auto& entry : juce::RangedDirectoryIterator(picked, true, "*", juce::File::findFiles))
+                        if (isSampleFile(entry.getFile()))
+                            importOne(entry.getFile(), into);
+                }
+                else if (picked.existsAsFile())
+                    importOne(picked, library);
+            }
+            if (added.isEmpty())
+            {
+                safe->showError("No audio files were added. Use WAV, AIFF, FLAC, OGG or MP3 files.");
+                return;
+            }
+            safe->status.setText("Added " + juce::String(added.size()) + (added.size() == 1 ? " sound" : " sounds")
+                                     + " to the sample library.",
+                                 juce::dontSendNotification);
+            const auto& track = safe->project.tracks[static_cast<std::size_t>(safe->selectedTrack)];
+            if (!safe->audioSelected && track.kind == TrackKind::Synth)
+                safe->useSample(added[0]);
+            safe->refreshSamplerPanel(true);
+        });
+}
+
+void MainComponent::sendTakeToSampler(std::uint32_t takeId)
+{
+    const AudioTakeMeta* take = nullptr;
+    for (int i = 0; i < project.takeCount; ++i)
+        if (project.takes[static_cast<std::size_t>(i)].id == takeId)
+            take = &project.takes[static_cast<std::size_t>(i)];
+    if (take == nullptr || take->offline)
+        return;
+    const auto source = resolveTakeFile(*take);
+    if (!source.existsAsFile())
+    {
+        showError("That take's audio file could not be found.");
+        return;
+    }
+    // Stage under a readable name, then add it to the library like any sound.
+    const auto staged = sessionDir().getNonexistentChildFile("Take " + juce::String(takeId), source.getFileExtension());
+    if (!source.copyFileTo(staged))
+    {
+        showError("Could not copy the take.");
+        return;
+    }
+    const auto name = importSampleToLibrary(staged);
+    staged.deleteFile();
+    if (name.isEmpty())
+    {
+        showError("Could not add the take to the sample library.");
+        return;
+    }
+    // A new Sampler track keeps the existing instruments untouched.
+    int free = -1;
+    for (int track = 0; track < maxTracks && free < 0; ++track)
+        if (project.tracks[static_cast<std::size_t>(track)].kind == TrackKind::None)
+            free = track;
+    if (free >= 0)
+    {
+        addTrackOfKind(TrackKind::Synth);
+        selectChannel(free);
+    }
+    else if (project.tracks[static_cast<std::size_t>(selectedTrack)].kind != TrackKind::Synth || audioSelected)
+    {
+        showError("The track list is full. Select an instrument track to replace its sound, or delete a track.");
+        return;
+    }
+    useSample(name);
+    status.setText("Take " + juce::String(takeId) + " is now a sampler instrument: play it on the keys.",
+                   juce::dontSendNotification);
+    toggleEditorPanel();
+}
+
+void MainComponent::detectSamplerRoot()
+{
+    const auto sel = static_cast<std::size_t>(std::clamp(selectedTrack, 0, maxTracks - 1));
+    auto& track = project.tracks[sel];
+    if (track.kind != TrackKind::Synth || !isSamplerInstrument(track.instrumentPreset))
+        return;
+    const int detected = sampleOverview[sel].detectedRoot;
+    if (detected < 0)
+    {
+        status.setText("I could not hear a steady pitch in this sound. Set the root key by hand.",
+                       juce::dontSendNotification);
+        return;
+    }
+    beginEdit();
+    track.sampler.rootNote = detected;
+    projectChanged();
+    endEdit();
+    refreshSamplerPanel(false);
+    status.setText("Root key set to " + juce::MidiMessage::getMidiNoteName(detected, true, true, 4) + ".",
+                   juce::dontSendNotification);
+}
+
 bool MainComponent::sidebarOpen() const { return aiSidebar != nullptr && aiSidebar->isVisible(); }
 
 void MainComponent::toggleAiSidebar()
@@ -708,7 +1069,7 @@ void MainComponent::toggleAiSidebar()
     if (opening)
     {
         claudeAvailable = ai::findClaudeExecutable() != juce::File();
-        for (juce::Component* panel : std::initializer_list<juce::Component*> { kitPanel.get(), synthPanel.get() })
+        for (juce::Component* panel : std::initializer_list<juce::Component*> { kitPanel.get(), synthPanel.get(), samplerPanel.get() })
             if (panel != nullptr)
                 panel->setVisible(false);
     }
@@ -737,50 +1098,19 @@ void MainComponent::refreshAiSidebar()
         return;
     const juce::String reason = !claudeAvailable
         ? "Claude Code was not found. Install it and run `claude` once in a terminal to sign in."
-        : "Select an instrument or drum track to work on.";
-    // Song view: the assistant composes the whole song.
-    if (project.songMode)
-    {
-        int tracks = 0;
-        for (const auto& track : project.tracks)
-            tracks += track.kind != TrackKind::None ? 1 : 0;
-        aiSidebar->setContext("Whole song", juce::String(project.song.sections) + " parts  /  "
-                                  + juce::String(project.song.sections * 4) + " bars  /  " + juce::String(tracks)
-                                  + (tracks == 1 ? " track" : " tracks"),
-                              AiSidebar::Mode::Song, claudeAvailable && tracks > 0,
-                              claudeAvailable ? juce::String("Add a track with some loops first.") : reason);
-        if (chatTrackId != songChatId)
-        {
-            if (aiSidebar->hasMessages())
-                aiSidebar->addMessage({ AiSidebar::Message::Role::Info, "Now arranging the whole song." });
-            chatTrackId = songChatId;
-        }
-        return;
-    }
+        : juce::String();
     const auto sel = static_cast<std::size_t>(std::clamp(selectedTrack, 0, maxTracks - 1));
     const auto& track = project.tracks[sel];
-    const bool usable = !audioSelected && track.kind != TrackKind::None;
-    const bool drums = track.kind == TrackKind::Drums;
-    const int part = editPart;
-    const bool inPart = part >= 0 && part < project.song.sections;
-    const int slot = inPart ? project.song.slots[static_cast<std::size_t>(part)][sel]
-                            : (drums ? trackDrumSlot[sel] : trackMelodySlot[sel]);
-    juce::String detail = inPart
-        ? juce::String(songPartName(project.song.parts[static_cast<std::size_t>(part)])) + "  /  part "
-              + juce::String(part + 1) + ", bars " + juce::String(part * 4 + 1) + "-" + juce::String(part * 4 + 4)
-        : juce::String("Free loop");
-    detail << "  /  loop " << juce::String::charToString(static_cast<juce::juce_wchar>('A' + slot));
-    if (inPart && !project.song.trackOn[static_cast<std::size_t>(part)][sel])
-        detail << "  (silent in this part)";
-    aiSidebar->setContext(usable ? track.trackName() : juce::String("No track selected"), usable ? detail : juce::String(),
-                          drums ? AiSidebar::Mode::Drums : AiSidebar::Mode::Melody, usable && claudeAvailable, reason);
-    // Switching tracks mid-conversation: note it so the transcript stays clear.
-    if (usable && track.id != chatTrackId)
-    {
-        if (chatTrackId != 0 && aiSidebar->hasMessages())
-            aiSidebar->addMessage({ AiSidebar::Message::Role::Info, "Now working on " + track.trackName() + "." });
-        chatTrackId = track.id;
-    }
+    int tracks = 0;
+    for (const auto& state : project.tracks)
+        tracks += state.kind != TrackKind::None ? 1 : 0;
+    // The agent works on the whole project whatever view is showing; the
+    // detail line just says what "this track" means right now.
+    juce::String detail = juce::String(tracks) + (tracks == 1 ? " track" : " tracks") + "  /  "
+        + juce::String(project.song.sections) + " parts  /  " + (project.songMode ? "Song view" : "Loop view");
+    if (!audioSelected && track.kind != TrackKind::None)
+        detail << "  /  selected: " << track.trackName();
+    aiSidebar->setContext("Sonora agent", detail, AiSidebar::Mode::Agent, claudeAvailable, reason);
 }
 
 void MainComponent::startAiJob(std::function<void(const std::atomic<bool>*)> job)
@@ -805,60 +1135,51 @@ void MainComponent::finishAiJob()
         aiSidebar->setBusy(false);
 }
 
+std::array<int, maxTracks> MainComponent::visibleLoopSlots() const
+{
+    std::array<int, maxTracks> slots {};
+    const bool inPart = editPart >= 0 && editPart < project.song.sections;
+    for (int t = 0; t < maxTracks; ++t)
+    {
+        const auto i = static_cast<std::size_t>(t);
+        slots[i] = inPart ? project.song.slots[static_cast<std::size_t>(editPart)][i]
+                          : (project.tracks[i].kind == TrackKind::Drums ? trackDrumSlot[i] : trackMelodySlot[i]);
+    }
+    return slots;
+}
+
 void MainComponent::sendToAssistant(const juce::String& text)
 {
-    if (assistantWorker != nullptr)
+    if (assistantWorker != nullptr || text.trim().isEmpty())
         return;
     auto safe = juce::Component::SafePointer<MainComponent>(this);
-    if (project.songMode)
-    {
-        ai::SongRequest request;
-        request.message = text;
-        request.project = project;
-        request.history = songHistory;
-        songHistory.push_back({ true, text });
-        aiSidebar->addMessage({ AiSidebar::Message::Role::User, text });
-        // Track ids at send time: new loops only land on the same tracks.
-        std::array<juce::uint32, maxTracks> ids {};
-        for (int t = 0; t < maxTracks; ++t)
-            ids[static_cast<std::size_t>(t)] = project.tracks[static_cast<std::size_t>(t)].id;
-        startAiJob([safe, request, ids](const std::atomic<bool>* cancel) {
-            auto result = ai::runSongComposer(request, cancel);
-            juce::MessageManager::callAsync([safe, result, ids] {
-                if (safe != nullptr)
-                    safe->songComposerFinished(result, ids);
-            });
-        });
-        aiSidebar->setStatus("Composing the song... (this can take a minute)");
-        return;
-    }
-    if (audioSelected)
-        return;
-    const auto sel = static_cast<std::size_t>(std::clamp(selectedTrack, 0, maxTracks - 1));
-    if (project.tracks[sel].kind == TrackKind::None)
-        return;
-    ai::AssistantRequest request;
+    ai::AgentRequest request;
     request.message = text;
     request.project = project;
-    request.track = selectedTrack;
-    request.part = editPart;
-    request.melodySlots = trackMelodySlot;
-    request.drumSlots = trackDrumSlot;
+    request.selectedTrack = selectedTrack;
+    request.loopSlot = visibleLoopSlots();
+    request.editPart = editPart;
+    request.songView = project.songMode;
+    request.playing = engine.isPlaying();
+    request.library = listSampleLibrary(sampleLibraryDir());
     request.history = chatHistory;
-    const int slot = ai::assistantTargetSlot(request);
-    const auto trackId = project.tracks[sel].id;
     chatHistory.push_back({ true, text });
     aiSidebar->addMessage({ AiSidebar::Message::Role::User, text });
-    startAiJob([safe, request, trackId, slot](const std::atomic<bool>* cancel) {
-        auto result = ai::runAssistant(request, cancel);
-        juce::MessageManager::callAsync([safe, result, trackId, slot] {
+    // The actions name tracks by position. If the track list changes while
+    // Claude works, they would land on the wrong tracks: remember who was where.
+    std::array<juce::uint32, maxTracks> ids {};
+    for (int t = 0; t < maxTracks; ++t)
+        ids[static_cast<std::size_t>(t)] = project.tracks[static_cast<std::size_t>(t)].id;
+    startAiJob([safe, request, ids](const std::atomic<bool>* cancel) {
+        auto result = ai::runAgent(request, cancel);
+        juce::MessageManager::callAsync([safe, result, ids] {
             if (safe != nullptr)
-                safe->assistantFinished(result, trackId, slot);
+                safe->agentFinished(result, ids);
         });
     });
 }
 
-void MainComponent::assistantFinished(const ai::AssistantResult& result, juce::uint32 trackId, int slot)
+void MainComponent::agentFinished(const ai::AgentResult& result, const std::array<juce::uint32, maxTracks>& ids)
 {
     finishAiJob();
     if (aiSidebar == nullptr)
@@ -869,91 +1190,157 @@ void MainComponent::assistantFinished(const ai::AssistantResult& result, juce::u
         aiSidebar->addMessage({ result.error == "Cancelled." ? Role::Info : Role::Error, result.error });
         return;
     }
-    juce::String applied;
-    if (result.changed)
+    if (result.reply.isNotEmpty())
+        aiSidebar->addMessage({ Role::Assistant, result.reply });
+    juce::String historyText = result.reply;
+    if (!result.actions.empty())
     {
-        // Find the track again by stable id: it may have moved or changed.
-        int target = -1;
-        for (int index = 0; index < maxTracks; ++index)
+        for (int t = 0; t < maxTracks; ++t)
+            if (project.tracks[static_cast<std::size_t>(t)].id != ids[static_cast<std::size_t>(t)])
+            {
+                aiSidebar->addMessage({ Role::Error, "The track list changed while I was working, so nothing was applied. "
+                                                     "Ask again for the current tracks." });
+                chatHistory.push_back({ false, historyText + " [nothing applied: tracks changed]" });
+                return;
+            }
+        agent::Context context;
+        context.selectedTrack = selectedTrack;
+        context.loopSlot = visibleLoopSlots();
+        context.library = listSampleLibrary(sampleLibraryDir());
+        std::array<TrackKind, maxTracks> kindsBefore {};
+        for (int t = 0; t < maxTracks; ++t)
+            kindsBefore[static_cast<std::size_t>(t)] = project.tracks[static_cast<std::size_t>(t)].kind;
+        // One undo step for everything the agent did.
+        beginEdit();
+        const auto report = agent::applyActions(project, result.actions, context);
+        if (report.changed)
         {
-            const auto& track = project.tracks[static_cast<std::size_t>(index)];
-            if (track.id == trackId && (track.kind == TrackKind::Drums) == result.drums && track.kind != TrackKind::None)
-                target = index;
-        }
-        if (target < 0)
-            aiSidebar->addMessage({ Role::Error, "That track was removed or changed type, so nothing was applied." });
-        else
-        {
-            beginEdit();
-            auto& track = project.tracks[static_cast<std::size_t>(target)];
-            const auto s = static_cast<std::size_t>(std::clamp(slot, 0, numPatterns - 1));
-            if (result.drums)
-                track.drumPatterns[s] = result.drumPattern;
-            else
-                track.melodies[s] = result.pattern;
             projectChanged();
-            endEdit();
-            const auto letter = juce::String::charToString(static_cast<juce::juce_wchar>('A' + slot));
-            applied = result.count() == 0 ? "Cleared loop " + letter + "."
-                : "Applied to loop " + letter + ": " + juce::String(result.count()) + (result.drums ? " hits." : " notes.");
+            // Show a newly added track unless the agent chose what to show.
+            bool selects = false;
+            for (const auto& effect : report.effects)
+                selects = selects || effect.kind == agent::UiEffect::Kind::SelectTrack;
+            if (!selects)
+                for (int t = 0; t < maxTracks; ++t)
+                    if (kindsBefore[static_cast<std::size_t>(t)] == TrackKind::None
+                        && project.tracks[static_cast<std::size_t>(t)].kind != TrackKind::None)
+                    {
+                        selectChannel(t);
+                        break;
+                    }
+            selectChannel(audioSelected ? -1 : selectedTrack);
+            resized();
+            repaint();
         }
+        endEdit();
+        runAgentEffects(report.effects);
+        // What happened, in the producer's terms.
+        juce::StringArray lines = report.done;
+        juce::String summary;
+        if (!lines.isEmpty())
+        {
+            const int shown = std::min(lines.size(), 14);
+            summary << "Applied " << lines.size() << (lines.size() == 1 ? " change" : " changes") << ":\n";
+            for (int i = 0; i < shown; ++i)
+                summary << "- " << lines[i] << "\n";
+            if (lines.size() > shown)
+                summary << "- ...and " << (lines.size() - shown) << " more.\n";
+            if (report.changed)
+                summary << "Undo (Ctrl+Z) takes all of it back in one step.";
+        }
+        juce::StringArray skipped = report.failed;
+        skipped.addArray(result.unreadable);
+        if (!skipped.isEmpty())
+        {
+            summary << (summary.isEmpty() ? "" : "\n") << "Skipped " << skipped.size()
+                    << (skipped.size() == 1 ? " action" : " actions") << ":\n";
+            for (int i = 0; i < std::min(skipped.size(), 8); ++i)
+                summary << "- " << skipped[i] << "\n";
+        }
+        if (summary.isNotEmpty())
+            aiSidebar->addMessage({ report.failed.isEmpty() && result.unreadable.isEmpty() ? Role::Info : Role::Error,
+                                    summary.trimEnd() });
+        if (!lines.isEmpty())
+        {
+            status.setText("AI agent: " + lines[0] + (lines.size() > 1 ? " (+" + juce::String(lines.size() - 1) + " more)" : juce::String()),
+                           juce::dontSendNotification);
+            historyText += " [" + juce::String(lines.size()) + " changes applied"
+                + (skipped.isEmpty() ? juce::String() : ", " + juce::String(skipped.size()) + " skipped") + "]";
+        }
+        else if (!skipped.isEmpty())
+            historyText += " [nothing applied: " + juce::String(skipped.size()) + " skipped]";
     }
-    aiSidebar->addMessage({ Role::Assistant, result.reply });
-    if (applied.isNotEmpty())
-    {
-        aiSidebar->addMessage({ Role::Info, applied + " Press Play to hear it; Undo (Ctrl+Z) restores the old one." });
-        status.setText("AI assistant: " + applied, juce::dontSendNotification);
-    }
-    chatHistory.push_back({ false, result.reply + (applied.isNotEmpty() ? " [" + applied + "]" : juce::String()) });
+    chatHistory.push_back({ false, historyText });
 }
 
-void MainComponent::songComposerFinished(const ai::SongResult& result, const std::array<juce::uint32, maxTracks>& ids)
+// App-level requests ride the same buttons and dialogs a person would use, so
+// existing confirmations (discarding unsaved work) still apply.
+void MainComponent::runAgentEffects(const std::vector<agent::UiEffect>& effects)
 {
-    finishAiJob();
-    if (aiSidebar == nullptr)
-        return;
-    using Role = AiSidebar::Message::Role;
-    if (!result.ok())
+    using K = agent::UiEffect::Kind;
+    for (const auto& effect : effects)
     {
-        aiSidebar->addMessage({ result.error == "Cancelled." ? Role::Info : Role::Error, result.error });
-        return;
-    }
-    aiSidebar->addMessage({ Role::Assistant, result.reply });
-    if (!result.changed)
-    {
-        songHistory.push_back({ false, result.reply });
-        return;
-    }
-    // The arrangement refers to tracks by position: if tracks were added,
-    // removed, or reordered while Claude worked, it no longer fits.
-    for (int t = 0; t < maxTracks; ++t)
-        if (project.tracks[static_cast<std::size_t>(t)].id != ids[static_cast<std::size_t>(t)])
+        switch (effect.kind)
         {
-            aiSidebar->addMessage({ Role::Error, "The track list changed while I was composing, so nothing was applied. "
-                                                 "Ask again to compose for the current tracks." });
-            return;
+            case K::Play:
+                if (effect.number >= 0)
+                {
+                    songStartPart = std::clamp(effect.number, 0, project.song.sections - 1);
+                    engine.setSongStartSection(songStartPart);
+                    if (!project.songMode)
+                        setSongView(true);
+                    engine.stop();
+                }
+                engine.setPlaying(true);
+                break;
+            case K::Stop: stop.onClick(); break;
+            case K::Panic: panic.onClick(); break;
+            case K::SetView:
+                if (effect.text == "loop")
+                {
+                    setMixerView(false);
+                    setSongView(false);
+                }
+                else if (effect.text == "song")
+                    setSongView(true);
+                else if (effect.text == "mixer")
+                    setMixerView(true);
+                else if (effect.text == "automation")
+                {
+                    if (!automationVisible)
+                        autoButton.onClick();
+                }
+                else if (effect.text == "soundeditor")
+                {
+                    setMixerView(false);
+                    setSongView(false);
+                    const auto& track = project.tracks[static_cast<std::size_t>(std::clamp(selectedTrack, 0, maxTracks - 1))];
+                    const bool editorOpen = (samplerPanel != nullptr && samplerPanel->isVisible())
+                        || (synthPanel != nullptr && synthPanel->isVisible());
+                    if (!editorOpen && track.kind == TrackKind::Synth)
+                        toggleEditorPanel();
+                }
+                else if (effect.text == "kiteditor")
+                {
+                    setMixerView(false);
+                    setSongView(false);
+                    if (kitPanel != nullptr && !kitPanel->isVisible() && project.tracks[static_cast<std::size_t>(drumEditTrack())].kind == TrackKind::Drums)
+                        kitButton.onClick();
+                }
+                break;
+            case K::SelectTrack: selectChannel(effect.number); break;
+            case K::EditSection: handleArrangementAction({ ArrangementAction::Kind::EditPart, effect.number }); break;
+            case K::Save: save.onClick(); break;
+            case K::Export: exportButton.onClick(); break;
+            case K::Undo: undoEdit(); break;
+            case K::Redo: redoEdit(); break;
+            case K::NewProject: newProject.onClick(); break;
+            case K::OpenProject: open.onClick(); break;
+            case K::ToggleRecord: toggleRecord(); break;
+            case K::TakeToSampler: sendTakeToSampler(static_cast<std::uint32_t>(effect.number)); break;
+            case K::DeleteTake: deleteTake(static_cast<std::uint32_t>(effect.number)); break;
         }
-    beginEdit();
-    ai::applySongResult(project, result);
-    songStartPart = 0;
-    editPart = -1;
-    engine.stop();
-    projectChanged();
-    endEdit();
-    juce::StringArray loops;
-    for (const auto& write : result.writes)
-        loops.add(project.tracks[static_cast<std::size_t>(write.track)].trackName() + " loop "
-                  + juce::String::charToString(static_cast<juce::juce_wchar>('A' + write.slot)));
-    juce::String applied = "New arrangement: " + juce::String(result.song.sections) + " parts ("
-        + juce::String(result.song.sections * 4) + " bars).";
-    if (!loops.isEmpty())
-        applied << " New variation loops: " << loops.joinIntoString(", ") << ".";
-    if (!result.skipped.isEmpty())
-        applied << " I " << result.skipped.joinIntoString("; ") << ".";
-    aiSidebar->addMessage({ Role::Info, applied + " Press Play to hear it from the top; Undo (Ctrl+Z) restores your "
-                                                  "previous song in one step." });
-    status.setText("AI assistant: " + applied, juce::dontSendNotification);
-    songHistory.push_back({ false, result.reply + " [" + applied + "]" });
+    }
 }
 
 void MainComponent::refreshKitPanel()
@@ -1112,6 +1499,22 @@ void MainComponent::collectSamples(const juce::File& destination)
 {
     const auto media = mediaDirFor(destination);
     media.createDirectory();
+    // Sampler sounds come from the shared library; a copy travels with the
+    // project (same relative name, so references stay valid) so it opens
+    // anywhere. Media is searched first, so the project copy wins afterwards.
+    for (const auto& track : project.tracks)
+    {
+        if (track.kind != TrackKind::Synth || !isSamplerInstrument(track.instrumentPreset)
+            || track.samplerFile[0] == '\0')
+            continue;
+        const auto name = track.samplerFileName();
+        const auto target = media.getChildFile(name);
+        if (target.existsAsFile())
+            continue;
+        const auto source = resolveSampleFile(name, { sessionDir(), sampleLibraryDir() });
+        if (source.existsAsFile() && target.getParentDirectory().createDirectory().wasOk())
+            source.copyFileTo(target);
+    }
     beginEdit();
     for (int pad = 0; pad < drumPads; ++pad)
     {
@@ -1238,14 +1641,14 @@ struct MainComponent::AudioView final : public juce::Component
               std::function<void()> analyzeCb, std::function<void()> applyCb,
               std::function<void(std::uint32_t)> soloCb, std::function<void(std::uint32_t)> keepCb,
               std::function<void(std::uint32_t, float)> stretchCb, std::function<void()> stretchBeginCb,
-              std::function<void()> stretchEndCb)
+              std::function<void()> stretchEndCb, std::function<void(std::uint32_t)> toSamplerCb)
         : onInputMode(std::move(inputModeCb)), onMonitor(std::move(monitorCb)),
           onMuteTake(std::move(muteCb)), onDeleteTake(std::move(deleteCb)),
           onSelectTake(std::move(selectCb)), onPitchChanged(std::move(pitchChangedCb)),
           onAnalyze(std::move(analyzeCb)), onApply(std::move(applyCb)),
           onSoloTake(std::move(soloCb)), onKeepTake(std::move(keepCb)),
           onStretchTake(std::move(stretchCb)), onStretchBegin(std::move(stretchBeginCb)),
-          onStretchEnd(std::move(stretchEndCb))
+          onStretchEnd(std::move(stretchEndCb)), onToSampler(std::move(toSamplerCb))
     {
         setWantsKeyboardFocus(true);
         inputMode.addItem("Input 1 (mono)", 1);
@@ -1325,6 +1728,11 @@ struct MainComponent::AudioView final : public juce::Component
         addAndMakeVisible(stretchValue);
         stretchValue.setFont(ui::font(11.0f));
         stretchValue.setColour(juce::Label::textColourId, ui::muted);
+        addAndMakeVisible(toSampler);
+        toSampler.setWantsKeyboardFocus(false);
+        toSampler.setTooltip("Turn this take into a sampler instrument on a new track: play it on the keys, "
+                             "loop it, trim it, tune it.");
+        toSampler.onClick = [this] { if (onToSampler && stretchTake != 0) onToSampler(stretchTake); };
         analyze.setButtonText("Analyze");
         apply.setButtonText("Tune take");
         apply.setColour(juce::TextButton::buttonOnColourId, ui::violet);
@@ -1441,6 +1849,7 @@ struct MainComponent::AudioView final : public juce::Component
         }
         stretch.setValue(stretchRatio * 100.0, juce::dontSendNotification);
         stretch.setEnabled(stretchTake != 0);
+        toSampler.setEnabled(stretchTake != 0);
         stretchValue.setText(stretchTake == 0 ? juce::String("--")
                              : "x" + juce::String(stretchRatio, 2) + "  ("
                                  + juce::String(stretchFrames * stretchRatio / 48000.0, 1) + " s)",
@@ -1536,6 +1945,7 @@ struct MainComponent::AudioView final : public juce::Component
         stretchLabel.setBounds(12, y, 64, 26);
         stretch.setBounds(84, y, 200, 26);
         stretchValue.setBounds(292, y, 220, 26);
+        toSampler.setBounds(getWidth() - 184, y, 160, 26);
         waveTop = y + 32;
     }
 
@@ -1675,6 +2085,8 @@ struct MainComponent::AudioView final : public juce::Component
     std::function<void(std::uint32_t)> onSoloTake, onKeepTake;
     std::function<void(std::uint32_t, float)> onStretchTake;
     std::function<void()> onStretchBegin, onStretchEnd;
+    std::function<void(std::uint32_t)> onToSampler;
+    juce::TextButton toSampler { "Play as instrument" };
 };
 
 static int activeInputCount(juce::AudioDeviceManager& manager)
@@ -2638,46 +3050,13 @@ MainComponent::MainComponent()
         addAndMakeVisible(button);
     addAndMakeVisible(addTrack);
     addAndMakeVisible(instrumentChoice);
-    // Grouped by family in first-appearance order. Persisted indices are
-    // identity only, so presets appended later still land under their family.
-    std::vector<juce::String> families;
-    for (const auto& preset : instruments)
-        if (std::find(families.begin(), families.end(), juce::String(preset.family)) == families.end())
-            families.emplace_back(preset.family);
-    for (const auto& family : families)
-    {
-        instrumentChoice.addSectionHeading(family);
-        for (std::size_t i = 0; i < instruments.size(); ++i)
-        {
-            const auto& preset = instruments[i];
-            if (family != preset.family)
-                continue;
-            // Item 0 is the editable synth; its saved name stays "Sine Keys" so
-            // existing tracks keep following instrument/patch renames.
-            instrumentChoice.addItem(i == 0 ? juce::String("Sonora Synth (editable)") : juce::String(preset.name),
-                                     static_cast<int>(i) + 1);
-            if (i > 0 && !engine.instrumentsAvailable())
-                instrumentChoice.setItemEnabled(static_cast<int>(i) + 1, false);
-        }
-    }
+    // The selector shows the current sound; clicking opens the browser.
+    instrumentChoice.onOpen = [this] { showInstrumentBrowser(); };
+    favorites.load(favoritesFile());
     instrumentChoice.setTooltip(engine.instrumentsAvailable()
-        ? "Choose this track's instrument. Notes stay the same; TRACK effects shape the selected sound."
-        : "Sound bank missing: reinstall GeneralUser-GS.sf2 with Sonora to enable sampled instruments.");
-    instrumentChoice.onChange = [this] {
-        const int choice = instrumentChoice.getSelectedId() - 1;
-        auto& track = project.tracks[static_cast<std::size_t>(selectedTrack)];
-        if (audioSelected || track.kind != TrackKind::Synth || !validInstrument(choice)
-            || track.instrumentPreset == choice)
-            return;
-        beginEdit();
-        if (isGeneratedTrackName(track.trackName()))
-            track.setTrackName(instruments[static_cast<std::size_t>(choice)].name);
-        track.instrumentPreset = choice;
-        engine.keyboardState.allNotesOff(0);
-        projectChanged();
-        endEdit();
-        repaint();
-    };
+        ? "Choose this track's sound: search instruments, synth patches and your own samples; star your favorites. "
+          "Notes stay the same; TRACK effects shape the selected sound."
+        : "Sound bank missing: reinstall GeneralUser-GS.sf2 to enable sampled instruments. The synth and sampler still work.");
     for (auto& tab : patternTabs)
         addAndMakeVisible(tab);
     fxBar = std::make_unique<FxBar>(
@@ -2721,22 +3100,37 @@ MainComponent::MainComponent()
         [this] { synthPanel->setVisible(false); });
     addAndMakeVisible(synthPanel.get());
     synthPanel->setVisible(false);
+    samplerPanel = std::make_unique<SamplerPanel>(
+        [this](const SamplerParams& params) {
+            auto& track = project.tracks[static_cast<std::size_t>(std::clamp(selectedTrack, 0, maxTracks - 1))];
+            if (track.kind != TrackKind::Synth || !isSamplerInstrument(track.instrumentPreset)
+                || track.sampler == params || !params.valid())
+                return;
+            // Wheel/double-click edits arrive without a drag: own the undo step.
+            const bool ownGesture = !editing;
+            if (ownGesture) beginEdit();
+            track.sampler = params;
+            projectChanged();
+            if (ownGesture) endEdit();
+        },
+        [this] { beginEdit(); },
+        [this] { endEdit(); },
+        [this] { addSoundsToSampler(); },
+        [this](const juce::String& name) { useSample(name); },
+        [] {
+            const auto folder = sampleLibraryDir();
+            folder.createDirectory();
+            folder.startAsProcess();
+        },
+        [this] { detectSamplerRoot(); },
+        [this] { samplerPanel->setVisible(false); });
+    addAndMakeVisible(samplerPanel.get());
+    samplerPanel->setVisible(false);
     addAndMakeVisible(editSynth);
     editSynth.setWantsKeyboardFocus(false);
     editSynth.setColour(juce::TextButton::buttonOnColourId, ui::cyan);
-    editSynth.setTooltip("Open the synth engine: waveforms, filter, envelopes, LFO, drive, chorus, and factory patches.");
-    editSynth.onClick = [this] {
-        if (synthPanel->isVisible())
-        {
-            synthPanel->setVisible(false);
-            return;
-        }
-        if (kitPanel != nullptr)
-            kitPanel->setVisible(false);
-        refreshSynthPanel();
-        synthPanel->setVisible(true);
-        synthPanel->toFront(false);
-    };
+    editSynth.setTooltip("Open this track's sound editor: the synth engine (waveforms, filter, envelopes, LFO, drive, chorus, patches) or the sampler (trim, loop, root key, envelope).");
+    editSynth.onClick = [this] { toggleEditorPanel(); };
     kitButton.onClick = [this] {
         if (kitPanel == nullptr)
             return;
@@ -3094,7 +3488,6 @@ MainComponent::MainComponent()
         if (assistantWorker != nullptr)
             return;
         chatHistory.clear();
-        songHistory.clear();
         aiSidebar->clearMessages();
     };
     repeatBar.onClick = [this] {
@@ -3205,7 +3598,8 @@ MainComponent::MainComponent()
         [this] {
             endEdit();
             refreshTakes();
-        });
+        },
+        [this](std::uint32_t id) { sendTakeToSampler(id); });
     addAndMakeVisible(audioView.get());
     keyboard.setAvailableRange(lowestPitch, highestPitch);
     keyboard.setLowestVisibleKey(36);
@@ -3274,7 +3668,7 @@ MainComponent::~MainComponent()
         assistantWorker->stopThread(5000);
         assistantWorker.reset();
     }
-    for (auto* worker : { &takeLoadWorker, &bankLoadWorker })
+    for (auto* worker : { &takeLoadWorker, &bankLoadWorker, &sampleLoadWorker })
         if (worker->get() != nullptr)
         {
             (*worker)->cancel.store(true);
@@ -3297,6 +3691,10 @@ MainComponent::~MainComponent()
         engine.retirePadBank(track, nullptr);
     for (auto& bank : bankStorage)
         bank.reset();
+    for (int track = 0; track < maxTracks; ++track)
+        engine.retireSampleData(track, nullptr);
+    for (auto& sample : sampleStorage)
+        sample.reset();
     setLookAndFeel(nullptr);
 }
 
@@ -3892,7 +4290,10 @@ void MainComponent::projectChanged()
     instrumentChoice.setVisible(!audioSelected && project.tracks[sel].kind == TrackKind::Synth);
     const bool editableSynth = !audioSelected && project.tracks[sel].kind == TrackKind::Synth
         && project.tracks[sel].instrumentPreset == 0;
-    editSynth.setVisible(editableSynth);
+    const bool editableSampler = !audioSelected && project.tracks[sel].kind == TrackKind::Synth
+        && isSamplerInstrument(project.tracks[sel].instrumentPreset);
+    editSynth.setVisible(editableSynth || editableSampler);
+    editSynth.setButtonText(editableSampler ? "Edit sampler" : "Edit sound");
     if (synthPanel != nullptr && synthPanel->isVisible())
     {
         if (editableSynth)
@@ -3900,7 +4301,14 @@ void MainComponent::projectChanged()
         else
             synthPanel->setVisible(false);
     }
-    instrumentChoice.setSelectedId(project.tracks[sel].instrumentPreset + 1, juce::dontSendNotification);
+    if (samplerPanel != nullptr && samplerPanel->isVisible())
+    {
+        if (editableSampler)
+            refreshSamplerPanel(false);
+        else
+            samplerPanel->setVisible(false);
+    }
+    refreshInstrumentButton();
     drumsSelected = selDrums && !audioSelected;
     pianoRoll.setPattern(project.tracks[sel].kind == TrackKind::Synth
                              ? project.tracks[sel].melodies[static_cast<std::size_t>(trackMelodySlot[sel])]
@@ -5465,6 +5873,7 @@ void MainComponent::exportAudio()
         job.mediaDir = mediaDirFor(projectFile);
     else
         job.mediaDir = sessionDir();
+    job.sampleDirs = { sessionDir(), sampleLibraryDir() };
     pendingJob = job;
     exportPanel = std::make_unique<ExportPanel>(pendingJob,
         [this] {
@@ -5722,8 +6131,7 @@ void MainComponent::timerCallback()
         finishIdeaRecord();
     refreshMiniLabDisplay(false);
     if (assistantStartedAt != 0 && aiSidebar != nullptr && timerTicks % 15 == 0)
-        aiSidebar->setStatus((transcribing ? "Transcribing locally...  "
-                             : project.songMode ? "Composing the song...  " : "Thinking...  ")
+        aiSidebar->setStatus((transcribing ? "Transcribing locally...  " : "Working on it...  ")
                              + juce::String((juce::Time::getMillisecondCounter() - assistantStartedAt) / 1000) + " s");
     {
         const auto serial = knobSerial.load(std::memory_order_acquire);
@@ -5848,6 +6256,7 @@ void MainComponent::timerCallback()
     if (!recording)
         refreshTakes();
     refreshPadBank();
+    refreshSampleData();
     // Live theme reload: `omarchy theme set` repaints the whole studio.
     if (timerTicks % 120 == 0)
         applyOmarchyTheme();
@@ -5911,6 +6320,11 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
     if (key == juce::KeyPress::escapeKey && sidebarOpen())
     {
         toggleAiSidebar();
+        return true;
+    }
+    if (key == juce::KeyPress::escapeKey && samplerPanel != nullptr && samplerPanel->isVisible())
+    {
+        samplerPanel->setVisible(false);
         return true;
     }
     if (key == juce::KeyPress::escapeKey && synthPanel != nullptr && synthPanel->isVisible())
@@ -6170,6 +6584,8 @@ void MainComponent::resized()
         aiSidebar->setBounds(getWidth() - sidebarWidth, 12, sidebarWidth - 12, getHeight() - 58);
     if (synthPanel != nullptr)
         synthPanel->setBounds((contentWidth() - 920) / 2, std::max(200, (getHeight() - 470) / 2 - 60), 920, 470);
+    if (samplerPanel != nullptr)
+        samplerPanel->setBounds((contentWidth() - 920) / 2, std::max(200, (getHeight() - 470) / 2 - 60), 920, 470);
 }
 
 void MainComponent::setSongView(bool song)

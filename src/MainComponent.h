@@ -7,12 +7,15 @@
 #include "KitSamples.h"
 #include "KnobMaps.h"
 #include "ArrangementView.h"
+#include "SamplerPanel.h"
+#include "InstrumentBrowser.h"
 #include "AiSidebar.h"
 #include "IdeaCapture.h"
 #include "AiDictation.h"
 #include "MiniLabDisplay.h"
 #include "MiniLabSender.h"
 #include "AiMelody.h"
+#include "AiAgent.h"
 #include "NeonTheme.h"
 #include "PitchCorrect.h"
 #include <map>
@@ -23,6 +26,19 @@ namespace sonora
 {
 class MixerView;
 class AutomationView;
+
+// The track's instrument selector. Looks like a combo box but opens the
+// searchable browser (sounds, patches, samples, favorites) instead of a menu.
+class InstrumentButton final : public juce::ComboBox
+{
+public:
+    std::function<void()> onOpen;
+    void showPopup() override
+    {
+        if (onOpen)
+            onOpen();
+    }
+};
 
 class MainComponent final : public juce::AudioAppComponent,
                               private juce::Timer,
@@ -124,7 +140,12 @@ private:
     juce::TextButton audioTab { "Audio" };
     juce::TextButton mute { "Mute" }, solo { "Solo" }, repeatBar { "Repeat bar 1" };
     juce::TextButton kitButton { "Kit" };
-    juce::ComboBox instrumentChoice;
+    InstrumentButton instrumentChoice;
+    Favorites favorites;
+    juce::File favoritesFile();
+    void showInstrumentBrowser();
+    void applyPickerEntry(const PickerEntry& entry);
+    void refreshInstrumentButton();
     juce::TextButton editSynth { "Edit sound" };
     // LOOP edits 4-bar patterns; SONG shows the arrangement board. The view
     // also sets playback (loop vs whole song).
@@ -173,6 +194,26 @@ private:
     std::unique_ptr<AudioView> audioView;
     std::unique_ptr<KitPanel> kitPanel;
     std::unique_ptr<SynthPanel> synthPanel;
+    std::unique_ptr<SamplerPanel> samplerPanel;
+    // Sampler audio loads on a worker like takes and drum banks; per track,
+    // the editor overview and a flag that adopts the detected root key once.
+    std::unique_ptr<BackgroundWorker> sampleLoadWorker;
+    std::array<std::unique_ptr<const SampleData>, maxTracks> sampleStorage;
+    std::array<juce::String, maxTracks> lastSampleSignature;
+    std::array<SampleOverview, maxTracks> sampleOverview;
+    std::array<bool, maxTracks> adoptSampleRoot {};
+    std::vector<juce::File> sampleSearchDirs() const;
+    juce::String sampleSignature(int track) const;
+    void refreshSampleData();
+    void sampleLoadFinished(int track, std::unique_ptr<SampleData> data, SampleOverview overview,
+                            const juce::String& signature);
+    void refreshSamplerPanel(bool relist);
+    void toggleEditorPanel();
+    void setTrackInstrument(int preset);
+    void useSample(const juce::String& libraryName);
+    void addSoundsToSampler();
+    void sendTakeToSampler(std::uint32_t takeId);
+    void detectSamplerRoot();
     // AI assistant sidebar (right edge). Docked beside the editor when the
     // window is wide enough, otherwise it floats over the editor's right side.
     static constexpr int sidebarWidth = 380;
@@ -186,9 +227,8 @@ private:
     juce::String bankSignature(int track) const;
     void bankLoadFinished(int track, std::unique_ptr<SampleBank> bank, const juce::String& signature);
     bool transcribing = false;
-    std::vector<ai::ChatTurn> chatHistory, songHistory; // track chat / song composer
-    static constexpr juce::uint32 songChatId = 0xFFFFFFFFu;
-    juce::uint32 assistantStartedAt = 0, chatTrackId = 0;
+    std::vector<ai::ChatTurn> chatHistory; // the agent conversation
+    juce::uint32 assistantStartedAt = 0;
     bool claudeAvailable = false;
     bool sidebarOpen() const;
     bool sidebarDocked() const { return getWidth() - sidebarWidth >= 1120; }
@@ -196,8 +236,9 @@ private:
     void toggleAiSidebar();
     void refreshAiSidebar();
     void sendToAssistant(const juce::String& text);
-    void assistantFinished(const ai::AssistantResult& result, juce::uint32 trackId, int slot);
-    void songComposerFinished(const ai::SongResult& result, const std::array<juce::uint32, maxTracks>& ids);
+    void agentFinished(const ai::AgentResult& result, const std::array<juce::uint32, maxTracks>& ids);
+    void runAgentEffects(const std::vector<agent::UiEffect>& effects);
+    std::array<int, maxTracks> visibleLoopSlots() const;
     void startAiJob(std::function<void(const std::atomic<bool>*)> job);
     void finishAiJob();
     void toggleIdeaRecord();

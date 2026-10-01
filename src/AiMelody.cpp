@@ -15,7 +15,7 @@ extern char** environ;
 
 namespace sonora::ai
 {
-namespace
+namespace detail
 {
 bool isExecutableFile(const juce::File& file)
 {
@@ -41,6 +41,10 @@ juce::String instrumentDescription(const Track& track)
         return "drum kit (8 pads)";
     if (!validInstrument(track.instrumentPreset))
         return "synth";
+    if (isSamplerInstrument(track.instrumentPreset))
+        return track.samplerFile[0] != '\0'
+            ? juce::String("Sampler playing \"") + cleanText(track.samplerFileName(), 80) + "\""
+            : juce::String("Sampler (no sound loaded)");
     if (track.instrumentPreset == 0)
     {
         for (const auto& patch : synthPatches())
@@ -88,6 +92,8 @@ int foldPitch(int pitch)
     return std::clamp(pitch, lowestPitch, highestPitch);
 }
 }
+
+using namespace detail;
 
 juce::File findClaudeExecutable()
 {
@@ -377,7 +383,7 @@ juce::String buildUserMessage(const MelodyRequest& request)
     return message;
 }
 
-namespace
+namespace detail
 {
 juce::StringArray sandboxArguments(const juce::String& system, const juce::String& schema)
 {
@@ -432,7 +438,7 @@ juce::StringArray claudeArguments()
     return sandboxArguments(systemPrompt(), responseSchema());
 }
 
-namespace
+namespace detail
 {
 // The structured answer object from `claude -p --output-format json`, or a
 // void var with `error` set.
@@ -593,7 +599,7 @@ MelodyResult generateMelody(const MelodyRequest& request, const std::atomic<bool
     return parseMelodyResponse(output);
 }
 
-namespace
+namespace detail
 {
 juce::String drumRulesText()
 {

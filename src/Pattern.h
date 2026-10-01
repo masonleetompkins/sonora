@@ -1,5 +1,6 @@
 #pragma once
 #include "Instruments.h"
+#include "SamplerParams.h"
 #include "SynthParams.h"
 #include "AudioTakes.h"
 #include "Fx.h"
@@ -569,6 +570,10 @@ struct Track
     TrackFx fx;
     float swing = 0.0f;
     LiveFx liveFx;
+    // Sampler instrument (Instruments.h: samplerInstrument): settings, plus
+    // the audio file's name; empty means no sample loaded.
+    SamplerParams sampler;
+    std::array<char, samplerFileCapacity> samplerFile {};
     // Automation lanes per loop slot, then target.
     std::array<std::array<AutomationLane, static_cast<std::size_t>(AutomationTarget::numTargets)>, numPatterns> automation {};
     bool valid() const
@@ -586,7 +591,10 @@ struct Track
             return false;
         if (!std::isfinite(swing) || swing < 0.0f || swing > maxSwing)
             return false;
-        if (!liveFx.valid())
+        if (!liveFx.valid() || !sampler.valid())
+            return false;
+        if (samplerFile[0] != '\0'
+            && (samplerFile[samplerFileCapacity - 1] != '\0' || !isSafeSampleName(samplerFile.data())))
             return false;
         for (int slot = 0; slot < numPatterns; ++slot)
             for (int t = 0; t < static_cast<int>(AutomationTarget::numTargets); ++t)
@@ -612,6 +620,13 @@ struct Track
         return true;
     }
     bool operator==(const Track&) const = default;
+    juce::String samplerFileName() const { return juce::String(samplerFile.data()); }
+    void setSamplerFileName(const juce::String& value)
+    {
+        samplerFile.fill('\0');
+        const auto bytes = value.toRawUTF8();
+        std::strncpy(samplerFile.data(), bytes, samplerFileCapacity - 1);
+    }
     juce::String trackName() const { return juce::String(name); }
     void setTrackName(const juce::String& value)
     {

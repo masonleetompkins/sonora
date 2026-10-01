@@ -93,11 +93,16 @@ void AiSidebar::setContext(const juce::String& newTitle, const juce::String& new
     for (auto& chip : chips)
         chip.setEnabled(canChat && !busy);
     input.setTextToShowWhenEmpty(!canChat ? unavailable
+                                 : mode == Mode::Agent ? "Ask me to do anything in Sonora..."
                                  : mode == Mode::Song ? "Describe the song you want, or ask for changes..."
                                  : mode == Mode::Drums ? "Describe a beat, or ask to change this one..."
                                                        : "Describe a melody, or ask to change this one...",
                                  ui::muted);
     transcript.placeholder = !canChat ? unavailable
+        : mode == Mode::Agent
+            ? "I run the studio with you. Ask me to write melodies or beats, pick or design instruments, play your "
+              "samples, add tracks, mix and add effects, automate, arrange the whole song, or press play. I can see "
+              "every track, loop, and setting, and everything I do is one undo step."
         : mode == Mode::Song
             ? "I can see every track's loops and the whole arrangement. Ask me to compose the full song: I'll pick "
               "the sections, decide which tracks play where, and write variation loops into empty slots."
@@ -117,8 +122,12 @@ void AiSidebar::updateChips()
                                                "Add a fill in bar 4", "Make it half-time" };
     static constexpr const char* songIdeas[] { "Compose the full song", "Add more variation",
                                                "Bigger final chorus", "Make it shorter" };
+    static constexpr const char* agentIdeas[] { "Write 4 melodies", "Make it sound warmer",
+                                                "Arrange a full song", "Add a bass line" };
     for (std::size_t i = 0; i < chips.size(); ++i)
-        chips[i].setButtonText(mode == Mode::Song ? songIdeas[i] : mode == Mode::Drums ? drumIdeas[i] : melodyIdeas[i]);
+        chips[i].setButtonText(mode == Mode::Agent ? agentIdeas[i]
+                               : mode == Mode::Song ? songIdeas[i]
+                               : mode == Mode::Drums ? drumIdeas[i] : melodyIdeas[i]);
 }
 
 void AiSidebar::setBusy(bool value)

@@ -5,6 +5,8 @@
 #include "NeonTheme.h"
 #include "DrumSequencer.h"
 #include "PianoRoll.h"
+#include "SamplerPanel.h"
+#include "InstrumentBrowser.h"
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <iostream>
 
@@ -81,19 +83,25 @@ int main(int argc, char** argv)
     {
         sonora::AiSidebar sidebar;
         sidebar.setSize(380, 820);
-        sidebar.setContext("Starter Drums", "Chorus  /  part 4, bars 13-16  /  loop B", sonora::AiSidebar::Mode::Drums, true);
+        sidebar.setContext("Sonora agent", "4 tracks  /  10 parts  /  Loop view  /  selected: Starter Drums",
+                           sonora::AiSidebar::Mode::Agent, true);
         using R = sonora::AiSidebar::Message::Role;
-        sidebar.addMessage({ R::User, "Write a punchy beat for the chorus that locks with the bass." });
-        sidebar.addMessage({ R::Assistant, "Here's a driving four-on-the-floor with claps on 2 and 4, and 16th hats "
-                                           "that open up on the last beat of each bar to push into the next." });
-        sidebar.addMessage({ R::Info, "Applied to loop B: 38 hits. Undo (Ctrl+Z) restores the old beat." });
-        sidebar.addMessage({ R::User, "Nice. Can you add a snare fill in bar 4?" });
+        sidebar.addMessage({ R::User, "Add a vibraphone track called Hook, write four melodies on it, and arrange a "
+                                      "verse and chorus that use them." });
+        sidebar.addMessage({ R::Assistant, "Added a Vibraphone track called Hook with four A minor melodies built on one "
+                                           "motif, and arranged them as Verse, Verse, Chorus, Chorus." });
+        sidebar.addMessage({ R::Info, "Applied 7 changes:\n- Added instrument track \"Hook\" as track 2 with Vibraphone.\n"
+                                      "- \"Hook\" loop A: wrote 20 notes.\n- \"Hook\" loop B: wrote 20 notes.\n"
+                                      "- Arranged the song: 4 sections (16 bars).\n"
+                                      "Undo (Ctrl+Z) takes all of it back in one step." });
+        sidebar.addMessage({ R::Error, "Skipped 1 action:\n- set_param: unknown parameter \"mix.volumee\" (did you mean mix.volume?)." });
+        sidebar.addMessage({ R::User, "Make the Hook warmer and add some echo." });
         sidebar.setBusy(true);
-        sidebar.setStatus("Thinking...  8 s");
+        sidebar.setStatus("Working on it...  8 s");
         ok = render(sidebar, 380, 820, dir.getChildFile("ai-sidebar.png")) && ok;
         sonora::AiSidebar empty;
         empty.setSize(380, 820);
-        empty.setContext("Whole song", "10 parts  /  40 bars  /  4 tracks", sonora::AiSidebar::Mode::Song, true);
+        empty.setContext("Sonora agent", "4 tracks  /  10 parts  /  Song view", sonora::AiSidebar::Mode::Agent, true);
         ok = render(empty, 380, 820, dir.getChildFile("ai-sidebar-empty.png")) && ok;
     }
     {
@@ -141,6 +149,49 @@ int main(int argc, char** argv)
         lightDrums.setPattern(lightGrid);
         lightDrums.setPlayhead(16 * sonora::stepTicks, true);
         ok = render(lightDrums, 900, 300, dir.getChildFile("drums-light.png")) && ok;
+    }
+    {
+        // Sampler editor: empty, then with a decaying sample, trim and loop set.
+        sonora::ui::applyPalette(sonora::omarchy::sonoraDarkPalette());
+        theme.applyPalette();
+        auto empty = std::make_unique<sonora::SamplerPanel>(
+            [](const sonora::SamplerParams&) {}, [] {}, [] {}, [] {}, [](const juce::String&) {}, [] {}, [] {}, [] {});
+        const std::vector<juce::String> library { "Drums/Kick 01.wav", "Pad swell.flac", "Vocal chop.wav" };
+        empty->refresh({}, "Sampler 3", {}, {}, &library);
+        ok = render(*empty, 920, 470, dir.getChildFile("sampler-empty.png")) && ok;
+        auto loaded = std::make_unique<sonora::SamplerPanel>(
+            [](const sonora::SamplerParams&) {}, [] {}, [] {}, [] {}, [](const juce::String&) {}, [] {}, [] {}, [] {});
+        sonora::SampleOverview overview;
+        overview.loaded = true;
+        overview.seconds = 2.4;
+        overview.rate = 44100.0;
+        overview.channels = 2;
+        overview.detectedRoot = 57;
+        for (int i = 0; i < 600; ++i)
+            overview.peaks.push_back(std::exp(-i / 140.0f) * (0.55f + 0.45f * std::sin(i * 0.9f)));
+        sonora::SamplerParams params;
+        params.rootNote = 57;
+        params.start = 0.06f;
+        params.end = 0.9f;
+        params.loop = true;
+        params.loopStart = 0.3f;
+        params.loopEnd = 0.7f;
+        params.attack = 0.01f;
+        params.release = 0.4f;
+        params.tune = 7.0f;
+        loaded->refresh(params, "Pad swell", "Pad swell.flac", overview, &library);
+        ok = render(*loaded, 920, 470, dir.getChildFile("sampler-loaded.png")) && ok;
+    }
+    {
+        // Instrument browser: browsing with favorites, then mid-search.
+        const std::vector<juce::String> library { "Drums/Kick 01.wav", "Pad swell.flac", "Vocal chop.wav" };
+        sonora::Favorites stars;
+        stars.toggle(sonora::instrumentKey(1));
+        stars.toggle(sonora::patchKey("Super Saw"));
+        stars.toggle(sonora::sampleKey("Pad swell.flac"));
+        auto browse = std::make_unique<sonora::InstrumentBrowser>(
+            sonora::buildPickerEntries(library), stars, sonora::patchKey("Super Saw"));
+        ok = render(*browse, 380, 520, dir.getChildFile("browser-browse.png")) && ok;
     }
     juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
     std::cout << (ok ? "snapshots written to " : "snapshot failed: ") << dir.getFullPathName() << "\n";

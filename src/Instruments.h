@@ -5,7 +5,7 @@ namespace sonora
 {
 struct InstrumentPreset { const char* name; const char* family; int program; };
 // Stable, persisted indices. Append new entries; never reorder existing ones.
-inline constexpr std::array<InstrumentPreset, 85> instruments {{
+inline constexpr std::array<InstrumentPreset, 86> instruments {{
     { "Sine Keys", "Synth", -1 },
     { "Grand Piano", "Piano", 0 },
     { "Bright Piano", "Piano", 1 },
@@ -93,6 +93,17 @@ inline constexpr std::array<InstrumentPreset, 85> instruments {{
     { "Timpani", "Percussion", 47 },
     { "Woodblock", "Percussion", 115 },
     { "Taiko Drum", "Percussion", 116 },
+    // Program -2: not from the sound bank. Plays the track's own audio file.
+    { "Sampler", "Sampler", -2 },
 }};
+inline constexpr int samplerInstrument = 85;
+static_assert(instruments[samplerInstrument].program == -2, "sampler must keep its table index");
+inline bool isSamplerInstrument(int value) { return value == samplerInstrument; }
+// True for presets that come from the bundled sound bank (not the synth or sampler).
+inline bool isBankInstrument(int value)
+{
+    return value >= 0 && value < static_cast<int>(instruments.size())
+        && instruments[static_cast<std::size_t>(value)].program >= 0;
+}
 inline bool validInstrument(int value) { return value >= 0 && value < static_cast<int>(instruments.size()); }
 }

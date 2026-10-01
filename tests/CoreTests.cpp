@@ -5,6 +5,10 @@
 #include "KitSamples.h"
 #include "KnobMaps.h"
 #include "LiveFx.h"
+#include "AgentActions.h"
+#include "AiAgent.h"
+#include "InstrumentSearch.h"
+#include "Sampler.h"
 #include "TimeStretch.h"
 #include "AiMelody.h"
 #include "AiDictation.h"
@@ -830,9 +834,9 @@ void testPersistence()
     require(sonora::ProjectIO::decode("{broken json", loaded).failed(), "malformed JSON accepted");
     require(loaded == good, "failed load mutated the project");
     auto json = sonora::ProjectIO::encode(original);
-    require(sonora::ProjectIO::decode(json.replace("\"version\": 21", "\"version\": 22"), loaded).failed(),
+    require(sonora::ProjectIO::decode(json.replace("\"version\": 22", "\"version\": 23"), loaded).failed(),
             "unknown version accepted");
-    require(sonora::ProjectIO::decode(json.replace("\"version\": 21", "\"version\": 4294967297"), loaded).failed(),
+    require(sonora::ProjectIO::decode(json.replace("\"version\": 22", "\"version\": 4294967297"), loaded).failed(),
             "overflowed version accepted");
     require(sonora::ProjectIO::decode(json.replace("\"velocity\": 100", "\"velocity\": 0"), loaded).failed(),
             "zero velocity accepted");
@@ -1559,7 +1563,7 @@ void testFxPersistence()
     original.master.releaseMs = 120.0f;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 21"), "projects must save as v21");
+    require(json.contains("\"version\": 22"), "projects must save as v22");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "fx round-trip changed parameters");
 
@@ -1634,7 +1638,7 @@ void testTakePersistence()
     original.takes[1].mute = true;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 21"), "take projects must save as v21");
+    require(json.contains("\"version\": 22"), "take projects must save as v22");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "take round-trip changed metadata");
 
@@ -2120,7 +2124,7 @@ void testVariations()
     original.song.sections = 4;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 21"), "variation projects must save as v21");
+    require(json.contains("\"version\": 22"), "variation projects must save as v22");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "variation round-trip changed slots or indices");
 
@@ -2395,7 +2399,7 @@ void testKitPersistence()
     original.tracks[1].kitVariant = 1;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 21"), "kit projects must save as v21");
+    require(json.contains("\"version\": 22"), "kit projects must save as v22");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "kit round-trip changed pad samples");
     // Version 6 documents migrate to the built-in kit.
@@ -2683,6 +2687,8 @@ void testInstruments()
     int audibleCount = 0;
     for (int preset = 1; preset < static_cast<int>(sonora::instruments.size()); ++preset)
     {
+        if (!sonora::isBankInstrument(preset))
+            continue; // the Sampler needs a loaded file; see testSampler
         auto variant = project;
         variant.tracks[0].instrumentPreset = preset;
         const auto audio = render(variant, 40);
@@ -2692,7 +2698,10 @@ void testInstruments()
             ++audibleCount;
         require(audio != sine, "sampled preset rendered as the sine voice");
     }
-    require(audibleCount == static_cast<int>(sonora::instruments.size()) - 1, "a sampled preset is silent");
+    int bankPresets = 0;
+    for (std::size_t i = 1; i < sonora::instruments.size(); ++i)
+        bankPresets += sonora::isBankInstrument(static_cast<int>(i)) ? 1 : 0;
+    require(audibleCount == bankPresets, "a sampled preset is silent");
 
     // Every sampled preset plays the full piano roll: SoundFont key ranges
     // are octave-transposed into range instead of going silent.
@@ -2700,6 +2709,8 @@ void testInstruments()
     // table made an engine per pitch too slow for ctest's timeout).
     for (int preset = 1; preset < static_cast<int>(sonora::instruments.size()); ++preset)
     {
+        if (!sonora::isBankInstrument(preset))
+            continue;
         auto sweepEngine = std::make_unique<sonora::AudioEngine>();
         sweepEngine->prepare(48000.0);
         juce::AudioBuffer<float> sweepBuffer(2, 512);
@@ -2783,7 +2794,7 @@ void testInstruments()
     saved.tracks[2].instrumentPreset = 16;
     const auto json = sonora::ProjectIO::encode(saved);
     sonora::ProjectState loaded;
-    require(json.contains("\"version\": 21"), "instrument projects must save as v21");
+    require(json.contains("\"version\": 22"), "instrument projects must save as v22");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "instrument round-trip failed");
     auto legacy = juce::JSON::parse(json);
     legacy.getDynamicObject()->setProperty("version", 9);
@@ -2809,6 +2820,1215 @@ void testInstruments()
     auto invalid = saved;
     invalid.tracks[0].instrumentPreset = static_cast<int>(sonora::instruments.size());
     require(!invalid.valid(), "out-of-range preset validated");
+}
+
+// ---- Agent: actions, parameters, parsing ---------------------------------------------------
+void testAgentActions()
+{
+    using namespace sonora;
+    namespace ag = sonora::agent;
+    const std::vector<juce::String> library { "Drums/Kick 01.wav", "Pad swell.flac", "Vocal chop.wav" };
+    auto makeProject = [] { return std::make_unique<ProjectState>(fixture()); };
+    auto contextFor = [&](int selected = 0) {
+        ag::Context context;
+        context.selectedTrack = selected;
+        context.library = library;
+        return context;
+    };
+    // Runs model-style JSON through parse + apply, exactly as the app does.
+    auto act = [&](ProjectState& project, const char* json, const ag::Context& context) {
+        juce::StringArray errors;
+        const auto actions = ag::parseActions(juce::JSON::parse(json), errors);
+        return ag::applyActions(project, actions, context);
+    };
+    auto ok = [](const ag::Report& report, const char* what) {
+        require(report.failed.isEmpty(), (juce::String(what) + ": " + report.failed.joinIntoString(" | ")).toRawUTF8());
+    };
+
+    // ---- registry ----
+    {
+        const auto& specs = ag::parameters();
+        require(specs.size() >= 79, "parameter registry shrank");
+        std::set<juce::String> names;
+        for (const auto& spec : specs)
+            require(names.insert(spec.name).second, ("duplicate parameter " + spec.name).toRawUTF8());
+        require(ag::findParam("MIX.VOLUME") != nullptr && ag::findParam("nope") == nullptr, "param lookup wrong");
+        const auto reference = ag::describeParameters();
+        require(reference.contains("mix: volume[0..1.5, default 0.8]") && reference.contains("synth: wave[Sine/Triangle/Saw/Square/Pulse/Noise")
+                    && reference.contains("fx.eq:") && reference.contains("loop[on/off, default off]")
+                    && reference.contains("rootNote[0..127") && reference.contains("master:"),
+                "parameter reference for the prompt is incomplete");
+    }
+    {
+        // Every parameter, at both extremes, through the real action path, on
+        // an instrument track, a drum track, and project-wide: the project
+        // stays valid and nothing is rejected.
+        for (const auto& spec : ag::parameters())
+            for (const float extreme : { spec.min, spec.max })
+            {
+                for (int track : { 0, 1 })
+                {
+                    if (spec.perTrack && track == 1 && (spec.name.startsWith("synth.") || spec.name.startsWith("sampler.")))
+                        continue; // instrument-only parameters
+                    if (!spec.perTrack && track == 1)
+                        continue;
+                    auto project = makeProject();
+                    juce::DynamicObject::Ptr object = new juce::DynamicObject();
+                    object->setProperty("op", "set_param");
+                    object->setProperty("param", spec.name);
+                    object->setProperty("value", static_cast<double>(extreme));
+                    object->setProperty("track", track);
+                    juce::Array<juce::var> list;
+                    list.add(juce::var(object.get()));
+                    juce::StringArray errors;
+                    const auto actions = ag::parseActions(juce::var(list), errors);
+                    const auto report = ag::applyActions(*project, actions, contextFor());
+                    require(report.failed.isEmpty() && project->valid(),
+                            ("parameter extreme rejected: " + spec.name + " = " + juce::String(extreme)).toRawUTF8());
+                    require(std::abs(spec.get(*project, track) - extreme) < 1.0e-3f
+                                || spec.name.startsWith("sampler.start") || spec.name.startsWith("sampler.end")
+                                || spec.name.startsWith("sampler.loop"),
+                            ("parameter did not take its value: " + spec.name).toRawUTF8());
+                }
+            }
+    }
+
+    // ---- parsing hostile and sloppy input ----
+    {
+        juce::StringArray errors;
+        require(ag::parseActions(juce::var(), errors).empty(), "non-array parsed");
+        const auto parsed = ag::parseActions(juce::JSON::parse(
+            R"([ {"op":"set_tempo","value":99}, 5, "x", {"nope":1}, {"op":"set_param","track":"two"},
+                 {"op":"write_melody","track":0,"loop":"b","notes":[
+                     {"start":-50,"duration":999999,"pitch":300,"velocity":0},
+                     {"start":10,"pitch":"x"}, "junk", {"start":480,"duration":240,"pitch":64,"velocity":90}]},
+                 {"op":"write_drums","hits":[{"pad":99,"step":999,"velocity":500},{"pad":1}]},
+                 {"op":"set_automation","points":[{"tick":9e9,"value":0.5},{"tick":5,"value":"x"}]},
+                 {"op":"NOTHING_REAL"} ])"), errors);
+        require(parsed.size() == 5 && errors.size() == 4, "parse kept or dropped the wrong actions");
+        require(parsed[0].op == "set_tempo" && parsed[0].value && *parsed[0].value == 99.0, "value not parsed");
+        const auto& melody = parsed[1];
+        require(melody.loop == 1 && melody.hasNotes && melody.notes.size() == 2, "notes not sanitized by count");
+        require(melody.notes[0].start == 0 && melody.notes[0].pitch == 127 && melody.notes[0].velocity == 1
+                    && melody.notes[0].start + melody.notes[0].duration <= patternTicks,
+                "note not clamped");
+        require(parsed[2].hits.size() == 1 && parsed[2].hits[0].pad == 7 && parsed[2].hits[0].step == gridSteps - 1
+                    && parsed[2].hits[0].velocity == 127,
+                "hit not clamped");
+        require(parsed[3].points.size() == 1 && parsed[3].points[0].tick == patternTicks, "point not clamped");
+        std::string many = "[";
+        for (int i = 0; i < ag::maxActions + 30; ++i)
+            many += std::string(i ? "," : "") + R"({"op":"stop"})";
+        many += "]";
+        errors.clear();
+        require(static_cast<int>(ag::parseActions(juce::JSON::parse(many), errors).size()) == ag::maxActions
+                    && errors.size() == 1,
+                "action cap not enforced");
+    }
+
+    // ---- name parsers ----
+    require(ag::parsePitchClass("Bb") == 10 && ag::parsePitchClass("f#4") == 6 && ag::parsePitchClass("c") == 0
+                && ag::parsePitchClass("Cb") == 11 && !ag::parsePitchClass("H") && !ag::parsePitchClass(""),
+            "pitch class parsing wrong");
+    require(ag::parseScale("minor") == MusicScale::NaturalMinor && ag::parseScale("Blues") == MusicScale::Blues
+                && ag::parseScale("minor pentatonic") == MusicScale::MinorPentatonic && !ag::parseScale("lydian"),
+            "scale parsing wrong");
+    require(ag::parseChordType("m7") == ChordType::Min7 && ag::parseChordType("Major") == ChordType::Major
+                && ag::parseChordType("7") == ChordType::Dom7 && !ag::parseChordType("13"),
+            "chord parsing wrong");
+    require(ag::parseSongPart("pre-chorus") == SongPart::PreChorus && ag::parseSongPart("DROP") == SongPart::Drop
+                && !ag::parseSongPart("coda"),
+            "part parsing wrong");
+    require(ag::parseTemplate("Hip-hop") == SongTemplate::HipHop && ag::parseTemplate("edm") == SongTemplate::Edm
+                && !ag::parseTemplate("jazz"),
+            "template parsing wrong");
+    require(ag::parseAutomationTarget("send reverb") == AutomationTarget::SendReverb && !ag::parseAutomationTarget("x"),
+            "automation target parsing wrong");
+    require(ag::parseLoop("c") == 2 && ag::parseLoop("3") == 3 && ag::parseLoop("E") == -1 && ag::parseLoop("AB") == -1,
+            "loop parsing wrong");
+
+    // ---- sound resolution ----
+    {
+        auto name = [&](const char* text) {
+            const auto entry = ag::resolveSound(text, library);
+            return entry ? entry->name : juce::String("<none>");
+        };
+        require(name("Grand Piano") == "Grand Piano" && name("grand piano") == "Grand Piano", "exact sound not found");
+        require(name("alto sax") == "Alto Sax" && name("xylophone") == "Xylophone", "word match failed");
+        require(name("super saw") == "Super Saw" && name("Synth: Super Saw") == "Super Saw", "patch not found");
+        require(name("Sonora Synth") == "Sonora Synth (editable)" && name("synth") == "Sonora Synth (editable)",
+                "synth aliases wrong");
+        require(name("sine keys") == "Sine Keys", "an exact patch name must beat the synth alias");
+        require(name("kick 01") == "Drums/Kick 01.wav" && name("Sampler: Pad swell") == "Pad swell.flac",
+                "library sample not found by stem");
+        require(name("sampler") == "Sampler", "sampler instrument not found");
+        juce::StringArray suggestions;
+        require(!ag::resolveSound("flute zzz", library, &suggestions) && !suggestions.isEmpty(),
+                "no suggestions for a near miss");
+        require(!ag::resolveSound("", library), "empty sound resolved");
+    }
+
+    // ---- global settings ----
+    {
+        auto project = makeProject();
+        auto report = act(*project, R"([{"op":"set_tempo","value":999},{"op":"set_key","key":"Bb","scale":"minor"}])",
+                          contextFor());
+        ok(report, "tempo/key");
+        require(project->bpm == 240.0 && project->musicKey == 10 && project->musicScale == MusicScale::NaturalMinor
+                    && report.changed,
+                "tempo or key not applied");
+        report = act(*project, R"([{"op":"set_key","key":"H"},{"op":"set_tempo"},{"op":"set_key","key":"C","scale":"lydian"}])",
+                     contextFor());
+        require(report.failed.size() == 3 && report.done.isEmpty(), "bad global actions not all reported");
+        require(project->musicKey == 10, "failed set_key changed the key");
+    }
+
+    // ---- generic parameters ----
+    {
+        auto project = makeProject();
+        auto report = act(*project,
+            R"([{"op":"set_param","track":0,"param":"mix.volume","value":0.5},
+                {"op":"set_param","track":0,"param":"mix.mute","text":"on"},
+                {"op":"set_param","track":0,"param":"synth.wave","text":"Saw"},
+                {"op":"set_param","track":1,"param":"fx.reverb.mix","value":0.4},
+                {"op":"set_param","param":"sends.reverbReturn","value":9},
+                {"op":"set_param","param":"project.tempo","value":96}])", contextFor());
+        ok(report, "parameters");
+        require(project->tracks[0].mix.volume == 0.5f && project->tracks[0].mix.mute
+                    && project->tracks[0].synth.wave == WaveSaw && project->tracks[1].fx.reverb.mix == 0.4f
+                    && project->sends.reverbReturn == 1.5f && project->bpm == 96.0,
+                "parameters not applied or clamped");
+        report = act(*project,
+            R"([{"op":"set_param","track":1,"param":"synth.cutoff","value":900},
+                {"op":"set_param","param":"mix.volumee","value":1},
+                {"op":"set_param","param":"mix.pan"},
+                {"op":"set_param","track":0,"param":"synth.wave","text":"fuzzy"},
+                {"op":"set_param","track":7,"param":"mix.volume","value":1}])", contextFor());
+        require(report.failed.size() == 5, "bad parameter actions not all reported");
+        require(report.failed[1].contains("did you mean"), "no parameter suggestion");
+        // Omitted track: the selected track.
+        report = act(*project, R"([{"op":"set_param","param":"mix.pan","value":-0.5}])", contextFor(1));
+        require(project->tracks[1].mix.pan == -0.5f && project->tracks[0].mix.pan == 0.0f, "default track ignored");
+        // Sampler regions stay valid whatever order the model sets them in.
+        report = act(*project, R"([{"op":"set_param","track":0,"param":"sampler.start","value":0.9},
+                                   {"op":"set_param","track":0,"param":"sampler.end","value":0.2}])", contextFor());
+        ok(report, "sampler regions");
+        require(project->valid() && project->tracks[0].sampler.end > project->tracks[0].sampler.start, "regions inverted");
+        const auto changed = ag::describeChangedParameters(*project, 0);
+        require(changed.contains("mix.volume=0.5") && changed.contains("mix.mute=on") && changed.contains("synth.wave=Saw")
+                    && !changed.contains("sampler.") && !changed.contains("fx.reverb"),
+                "changed-parameter summary wrong");
+        require(ag::describeChangedParameters(*project, 1).contains("fx.reverb.mix=0.4")
+                    && !ag::describeChangedParameters(*project, 1).contains("synth."),
+                "drum track summary wrong");
+    }
+
+    // ---- tracks and sounds ----
+    {
+        auto project = makeProject();
+        auto report = act(*project,
+            R"([{"op":"add_track","kind":"synth","name":"Lead","instrument":"alto sax"},
+                {"op":"add_track","kind":"drums"},
+                {"op":"set_instrument","track":2,"instrument":"super saw"},
+                {"op":"add_track","kind":"synth","instrument":"kick 01"}])", contextFor());
+        ok(report, "tracks");
+        require(project->tracks[2].kind == TrackKind::Synth && project->tracks[2].trackName() == "Lead"
+                    && project->tracks[2].synth == synthPatches()[10].params && project->tracks[2].instrumentPreset == 0,
+                "new track or patch wrong");
+        require(project->tracks[3].kind == TrackKind::Drums && project->tracks[3].trackName() == "Drums 4",
+                "drum track wrong");
+    }
+    {
+        auto project = makeProject();
+        auto report = act(*project,
+            R"([{"op":"add_track","kind":"synth","instrument":"kick 01"},
+                {"op":"set_instrument","track":0,"instrument":"Violin"},
+                {"op":"set_instrument","track":0,"instrument":"zzzzqq"},
+                {"op":"set_instrument","track":1,"instrument":"Violin"},
+                {"op":"set_kit","track":1,"name":"Boom"},
+                {"op":"set_kit","track":0,"name":"Boom"},
+                {"op":"set_kit","track":1,"name":"Imaginary"}])", contextFor());
+        require(report.failed.size() == 4, "wrong failures for instrument/kit actions");
+        require(project->tracks[2].instrumentPreset == samplerInstrument
+                    && project->tracks[2].samplerFileName() == "Drums/Kick 01.wav"
+                    && project->tracks[2].trackName() == "Kick 01",
+                "sample sound not applied");
+        require(juce::String(instruments[static_cast<std::size_t>(project->tracks[0].instrumentPreset)].name) == "Violin",
+                "instrument not applied");
+        require(project->tracks[1].kitVariant == 4, "kit not applied");
+        require(report.failed[0].contains("closest") || report.failed[0].contains("no sound matches"),
+                "failed sound lacks guidance");
+        // Names follow instruments only when Sonora generated them.
+        project->tracks[0].setTrackName("My lead");
+        act(*project, R"([{"op":"set_instrument","track":0,"instrument":"Cello"}])", contextFor());
+        require(project->tracks[0].trackName() == "My lead", "custom name overwritten");
+        project->tracks[0].setTrackName("Cello");
+        act(*project, R"([{"op":"set_instrument","track":0,"instrument":"Harp"}])", contextFor());
+        require(project->tracks[0].trackName() == "Harp", "generated name did not follow");
+        // Capacity, rename, move, remove.
+        for (int i = 0; i < 8; ++i)
+            act(*project, R"([{"op":"add_track","kind":"synth"}])", contextFor());
+        int usable = 0;
+        for (const auto& track : project->tracks)
+            usable += track.kind != TrackKind::None ? 1 : 0;
+        require(usable == 8, "track cap not reached");
+        report = act(*project, R"([{"op":"add_track","kind":"drums"}])", contextFor());
+        require(report.failed.size() == 1 && report.failed[0].contains("8 tracks"), "9th track accepted");
+        report = act(*project,
+            R"([{"op":"rename_track","track":0,"name":"Bass\u0007 line"},{"op":"move_track","track":0,"to":1},
+                {"op":"remove_track","track":3},{"op":"add_track","kind":"drums","name":"Perc"}])", contextFor());
+        ok(report, "rename/move/remove");
+        require(project->tracks[1].trackName() == "Bass line" && project->tracks[3].trackName() == "Perc"
+                    && project->tracks[3].kind == TrackKind::Drums,
+                "rename/move/remove wrong (a new track takes the lowest free slot)");
+        // The last track can never be removed.
+        auto single = makeProject();
+        single->tracks[1] = Track {};
+        report = act(*single, R"([{"op":"remove_track","track":0}])", contextFor());
+        require(report.failed.size() == 1 && single->tracks[0].kind == TrackKind::Synth, "last track removed");
+    }
+
+    // ---- patterns ----
+    {
+        auto project = makeProject();
+        ag::Context context = contextFor();
+        context.loopSlot[0] = 2;
+        auto report = act(*project,
+            R"([{"op":"write_melody","track":0,"loop":"A","notes":[{"start":0,"duration":480,"pitch":60,"velocity":100},
+                                                                  {"start":240,"duration":480,"pitch":60,"velocity":90},
+                                                                  {"start":960,"duration":480,"pitch":64,"velocity":100}]},
+                {"op":"write_melody","track":0,"loop":"B","notes":[{"start":0,"duration":960,"pitch":67,"velocity":100}]},
+                {"op":"write_melody","track":0,"notes":[{"start":0,"duration":960,"pitch":72,"velocity":100}]},
+                {"op":"write_melody","track":0,"loop":"D","notes":[]},
+                {"op":"write_drums","track":1,"loop":"B","hits":[{"pad":0,"step":0,"velocity":110},{"pad":0,"step":0,"velocity":90},{"pad":2,"step":4}]},
+                {"op":"write_drums","track":0,"hits":[{"pad":0,"step":0}]},
+                {"op":"write_melody","track":1,"notes":[{"start":0,"pitch":60}]}])", context);
+        require(report.failed.size() == 2, "wrong failures writing patterns");
+        const auto& synth = project->tracks[0];
+        require(synth.melodies[0].count == 3 && synth.melodies[0].notes[0].start == 0
+                    && synth.melodies[0].notes[0].duration == 240 && synth.melodies[0].valid(),
+                "overlapping same-pitch notes not trimmed into a valid pattern");
+        require(synth.melodies[1].count == 1 && synth.melodies[1].notes[0].pitch == 67, "loop B not written");
+        require(synth.melodies[2].count == 1 && synth.melodies[2].notes[0].pitch == 72, "omitted loop did not use the context slot");
+        require(synth.melodies[3].count == 0, "empty notes did not clear");
+        require(project->tracks[1].drumPatterns[1].steps[0][0] == 110 && project->tracks[1].drumPatterns[1].hitCount() == 2,
+                "drum hits wrong (strongest velocity wins)");
+        // Edits.
+        report = act(*project,
+            R"([{"op":"copy_loop","track":0,"loop":"A","toLoop":"C"},
+                {"op":"transpose_loop","track":0,"loop":"C","value":12},
+                {"op":"transpose_loop","track":0,"loop":"B","value":100},
+                {"op":"velocity_ramp","track":0,"loop":"A","value":40,"value2":120},
+                {"op":"copy_loop","track":0,"loop":"A","toLoop":"A"},
+                {"op":"transpose_loop","track":0,"loop":"A"},
+                {"op":"clear_loop","track":1,"loop":"B"}])", context);
+        require(report.failed.size() == 2, "wrong failures editing patterns");
+        require(project->tracks[0].melodies[2].count == 3 && project->tracks[0].melodies[2].notes[0].pitch == 72,
+                "copy then transpose wrong");
+        require(project->tracks[0].melodies[1].notes[0].pitch == 67 + 48, "transpose shift not capped at 48 semitones");
+        act(*project, R"([{"op":"transpose_loop","track":0,"loop":"B","value":48}])", context);
+        require(project->tracks[0].melodies[1].notes[0].pitch == 127, "transpose did not clamp to MIDI range");
+        require(project->tracks[0].melodies[0].notes[0].velocity == 40 && project->tracks[0].melodies[0].notes[2].velocity == 120,
+                "velocity ramp wrong");
+        require(project->tracks[1].drumPatterns[1].hitCount() == 0, "clear_loop did not clear drums");
+        // Quantize pulls off-grid notes onto the grid; humanize is reproducible.
+        act(*project, R"([{"op":"write_melody","track":0,"loop":"A","notes":[{"start":200,"duration":240,"pitch":60,"velocity":100}]}])", context);
+        act(*project, R"([{"op":"quantize_loop","track":0,"loop":"A"}])", context);
+        require(project->tracks[0].melodies[0].notes[0].start == 240, "quantize did not snap");
+        auto a = std::make_unique<ProjectState>(*project), b = std::make_unique<ProjectState>(*project);
+        act(*a, R"([{"op":"humanize_loop","track":0,"loop":"C","value":0.8,"value2":0.8}])", context);
+        act(*b, R"([{"op":"humanize_loop","track":0,"loop":"C","value":0.8,"value2":0.8}])", context);
+        require(*a == *b && !(*a == *project), "humanize not reproducible or did nothing");
+        require(project->valid() && a->valid(), "pattern edits broke validity");
+    }
+
+    // ---- arrangement ----
+    {
+        auto project = makeProject();
+        act(*project, R"([{"op":"add_track","kind":"synth","name":"Bass"}])", contextFor());
+        auto report = act(*project,
+            R"([{"op":"set_song","sections":[
+                  {"part":"Intro","tracks":[{"track":0,"loop":"A"}]},
+                  {"part":"Verse","tracks":[{"track":0,"loop":"B"},{"track":1,"loop":"A"},{"track":2,"loop":"A"},{"track":5,"loop":"A"}],"chordKey":"A","chordType":"minor"},
+                  {"part":"Chorus","tracks":[{"track":0,"loop":"C"},{"track":1,"loop":"B"},{"track":2,"loop":"off"}],"chordKey":"F"},
+                  {"part":"???","tracks":[]}]}])", contextFor());
+        ok(report, "set_song");
+        const auto& song = project->song;
+        require(song.sections == 4 && song.parts[0] == SongPart::Intro && song.parts[2] == SongPart::Chorus
+                    && song.parts[3] == SongPart::Section,
+                "song sections wrong");
+        require(song.trackOn[0][0] && !song.trackOn[0][1] && song.trackOn[1][1] && song.slots[1][0] == 1
+                    && song.slots[2][0] == 2 && !song.trackOn[2][2] && !song.trackOn[3][0],
+                "song cells wrong (unlisted tracks must be silent)");
+        require(song.chords[1].root == 9 && song.chords[1].type == ChordType::Minor && song.chords[2].root == 5
+                    && !song.chords[0].set(),
+                "song chords wrong");
+        require(report.done[0].contains("ignoring 1"), "ignored track not mentioned");
+        report = act(*project,
+            R"([{"op":"set_part","section":0,"part":"Verse"},
+                {"op":"set_chord","section":0,"key":"G","chordType":"7"},
+                {"op":"set_chord","section":1,"key":"none"},
+                {"op":"set_cell","section":0,"track":1,"loop":"C"},
+                {"op":"set_cell","section":0,"track":0,"on":false},
+                {"op":"duplicate_section","section":0},
+                {"op":"move_section","section":0,"to":3},
+                {"op":"add_section"},
+                {"op":"remove_section","section":9},
+                {"op":"set_part","section":99,"part":"Verse"},
+                {"op":"set_part","section":0,"part":"coda"}])", contextFor());
+        require(report.failed.size() == 3, "wrong failures editing the arrangement");
+        require(project->song.sections == 6, "section add/duplicate wrong");
+        report = act(*project, R"([{"op":"apply_template","name":"edm"}])", contextFor());
+        ok(report, "template");
+        require(project->song.sections == 7 && project->song.parts[2] == SongPart::Drop, "template not applied");
+        report = act(*project, R"([{"op":"apply_template","name":"polka"},{"op":"set_song","sections":[]}])", contextFor());
+        require(report.failed.size() == 2 && project->song.sections == 7, "bad song/template changed the arrangement");
+        for (int i = 0; i < 12; ++i)
+            act(*project, R"([{"op":"add_section"}])", contextFor());
+        require(project->song.sections == maxSections, "section cap not enforced");
+        require(project->valid(), "arrangement edits broke validity");
+    }
+
+    // ---- automation, live FX, takes ----
+    {
+        auto project = makeProject();
+        project->takeCount = 1;
+        project->takes[0].id = 7;
+        project->takes[0].setFileName("take7.wav");
+        project->takes[0].frames = 4800;
+        std::string many = R"({"op":"set_automation","track":0,"loop":"B","target":"Volume","points":[{"tick":9999,"value":9})";
+        for (int i = 0; i < 40; ++i)
+            many += ",{\"tick\":" + std::to_string(i * 100) + ",\"value\":0.5}";
+        many += "]}";
+        auto report = act(*project, juce::String("[" + many + R"(,
+            {"op":"set_automation","track":1,"target":"Pan","points":[{"tick":0,"value":-1},{"tick":100,"value":1}]},
+            {"op":"set_automation","track":0,"target":"Bogus","points":[]},
+            {"op":"set_automation","track":0,"loop":"C","target":"Pan"},
+            {"op":"set_live_fx","track":0,"arp":"up-down","rate":"1/8T","value":2,"latch":true,"chordType":"min7"},
+            {"op":"set_live_fx","track":1,"arp":"Up"},
+            {"op":"set_live_fx","track":0,"arp":"sideways"},
+            {"op":"set_take","take":7,"param":"mute","on":true},
+            {"op":"set_take","take":7,"param":"stretch","value":9},
+            {"op":"set_take","take":7,"param":"gain","value":0.5},
+            {"op":"set_take","take":99,"param":"mute","on":true}])").toRawUTF8(), contextFor());
+        require(report.failed.size() == 5, ("wrong failures: " + report.failed.joinIntoString(" | ")).toRawUTF8());
+        const auto& volume = project->tracks[0].automation[1][static_cast<std::size_t>(AutomationTarget::Volume)];
+        require(volume.count == maxAutomationPoints && volume.valid(), "automation not capped or sorted");
+        for (int i = 0; i < volume.count; ++i)
+            require(volume.points[static_cast<std::size_t>(i)].value <= 1.5f, "automation value not clamped");
+        const auto& pan = project->tracks[1].automation[0][static_cast<std::size_t>(AutomationTarget::Pan)];
+        require(pan.count == 2 && pan.points[0].value == -1.0f && pan.points[1].value == 1.0f, "pan lane wrong");
+        const auto& fx = project->tracks[0].liveFx;
+        require(fx.arp == ArpMode::UpDown && fx.rate == ArpRate::EighthTriplet && fx.octaves == 2 && fx.latch
+                    && fx.chordOn && fx.chord == ChordType::Min7,
+                "live FX wrong");
+        require(project->takes[0].mute && project->takes[0].stretch == 2.0f && project->takes[0].gain == 0.5f,
+                "take settings wrong");
+        report = act(*project, R"([{"op":"clear_automation","track":0,"loop":"B","target":"volume"},
+                                   {"op":"clear_automation","track":1}])", contextFor());
+        ok(report, "clear automation");
+        require(project->tracks[0].automation[1][0].count == 0 && pan.count == 0, "automation not cleared");
+    }
+
+    // ---- app effects and the sole-action rule ----
+    {
+        auto project = makeProject();
+        auto report = act(*project,
+            R"([{"op":"play","section":2},{"op":"set_view","view":"Sound editor"},{"op":"select_track","track":1},
+                {"op":"set_view","view":"hologram"},{"op":"select_track","track":6},{"op":"edit_section","section":0},
+                {"op":"save_project"},{"op":"export_audio"},{"op":"stop"},{"op":"panic"},{"op":"undo"}])", contextFor());
+        require(report.effects.size() == 8 && report.failed.size() == 3, "app effects or failures wrong");
+        require(report.effects[0].kind == ag::UiEffect::Kind::Play && report.effects[0].number == 2
+                    && report.effects[1].kind == ag::UiEffect::Kind::SetView && report.effects[1].text == "soundeditor",
+                "effects out of order");
+        require(!report.changed, "app effects changed the project");
+        report = act(*project, R"([{"op":"undo"}])", contextFor());
+        require(report.failed.isEmpty() && report.effects.size() == 1 && report.effects[0].kind == ag::UiEffect::Kind::Undo,
+                "sole undo refused");
+        report = act(*project, R"([{"op":"new_project"}])", contextFor());
+        require(report.effects.size() == 1 && report.effects[0].kind == ag::UiEffect::Kind::NewProject, "sole new_project refused");
+        report = act(*project, R"([{"op":"set_tempo","value":100},{"op":"new_project"}])", contextFor());
+        require(report.failed.size() == 1 && project->bpm == 100.0 && report.effects.empty(),
+                "new_project allowed alongside other actions");
+        report = act(*project, R"([{"op":"teleport"}])", contextFor());
+        require(report.failed.size() == 1 && report.failed[0].contains("unknown action"), "unknown op not reported");
+        // An empty or failing batch leaves the project untouched and says so.
+        auto before = std::make_unique<ProjectState>(*project);
+        report = act(*project, R"([])", contextFor());
+        require(!report.changed && *project == *before, "empty batch changed the project");
+    }
+
+    // ---- a whole request, in order: new track, its sound, four loops, a song ----
+    {
+        auto project = makeProject();
+        auto report = act(*project,
+            R"([{"op":"add_track","kind":"synth","name":"Hook","instrument":"Vibraphone"},
+                {"op":"write_melody","track":2,"loop":"A","notes":[{"start":0,"duration":960,"pitch":72,"velocity":100}]},
+                {"op":"write_melody","track":2,"loop":"B","notes":[{"start":0,"duration":960,"pitch":74,"velocity":100}]},
+                {"op":"write_melody","track":2,"loop":"C","notes":[{"start":0,"duration":960,"pitch":76,"velocity":100}]},
+                {"op":"write_melody","track":2,"loop":"D","notes":[{"start":0,"duration":960,"pitch":79,"velocity":100}]},
+                {"op":"set_song","sections":[{"part":"Verse","tracks":[{"track":2,"loop":"A"}]},
+                                              {"part":"Chorus","tracks":[{"track":2,"loop":"D"},{"track":1,"loop":"A"}]}]},
+                {"op":"set_param","track":2,"param":"mix.sendReverb","value":0.5}])", contextFor());
+        ok(report, "whole request");
+        require(report.done.size() == 7 && project->valid() && report.changed
+                    && project->tracks[2].melodies[3].notes[0].pitch == 79 && project->song.sections == 2
+                    && project->tracks[2].mix.sendReverb == 0.5f,
+                "a multi-step request did not land as one coherent edit");
+        // And it survives a save/load round-trip.
+        auto loaded = std::make_unique<ProjectState>();
+        require(ProjectIO::decode(ProjectIO::encode(*project), *loaded).wasOk() && *loaded == *project,
+                "agent-built project did not round-trip");
+    }
+}
+
+// ---- Agent: prompt, schema, context, and the full pipeline -------------------------------------
+void testAgentPipeline()
+{
+    using namespace sonora;
+    namespace ai = sonora::ai;
+    namespace ag = sonora::agent;
+
+    // The schema, the prompt, and the executor must agree on the set of actions.
+    const auto schema = juce::JSON::parse(ai::agentSchema());
+    require(schema.getDynamicObject() != nullptr, "agent schema is not JSON");
+    const auto* ops = schema.getProperty("properties", {}).getProperty("actions", {}).getProperty("items", {})
+                          .getProperty("properties", {}).getProperty("op", {}).getProperty("enum", {}).getArray();
+    require(ops != nullptr && ops->size() >= 40, "schema lost its action list");
+    const auto prompt = ai::agentSystemPrompt();
+    for (const auto& op : *ops)
+    {
+        const auto name = op.toString();
+        require(prompt.contains(name), ("action missing from the prompt: " + name).toRawUTF8());
+        // The executor knows it: whatever else goes wrong, never "unknown action".
+        auto project = std::make_unique<ProjectState>(fixture());
+        ag::Action action;
+        action.op = name;
+        const auto report = ag::applyActions(*project, { action }, ag::Context {});
+        for (const auto& failure : report.failed)
+            require(!failure.contains("unknown action"), ("schema action the executor does not know: " + name).toRawUTF8());
+    }
+    {
+        // The reverse: every op the executor handles is offered in the schema.
+        juce::StringArray offered;
+        for (const auto& op : *ops)
+            offered.add(op.toString());
+        for (const char* known : { "set_tempo", "set_param", "write_melody", "write_drums", "set_song", "set_instrument",
+                                   "set_automation", "set_live_fx", "set_take", "play", "undo", "take_to_sampler" })
+            require(offered.contains(known), ("executor action not offered to the model: " + juce::String(known)).toRawUTF8());
+    }
+    // The prompt is the model's whole manual: it must teach every capability.
+    for (const char* phrase : { "ONE undo step", "Soprano Sax", "Super Saw", "Starter, Deep, Crisp, Tight, Boom, Warm",
+                                "mix: volume[0..1.5", "sampler.", "synth.cutoff", "Write N melodies", "960 ticks per quarter",
+                                "pad", "only ever as the single action", "ONLY if the producer explicitly asks to record" })
+        require(prompt.contains(phrase), ("prompt is missing: " + juce::String(phrase)).toRawUTF8());
+    for (const auto& character : prompt)
+        require(character < 0x80, "prompt contains a non-ASCII character");
+
+    // Sandbox: no tools, no MCP, no settings; schema and prompt travel as arguments.
+    const auto args = ai::agentArguments();
+    require(args.indexOf("--tools") >= 0 && args[args.indexOf("--tools") + 1].isEmpty() && args.contains("--strict-mcp-config")
+                && args.contains("--no-session-persistence") && args.contains("--json-schema"),
+            "agent not sandboxed");
+
+    // ---- the context the model sees ----
+    auto request = std::make_unique<ai::AgentRequest>();
+    request->project = fixture();
+    auto& project = request->project;
+    project.tracks[1].setTrackName("Beat");
+    project.song.sections = 2;
+    project.song.parts[1] = SongPart::Chorus;
+    project.song.chords[1] = { 9, ChordType::Minor };
+    project.musicKey = 2;
+    project.musicScale = MusicScale::Dorian;
+    project.tracks[0].synth.cutoff = 900.0f;
+    project.tracks[0].liveFx.arp = ArpMode::Up;
+    auto& lane = project.tracks[0].automation[0][static_cast<std::size_t>(AutomationTarget::Volume)];
+    lane.count = 2;
+    lane.points[0] = { 0, 0.5f };
+    lane.points[1] = { 7680, 1.0f };
+    project.takeCount = 1;
+    project.takes[0].id = 3;
+    project.takes[0].setFileName("take3.wav");
+    project.takes[0].frames = 96000;
+    project.takes[0].mute = true;
+    request->selectedTrack = 1;
+    request->loopSlot[0] = 2;
+    request->message = "Make it \x01" "bounce\x07" " more"; // split: \x01b would be one hex escape
+    request->library = { "Drums/Kick 01.wav", "Pad swell.flac" };
+    request->history = { { true, "earlier idea" }, { false, "earlier reply" } };
+    const auto message = ai::buildAgentMessage(*request);
+    for (const char* phrase : { "Tempo 123 BPM", "Key: D Dorian", "View: Loop", "Stopped.", "Selected track: 1 \"Beat\"",
+                                "The next add_track will be track 2", "Track 0 \"Sine Keys\" - instrument track",
+                                "Track 1 \"Beat\" - drum track: kit Starter", "Showing loop C", "synth.cutoff=900",
+                                "Live play: arp Up", "Loop A [", "start=0 dur=960 pitch=60", "(empty)",
+                                "1. Chorus [chord Am]", "AUTOMATION", "track 0 loop A Volume: 0:0.50 7680:1.00",
+                                "take 3: starts bar 1", "muted", "Drums/Kick 01.wav", "Producer: earlier idea",
+                                "You: earlier reply", "Make it bounce more" })
+        require(message.contains(phrase), ("agent context is missing: " + juce::String(phrase)).toRawUTF8());
+    require(!message.contains("\x01") && !message.contains("\x07"), "control characters leaked into the agent context");
+    request->project.takeCount = 0;
+    request->playing = true;
+    request->songView = true;
+    request->editPart = 1;
+    require(ai::buildAgentMessage(*request).contains("View: Song") && ai::buildAgentMessage(*request).contains("Playing."),
+            "view and transport state missing");
+    // Long loops: the selected track is listed in full, the others are capped.
+    for (int t : { 0, 1 })
+        project.tracks[static_cast<std::size_t>(t)].kind = TrackKind::Synth;
+    project.tracks[1].id = 2;
+    for (int t : { 0, 1 })
+    {
+        auto& loop = project.tracks[static_cast<std::size_t>(t)].melodies[0];
+        loop = {};
+        loop.count = 100;
+        for (int i = 0; i < 100; ++i)
+            loop.notes[static_cast<std::size_t>(i)] = { static_cast<std::uint32_t>(i + 1), i * 120, 60, 40 + i % 30, 90 };
+    }
+    request->selectedTrack = 0;
+    {
+        const auto longMessage = ai::buildAgentMessage(*request);
+        require(longMessage.contains("(+52 more notes"), "unselected track not capped");
+        require(!longMessage.substring(0, longMessage.indexOf("Track 1")).contains("more notes"),
+                "selected track was truncated");
+    }
+    // A completely full project still produces a bounded message.
+    for (int t = 0; t < maxTracks; ++t)
+    {
+        auto& track = project.tracks[static_cast<std::size_t>(t)];
+        track.id = static_cast<std::uint32_t>(t + 1);
+        track.kind = TrackKind::Synth;
+        track.setTrackName("Track " + juce::String(t));
+        for (auto& loop : track.melodies)
+        {
+            loop = {};
+            loop.count = Pattern::capacity;
+            for (int i = 0; i < Pattern::capacity; ++i)
+                loop.notes[static_cast<std::size_t>(i)] = { static_cast<std::uint32_t>(i + 1), i * 60, 60, 30 + i % 60, 90 };
+        }
+    }
+    require(ai::buildAgentMessage(*request).length() < ai::maxContextChars + 40000, "agent context is not bounded");
+
+    // ---- parsing the model's reply ----
+    auto envelope = [](const juce::String& body, bool structured = true) {
+        return structured ? "{\"is_error\":false,\"result\":\"\",\"structured_output\":" + body + "}"
+                          : "{\"is_error\":false,\"result\":" + juce::JSON::toString(juce::var("```json\n" + body + "\n```")) + "}";
+    };
+    {
+        const auto body = R"({"reply":"Done: a tempo change.","actions":[{"op":"set_tempo","value":90},{"nope":1},{"op":"stop"}]})";
+        const auto parsed = ai::parseAgentResponse(envelope(body));
+        require(parsed.ok() && parsed.reply == "Done: a tempo change." && parsed.actions.size() == 2
+                    && parsed.unreadable.size() == 1,
+                "structured reply parsed wrong");
+        const auto fenced = ai::parseAgentResponse(envelope(body, false));
+        require(fenced.ok() && fenced.actions.size() == 2, "fenced fallback parse failed");
+        const auto question = ai::parseAgentResponse(envelope(R"({"reply":"Which track?","actions":[]})"));
+        require(question.ok() && question.actions.empty(), "a question reply was rejected");
+        require(!ai::parseAgentResponse(envelope(R"({"reply":"","actions":[]})")).ok(), "empty reply accepted");
+        require(!ai::parseAgentResponse("not json at all").ok(), "garbage accepted");
+        const auto failed = ai::parseAgentResponse(R"({"is_error":true,"result":"Rate limited"})");
+        require(!failed.ok() && failed.error.contains("Rate limited"), "CLI error not surfaced");
+        const auto clean = ai::parseAgentResponse(envelope("{\"reply\":\"ok\\u0007 now\",\"actions\":[]}"));
+        require(clean.ok() && clean.reply == "ok now", "control characters leaked into the reply");
+    }
+
+    // ---- a model reply, end to end: four melodies, a sound, a song, a mix move ----
+    {
+        juce::String notes[4];
+        const int roots[4] { 72, 74, 76, 79 };
+        for (int i = 0; i < 4; ++i)
+            notes[i] = "[{\"start\":0,\"duration\":960,\"pitch\":" + juce::String(roots[i])
+                + ",\"velocity\":100},{\"start\":1920,\"duration\":480,\"pitch\":" + juce::String(roots[i] + 4)
+                + ",\"velocity\":90}]";
+        const juce::String body = R"({"reply":"Added a vibraphone hook with four variations and arranged it.","actions":[)"
+            R"({"op":"add_track","kind":"synth","name":"Hook","instrument":"Vibraphone"},)"
+            R"({"op":"write_melody","track":2,"loop":"A","notes":)" + notes[0] + "},"
+            R"({"op":"write_melody","track":2,"loop":"B","notes":)" + notes[1] + "},"
+            R"({"op":"write_melody","track":2,"loop":"C","notes":)" + notes[2] + "},"
+            R"({"op":"write_melody","track":2,"loop":"D","notes":)" + notes[3] + "},"
+            R"({"op":"set_song","sections":[{"part":"Verse","tracks":[{"track":2,"loop":"A"},{"track":1,"loop":"A"}]},)"
+            R"({"part":"Chorus","tracks":[{"track":2,"loop":"D"},{"track":1,"loop":"A"}],"chordKey":"A","chordType":"minor"}]},)"
+            R"({"op":"set_param","track":2,"param":"mix.sendReverb","value":0.45},{"op":"play"}]})";
+        const auto parsed = ai::parseAgentResponse(envelope(body));
+        require(parsed.ok() && parsed.actions.size() == 8, "end-to-end reply did not parse");
+        auto live = std::make_unique<ProjectState>(fixture());
+        ag::Context context;
+        context.library = { "Pad swell.flac" };
+        const auto report = ag::applyActions(*live, parsed.actions, context);
+        require(report.failed.isEmpty() && report.done.size() == 8 && report.effects.size() == 1
+                    && report.effects[0].kind == ag::UiEffect::Kind::Play,
+                ("end-to-end apply: " + report.failed.joinIntoString(" | ")).toRawUTF8());
+        require(live->valid() && live->tracks[2].trackName() == "Hook" && live->song.sections == 2
+                    && live->tracks[2].melodies[3].notes[0].pitch == 79 && live->tracks[2].mix.sendReverb == 0.45f,
+                "end-to-end project wrong");
+        for (int slot = 0; slot < 4; ++slot)
+            require(live->tracks[2].melodies[static_cast<std::size_t>(slot)].count == 2, "a melody loop is missing");
+    }
+
+    // Opt-in: the real model, with its own switch so the other live tests stay quiet.
+    if (juce::SystemStats::getEnvironmentVariable("SONORA_LIVE_AGENT", {}) == "1")
+    {
+        auto live = std::make_unique<ai::AgentRequest>();
+        live->project = fixture();
+        live->project.musicKey = 9;
+        live->project.musicScale = MusicScale::NaturalMinor;
+        live->message = "Add a vibraphone track called Hook and write four different 4-bar melodies on it in the "
+                        "project key (A minor), then arrange a verse and a chorus that use them. Make the reverb "
+                        "send on the Hook track bigger.";
+        live->library = { "Drums/Kick 01.wav" };
+        const auto started = juce::Time::getMillisecondCounterHiRes();
+        const auto answer = ai::runAgent(*live, nullptr);
+        std::cout << "LIVE agent: " << (answer.ok() ? "ok" : answer.error) << " in "
+                  << juce::String((juce::Time::getMillisecondCounterHiRes() - started) / 1000.0, 1) << " s, "
+                  << answer.actions.size() << " actions\n  reply: " << answer.reply << "\n";
+        require(answer.ok() && !answer.actions.empty(), "live agent failed");
+        ag::Context context;
+        context.library = live->library;
+        auto project2 = std::make_unique<ProjectState>(live->project);
+        const auto report = ag::applyActions(*project2, answer.actions, context);
+        for (const auto& line : report.done)
+            std::cout << "    done: " << line << "\n";
+        for (const auto& line : report.failed)
+            std::cout << "    FAILED: " << line << "\n";
+        int hookLoops = 0;
+        for (const auto& track : project2->tracks)
+            if (track.kind == TrackKind::Synth && track.trackName().containsIgnoreCase("hook"))
+                for (const auto& loop : track.melodies)
+                    hookLoops += loop.count > 0 ? 1 : 0;
+        require(project2->valid() && hookLoops >= 3 && project2->song.sections >= 2,
+                "live agent did not build what was asked");
+    }
+}
+
+// ---- Instrument picker: search and favorites ------------------------------------
+void testInstrumentSearch()
+{
+    using namespace sonora;
+    const std::vector<juce::String> library { "Drums/Kick 01.wav", "Pad swell.flac", "Vocal chop.wav" };
+    const auto entries = buildPickerEntries(library);
+    require(entries.size() == instruments.size() + synthPatches().size() + library.size(), "picker entry count wrong");
+    {
+        std::set<juce::String> keys;
+        for (const auto& entry : entries)
+            require(keys.insert(entry.key).second, ("duplicate picker key: " + entry.key).toRawUTF8());
+    }
+    auto namesOf = [&](const std::vector<PickerRow>& rows) {
+        juce::StringArray names;
+        for (const auto& row : rows)
+            if (!row.header)
+                names.add(entries[static_cast<std::size_t>(row.entry)].name);
+        return names;
+    };
+    Favorites none;
+
+    // No query: every entry exactly once, grouped under family headings.
+    {
+        const auto rows = pickerRows(entries, "", none, false);
+        int items = 0, headers = 0;
+        for (const auto& row : rows)
+            (row.header ? headers : items) += 1;
+        require(items == static_cast<int>(entries.size()), "browse view dropped entries");
+        require(rows.front().header && rows.front().title == "Synth", "first group is not the synth");
+        require(headers >= 10, "family headings missing");
+        require(pickerRows(entries, "   ", none, false).size() == rows.size(), "blank query not treated as browse");
+    }
+    // Ranking: names beat families, prefixes beat later words.
+    require(namesOf(pickerRows(entries, "violin", none, false))[0] == "Violin", "violin not first");
+    require(namesOf(pickerRows(entries, "grand piano", none, false))[0] == "Grand Piano", "grand piano not first");
+    require(namesOf(pickerRows(entries, "alto sax", none, false))[0] == "Alto Sax", "alto sax not first");
+    require(namesOf(pickerRows(entries, "SAX", none, false)).size() == 4, "search is not case-insensitive");
+    {
+        const auto bass = namesOf(pickerRows(entries, "synth bass", none, false));
+        require(bass.contains("Synth Bass") && bass.contains("Synth Bass 2") && !bass.contains("Fingered Bass"),
+                "every word must match");
+        const auto pads = namesOf(pickerRows(entries, "pad", none, false));
+        require(pads.contains("Warm Pad") && pads.contains("Halo Pad") && pads.contains("Dream Pad")
+                    && pads.contains("Pad swell.flac"),
+                "pad search misses patches, instruments, or samples");
+        // A family heading alone is enough to find its members.
+        require(namesOf(pickerRows(entries, "woodwind", none, false)).size() == 11, "family search wrong");
+        require(namesOf(pickerRows(entries, "my samples", none, false)).size() == 3, "library not searchable by group");
+    }
+    require(pickerRows(entries, "zzzzqq", none, false).empty(), "nonsense query returned rows");
+    {
+        // Results come back in a "Results" group, never duplicated.
+        const auto rows = pickerRows(entries, "sax", none, false);
+        require(rows.front().header && rows.front().title == "Results", "results heading missing");
+    }
+
+    // Favorites: a section on top, no duplicates in results, favorites-only filter.
+    Favorites stars;
+    require(stars.toggle(instrumentKey(1)) && stars.toggle(patchKey("Super Saw")) && stars.size() == 2,
+            "favorite toggle failed");
+    require(stars.has(instrumentKey(1)) && !stars.has(instrumentKey(2)), "favorite lookup wrong");
+    {
+        const auto rows = pickerRows(entries, "", stars, false);
+        require(rows.front().header && rows.front().title == "Favorites", "favorites section missing");
+        require(namesOf({ rows.begin() + 1, rows.begin() + 3 }).size() == 2, "favorites rows wrong");
+        const auto only = pickerRows(entries, "", stars, true);
+        require(only.size() == 3, "favorites-only showed more than the favorites");
+        const auto filtered = namesOf(pickerRows(entries, "saw", stars, true));
+        require(filtered.size() == 1 && filtered[0] == "Super Saw", "favorites-only ignored the query");
+        // Searching: the favorite is listed once, in the Favorites group.
+        const auto searched = namesOf(pickerRows(entries, "saw", stars, false));
+        int count = 0;
+        for (const auto& name : searched)
+            count += name == "Super Saw" ? 1 : 0;
+        require(count == 1, "favorite duplicated in search results");
+        require(pickerRows(entries, "", none, true).empty(), "favorites-only with none returned rows");
+    }
+    require(!stars.toggle(instrumentKey(1)) && !stars.has(instrumentKey(1)), "unstar failed");
+    {
+        Favorites capped;
+        for (int i = 0; i < Favorites::maxEntries + 20; ++i)
+            capped.toggle("sample:" + juce::String(i));
+        require(capped.size() == Favorites::maxEntries, "favorites not capped");
+        require(!capped.toggle(juce::String::repeatedString("x", Favorites::maxKeyLength + 1)), "overlong key accepted");
+        require(!capped.toggle({}), "empty key accepted");
+    }
+
+    // Persistence: round-trip, missing file, damaged file, hostile entries.
+    {
+        const auto dir = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                             .getNonexistentChildFile("sonora-favorites-test", "");
+        require(dir.createDirectory().wasOk(), "favorites dir failed");
+        const auto file = dir.getChildFile("config/favorites.json");
+        Favorites saved;
+        saved.toggle(instrumentKey(3));
+        saved.toggle(sampleKey("Drums/Kick 01.wav"));
+        require(saved.save(file).wasOk() && file.existsAsFile(), "favorites save failed");
+        Favorites loaded;
+        require(loaded.load(file).wasOk() && loaded == saved, "favorites did not round-trip");
+        Favorites missing;
+        missing.toggle("keep");
+        require(missing.load(dir.getChildFile("nope.json")).wasOk() && missing.has("keep"),
+                "missing favorites file disturbed state");
+        file.replaceWithText("{ this is not json");
+        Favorites damaged;
+        damaged.toggle("keep");
+        require(damaged.load(file).failed() && damaged.has("keep") && damaged.size() == 1,
+                "damaged file half-applied");
+        file.replaceWithText(R"({"version":1,"favorites":["ok", 5, null, {"a":1}, ""]})");
+        Favorites mixed;
+        require(mixed.load(file).wasOk() && mixed.size() == 1 && mixed.has("ok"), "non-string entries not ignored");
+        file.replaceWithText(R"({"version":1})");
+        require(Favorites().load(file).failed(), "file without a list accepted");
+        require(dir.deleteRecursively(), "favorites cleanup failed");
+    }
+
+    // Display names come from string work (a relative path must never become a juce::File).
+    require(sampleDisplayName("Drums/Kick 01.wav") == "Kick 01" && sampleDisplayName("a.b.flac") == "a.b"
+                && sampleDisplayName("noext") == "noext" && sampleDisplayName("x/y/z") == "z"
+                && sampleDisplayName("kick.WAV") == "kick" && sampleDisplayName("").isEmpty(),
+            "sample display name wrong");
+
+    // The button and the list agree on what a track is playing.
+    {
+        auto track = std::make_unique<Track>();
+        track->kind = TrackKind::Synth;
+        require(currentPickerKey(*track) == patchKey("Sine Keys") && describeTrackInstrument(*track) == "Synth: Sine Keys",
+                "default synth not recognised as its patch");
+        track->synth.cutoff = 900.0f;
+        require(currentPickerKey(*track) == instrumentKey(0) && describeTrackInstrument(*track) == "Sonora Synth (custom)",
+                "edited synth not reported as custom");
+        track->synth = synthPatches()[10].params;
+        require(currentPickerKey(*track) == patchKey(synthPatches()[10].name), "factory patch not recognised");
+        track->instrumentPreset = 1;
+        require(currentPickerKey(*track) == instrumentKey(1) && describeTrackInstrument(*track) == "Grand Piano",
+                "bank instrument name wrong");
+        track->instrumentPreset = samplerInstrument;
+        require(describeTrackInstrument(*track) == "Sampler (no sound yet)"
+                    && currentPickerKey(*track) == instrumentKey(samplerInstrument),
+                "empty sampler described wrong");
+        track->setSamplerFileName("Drums/Kick 01.wav");
+        require(describeTrackInstrument(*track) == "Sampler: Kick 01"
+                    && currentPickerKey(*track) == sampleKey("Drums/Kick 01.wav"),
+                "loaded sampler described wrong");
+    }
+}
+
+// ---- Sampler -------------------------------------------------------------
+// ProjectState is ~300 KB: every state in these tests lives on the heap.
+void writeToneWav(const juce::File& file, double hz, double seconds, double rate, int channels,
+                  double decayPerSecond = 0.0, bool noise = false)
+{
+    juce::WavAudioFormat format;
+    std::unique_ptr<juce::AudioFormatWriter> writer(format.createWriterFor(
+        new juce::FileOutputStream(file), rate, static_cast<unsigned int>(channels), 24, {}, 0));
+    require(writer != nullptr, "tone fixture writer failed");
+    const int frames = static_cast<int>(seconds * rate);
+    juce::AudioBuffer<float> buffer(channels, frames);
+    std::uint32_t state = 12345u;
+    for (int i = 0; i < frames; ++i)
+    {
+        const double time = i / rate;
+        float value = 0.0f;
+        if (noise)
+        {
+            state = state * 1664525u + 1013904223u;
+            value = static_cast<float>(state >> 8) / 8388608.0f - 1.0f;
+        }
+        else
+            value = static_cast<float>(std::sin(juce::MathConstants<double>::twoPi * hz * time));
+        value *= static_cast<float>(std::exp(-decayPerSecond * time));
+        for (int c = 0; c < channels; ++c)
+            buffer.setSample(c, i, c == 0 ? value : -value);
+    }
+    require(writer->writeFromAudioSampleBuffer(buffer, 0, frames), "tone fixture samples failed");
+}
+
+double crossingRate(const std::vector<float>& audio, int from, int to, double rate)
+{
+    int crossings = 0;
+    for (int i = from + 1; i < to; ++i)
+        if ((audio[static_cast<std::size_t>(i - 1)] < 0.0f) != (audio[static_cast<std::size_t>(i)] < 0.0f))
+            ++crossings;
+    return crossings / ((to - from) / rate) / 2.0; // Hz
+}
+
+double windowEnergy(const std::vector<float>& audio, int from, int to)
+{
+    double sum = 0.0;
+    for (int i = from; i < to; ++i)
+        sum += static_cast<double>(audio[static_cast<std::size_t>(i)]) * audio[static_cast<std::size_t>(i)];
+    return sum / std::max(1, to - from);
+}
+
+void testSampler()
+{
+    using sonora::ProjectState;
+    using sonora::SamplerParams;
+
+    // ---- params and names ----
+    require(SamplerParams {}.valid(), "default sampler params rejected");
+    {
+        SamplerParams bad;
+        bad.rootNote = 128;
+        require(!bad.valid(), "root 128 validated");
+        bad = {};
+        bad.end = 0.0f;
+        require(!bad.valid(), "empty region validated");
+        bad = {};
+        bad.loopEnd = bad.loopStart;
+        require(!bad.valid(), "empty loop validated");
+        bad = {};
+        bad.tune = 250.0f;
+        require(!bad.valid(), "wild tune validated");
+        bad = {};
+        bad.gain = std::nanf("");
+        require(!bad.valid(), "NaN gain validated");
+    }
+    for (const char* good : { "kick.wav", "Drums/Kick 01.wav", "a..b.wav", "x/y/z.flac" })
+        require(sonora::isSafeSampleName(good), "safe sample name rejected");
+    for (const char* bad : { "", "/etc/passwd", "../x.wav", "a/../b.wav", "a/..", "..", "C:\\x.wav", "a\\b.wav" })
+        require(!sonora::isSafeSampleName(bad), ("unsafe sample name accepted: " + juce::String(bad)).toRawUTF8());
+
+    // ---- fixtures ----
+    const auto dir = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                         .getNonexistentChildFile("sonora-sampler-test", "");
+    require(dir.createDirectory().wasOk(), "sampler test dir failed");
+    writeToneWav(dir.getChildFile("a440.wav"), 440.0, 1.0, 44100.0, 1);
+    writeToneWav(dir.getChildFile("c4.wav"), 261.6256, 1.0, 48000.0, 1);
+    writeToneWav(dir.getChildFile("short.wav"), 440.0, 0.2, 48000.0, 1);
+    writeToneWav(dir.getChildFile("decay.wav"), 440.0, 1.0, 48000.0, 1, 6.0);
+    writeToneWav(dir.getChildFile("stereo.wav"), 440.0, 0.5, 48000.0, 2);
+    writeToneWav(dir.getChildFile("noise.wav"), 0.0, 1.0, 48000.0, 1, 0.0, true);
+
+    // ---- loader ----
+    const auto tone = sonora::loadSampleData(dir.getChildFile("a440.wav"));
+    require(tone != nullptr && tone->valid() && tone->channels == 1 && tone->frames == 44100
+                && std::abs(tone->rate - 44100.0) < 0.5,
+            "tone did not load at its own rate");
+    float peak = 0.0f;
+    for (const auto v : tone->channel[0])
+        peak = std::max(peak, std::abs(v));
+    require(std::abs(peak - 0.9f) < 0.01f, "sample not normalized to 0.9");
+    const auto stereo = sonora::loadSampleData(dir.getChildFile("stereo.wav"));
+    require(stereo != nullptr && stereo->channels == 2 && !stereo->channel[1].empty()
+                && stereo->channel[1][100] == -stereo->channel[0][100],
+            "stereo sample lost its channels");
+    require(sonora::loadSampleData(dir.getChildFile("missing.wav")) == nullptr, "missing file loaded");
+    {
+        std::atomic<bool> cancel { true };
+        require(sonora::loadSampleData(dir.getChildFile("a440.wav"), &cancel) == nullptr,
+                "cancelled load returned data");
+        dir.getChildFile("junk.wav").replaceWithText("not audio");
+        require(sonora::loadSampleData(dir.getChildFile("junk.wav")) == nullptr, "junk file loaded");
+    }
+    require(sonora::detectRootNote(*tone) == 69, "A440 root not detected as A4");
+    require(sonora::detectRootNote(*sonora::loadSampleData(dir.getChildFile("c4.wav"))) == 60,
+            "C4 root not detected");
+    require(sonora::detectRootNote(*sonora::loadSampleData(dir.getChildFile("noise.wav"))) == -1,
+            "noise given a root note");
+    const auto peaks = sonora::samplePeaks(*tone, 64);
+    require(peaks.size() == 64 && peaks[10] > 0.5f && peaks[10] <= 1.0f, "sample overview wrong");
+
+    // ---- engine ----
+    auto makeProject = [](int pitch, int ticks) {
+        auto state = std::make_unique<ProjectState>(fixture());
+        auto& track = state->tracks[0];
+        track.instrumentPreset = sonora::samplerInstrument;
+        track.setSamplerFileName("a440.wav");
+        track.sampler.rootNote = 69;
+        track.melodies[0] = {};
+        track.melodies[0].count = 1;
+        track.melodies[0].notes[0] = { 1, 0, ticks, pitch, 110 };
+        state->tracks[1].drumPatterns[0] = {};
+        state->songMode = false;
+        return state;
+    };
+    auto render = [](const ProjectState& state, const sonora::SampleData* data, int blocks) {
+        auto engine = std::make_unique<sonora::AudioEngine>();
+        engine->prepare(48000.0);
+        engine->retireSampleData(0, data);
+        require(engine->submit(state), "sampler project rejected");
+        engine->setPlaying(true);
+        std::vector<float> out;
+        juce::AudioBuffer<float> buffer(2, 512);
+        for (int i = 0; i < blocks; ++i)
+        {
+            engine->process({ &buffer, 0, 512 });
+            for (int s = 0; s < 512; ++s)
+            {
+                require(std::isfinite(buffer.getSample(0, s)), "sampler produced non-finite audio");
+                out.push_back(buffer.getSample(0, s));
+            }
+        }
+        engine->retireSampleData(0, nullptr);
+        return out;
+    };
+    constexpr double rate = 48000.0;
+    const int steady0 = 6000, steady1 = 24000; // inside the note, past the attack
+
+    // No sample loaded: silent, no crash.
+    {
+        const auto silent = render(*makeProject(69, 3840), nullptr, 40);
+        float level = 0.0f;
+        for (const auto v : silent)
+            level = std::max(level, std::abs(v));
+        require(level < 1.0e-6f, "sampler without a file made sound");
+    }
+    // Root key plays at the file's own pitch even though 44.1k != 48k.
+    const auto root = render(*makeProject(69, 3840), tone.get(), 80);
+    require(windowEnergy(root, steady0, steady1) > 0.005, "sampler too quiet");
+    require(std::abs(crossingRate(root, steady0, steady1, rate) - 440.0) < 12.0,
+            "root key not at the file's pitch (rate conversion wrong)");
+    // An octave up doubles the pitch; a fifth down is 2/3.
+    const auto up = render(*makeProject(81, 3840), tone.get(), 80);
+    require(std::abs(crossingRate(up, steady0, steady1, rate) - 880.0) < 25.0, "octave up not 880 Hz");
+    const auto down = render(*makeProject(62, 3840), tone.get(), 80);
+    require(std::abs(crossingRate(down, steady0, steady1, rate) - 440.0 * std::pow(2.0, -7.0 / 12.0)) < 12.0,
+            "fifth down wrong");
+    // Tune is in cents (+1200 would be an octave; +100 is one semitone).
+    {
+        auto tuned = makeProject(69, 3840);
+        tuned->tracks[0].sampler.tune = 100.0f;
+        const auto audio = render(*tuned, tone.get(), 80);
+        require(std::abs(crossingRate(audio, steady0, steady1, rate) - 440.0 * std::pow(2.0, 1.0 / 12.0)) < 12.0,
+                "tune cents wrong");
+    }
+    // Key tracking off: every key plays the file at its own pitch.
+    {
+        auto fixedPitch = makeProject(81, 3840);
+        fixedPitch->tracks[0].sampler.keyTrack = false;
+        const auto audio = render(*fixedPitch, tone.get(), 80);
+        require(std::abs(crossingRate(audio, steady0, steady1, rate) - 440.0) < 12.0,
+                "key tracking off still followed the key");
+    }
+    // A non-looping sample ends; looping sustains it for the held note.
+    {
+        const auto shortTone = sonora::loadSampleData(dir.getChildFile("short.wav"));
+        auto plain = makeProject(69, 3840);
+        plain->tracks[0].setSamplerFileName("short.wav");
+        const auto ended = render(*plain, shortTone.get(), 60);
+        require(windowEnergy(ended, 16000, 22000) < 1.0e-6, "finished sample kept sounding");
+        auto looped = makeProject(69, 3840);
+        looped->tracks[0].setSamplerFileName("short.wav");
+        looped->tracks[0].sampler.loop = true;
+        const auto held = render(*looped, shortTone.get(), 60);
+        require(windowEnergy(held, 16000, 22000) > 0.005, "loop did not sustain the held note");
+        require(std::abs(crossingRate(held, 16000, 22000, rate) - 440.0) < 15.0, "loop changed the pitch");
+    }
+    // Key release: a short note lets go, a one-shot plays through. 480 ticks is
+    // ~0.24 s at the fixture's 123 BPM, plus the 0.12 s release, so look past
+    // 0.5 s (the sample itself lasts a full second).
+    {
+        const auto releasing = render(*makeProject(69, 480), tone.get(), 60);
+        require(windowEnergy(releasing, 3000, 9000) > 0.005, "short note silent while held");
+        require(windowEnergy(releasing, 24000, 30000) < 1.0e-6, "released note kept sounding");
+        auto oneShot = makeProject(69, 480);
+        oneShot->tracks[0].sampler.oneShot = true;
+        const auto played = render(*oneShot, tone.get(), 60);
+        require(windowEnergy(played, 24000, 30000) > 0.005, "one-shot stopped on key release");
+    }
+    // Reverse and trim change what is heard: the decaying fixture is loud at
+    // the start going forward and loud at the end in reverse.
+    {
+        const auto decay = sonora::loadSampleData(dir.getChildFile("decay.wav"));
+        auto forward = makeProject(69, 3840);
+        forward->tracks[0].setSamplerFileName("decay.wav");
+        const auto fwd = render(*forward, decay.get(), 60);
+        require(windowEnergy(fwd, 2000, 6000) > windowEnergy(fwd, 24000, 28000) * 4.0,
+                "decaying sample not louder at the start");
+        auto backwards = std::make_unique<ProjectState>(*forward);
+        backwards->tracks[0].sampler.reverse = true;
+        const auto rev = render(*backwards, decay.get(), 60);
+        require(windowEnergy(rev, 2000, 6000) < windowEnergy(rev, 24000, 28000) * 0.5,
+                "reverse did not play from the end");
+        auto trimmed = std::make_unique<ProjectState>(*forward);
+        trimmed->tracks[0].sampler.start = 0.5f;
+        const auto cut = render(*trimmed, decay.get(), 60);
+        require(windowEnergy(cut, 2000, 6000) < windowEnergy(fwd, 2000, 6000) * 0.2,
+                "trim start did not skip the loud part");
+        auto earlyEnd = std::make_unique<ProjectState>(*forward);
+        earlyEnd->tracks[0].sampler.end = 0.1f;
+        const auto clipped = render(*earlyEnd, decay.get(), 60);
+        require(windowEnergy(clipped, 12000, 18000) < 1.0e-6, "trim end did not stop playback");
+    }
+    // Voice stealing: more notes than voices stays bounded and finite.
+    {
+        auto instrument = std::make_unique<sonora::SamplerInstrument>();
+        instrument->prepare(rate);
+        instrument->requestSample(tone.get());
+        juce::MidiBuffer events;
+        for (int note = 30; note < 80; ++note)
+            events.addEvent(juce::MidiMessage::noteOn(1, note, static_cast<juce::uint8>(100)), 0);
+        juce::AudioBuffer<float> block(2, 512);
+        block.clear();
+        instrument->render(block, 0, 512, events);
+        require(instrument->activeVoices() == sonora::SamplerInstrument::numVoices, "voice cap wrong");
+        for (int i = 0; i < 512; ++i)
+            require(std::isfinite(block.getSample(0, i)), "voice stealing produced non-finite audio");
+        instrument->stop();
+        require(instrument->activeVoices() == 0, "stop left voices running");
+        instrument->requestSample(nullptr);
+    }
+    // Stereo samples keep their image.
+    {
+        auto st = makeProject(69, 3840);
+        st->tracks[0].setSamplerFileName("stereo.wav");
+        auto engine = std::make_unique<sonora::AudioEngine>();
+        engine->prepare(rate);
+        engine->retireSampleData(0, stereo.get());
+        require(engine->submit(*st), "stereo project rejected");
+        engine->setPlaying(true);
+        juce::AudioBuffer<float> buffer(2, 512);
+        double dot = 0.0;
+        for (int i = 0; i < 30; ++i)
+        {
+            engine->process({ &buffer, 0, 512 });
+            if (i >= 12)
+                for (int s = 0; s < 512; ++s)
+                    dot += static_cast<double>(buffer.getSample(0, s)) * buffer.getSample(1, s);
+        }
+        engine->retireSampleData(0, nullptr);
+        require(dot < 0.0, "stereo sample collapsed to mono");
+    }
+
+    // ---- library ----
+    {
+        const auto library = dir.getChildFile("library");
+        const auto first = sonora::importSampleToLibrary(dir.getChildFile("a440.wav"), library);
+        const auto second = sonora::importSampleToLibrary(dir.getChildFile("a440.wav"), library);
+        require(first == "a440.wav" && second != first && second.isNotEmpty(), "library import naming wrong");
+        require(sonora::importSampleToLibrary(dir.getChildFile("junk.txt"), library).isEmpty(),
+                "non-audio imported");
+        dir.getChildFile("notes.txt").replaceWithText("hello");
+        require(sonora::importSampleToLibrary(dir.getChildFile("notes.txt"), library).isEmpty(),
+                "text file imported");
+        require(sonora::importSampleToLibrary(library.getChildFile(first), library) == first,
+                "library file re-imported as a copy");
+        library.getChildFile("Drums").createDirectory();
+        dir.getChildFile("c4.wav").copyFileTo(library.getChildFile("Drums/Kick 01.wav"));
+        const auto names = sonora::listSampleLibrary(library);
+        require(names.size() == 3 && std::find(names.begin(), names.end(), juce::String("Drums/Kick 01.wav"))
+                                         != names.end(),
+                "library listing wrong");
+        require(sonora::resolveSampleFile("Drums/Kick 01.wav", { library }).existsAsFile(), "library file not resolved");
+        require(sonora::resolveSampleFile("a440.wav", { dir.getChildFile("nowhere"), library }).existsAsFile(),
+                "later search dir skipped");
+        require(sonora::resolveSampleFile("../a440.wav", { library }) == juce::File(), "parent hop resolved");
+        require(sonora::resolveSampleFile(dir.getChildFile("a440.wav").getFullPathName(), { library }) == juce::File(),
+                "absolute path resolved");
+        require(sonora::resolveSampleFile("", { library }) == juce::File(), "empty name resolved");
+    }
+
+    // ---- persistence (v22) ----
+    {
+        auto saved = makeProject(60, 960);
+        saved->tracks[0].setSamplerFileName("Drums/Kick 01.wav");
+        auto& s = saved->tracks[0].sampler;
+        s.rootNote = 48; s.tune = -12.0f; s.start = 0.1f; s.end = 0.9f; s.loop = true;
+        s.loopStart = 0.2f; s.loopEnd = 0.8f; s.reverse = false; s.oneShot = false; s.keyTrack = true;
+        s.attack = 0.05f; s.decay = 0.4f; s.sustain = 0.6f; s.release = 0.5f; s.gain = 1.25f;
+        require(saved->valid(), "sampler fixture rejected");
+        const auto json = sonora::ProjectIO::encode(*saved);
+        auto loaded = std::make_unique<ProjectState>();
+        require(sonora::ProjectIO::decode(json, *loaded).wasOk() && *loaded == *saved
+                    && loaded->tracks[0].samplerFileName() == "Drums/Kick 01.wav"
+                    && loaded->tracks[0].sampler.rootNote == 48 && loaded->tracks[0].sampler.loop,
+                "sampler round-trip failed");
+        auto legacy = juce::JSON::parse(json);
+        legacy.getDynamicObject()->setProperty("version", 21);
+        for (auto& track : *legacy.getDynamicObject()->getProperty("tracks").getArray())
+            track.getDynamicObject()->removeProperty("sampler");
+        require(sonora::ProjectIO::decode(juce::JSON::toString(legacy), *loaded).wasOk()
+                    && loaded->tracks[0].sampler == SamplerParams {} && loaded->tracks[0].samplerFile[0] == '\0',
+                "v21 did not open with a default sampler");
+        auto rejects = [&](const char* what, const std::function<void(juce::DynamicObject&)>& tamper) {
+            auto document = juce::JSON::parse(json);
+            auto* sampler = document.getDynamicObject()->getProperty("tracks").getArray()->getReference(0)
+                                .getDynamicObject()->getProperty("sampler").getDynamicObject();
+            tamper(*sampler);
+            *loaded = *saved;
+            require(sonora::ProjectIO::decode(juce::JSON::toString(document), *loaded).failed(), what);
+            require(*loaded == *saved, "bad sampler destroyed current state");
+        };
+        rejects("parent-hop sample name accepted", [](juce::DynamicObject& o) { o.setProperty("file", "../../etc/passwd"); });
+        rejects("absolute sample name accepted", [](juce::DynamicObject& o) { o.setProperty("file", "/etc/passwd"); });
+        rejects("root 200 accepted", [](juce::DynamicObject& o) { o.setProperty("root", 200); });
+        rejects("inverted trim accepted", [](juce::DynamicObject& o) { o.setProperty("end", 0.05); });
+        rejects("wild gain accepted", [](juce::DynamicObject& o) { o.setProperty("gain", 9.0); });
+        rejects("string loop flag accepted", [](juce::DynamicObject& o) { o.setProperty("loop", "yes"); });
+        rejects("missing release accepted", [](juce::DynamicObject& o) { o.removeProperty("release"); });
+        auto missing = juce::JSON::parse(json);
+        missing.getDynamicObject()->getProperty("tracks").getArray()->getReference(0)
+            .getDynamicObject()->removeProperty("sampler");
+        *loaded = *saved;
+        require(sonora::ProjectIO::decode(juce::JSON::toString(missing), *loaded).failed(),
+                "v22 without a sampler section accepted");
+        auto unsafe = std::make_unique<ProjectState>(*saved);
+        unsafe->tracks[0].setSamplerFileName("../x.wav");
+        require(!unsafe->valid(), "unsafe sampler name validated");
+    }
+
+    // ---- export ----
+    {
+        auto job = std::make_unique<sonora::ExportJob>();
+        job->project = *makeProject(69, 3840);
+        job->project.tracks[0].melodies[0].notes[0].pitch = 69;
+        job->sampleDirs = { dir };
+        job->songRange = false;
+        const auto withSample = sonora::OfflineExport::render(*job);
+        require(withSample.ok() && withSample.peak > 0.1f, "export dropped the sampler audio");
+        job->sampleDirs = {};
+        const auto without = sonora::OfflineExport::render(*job);
+        require(without.ok() && without.peak < 1.0e-4f, "export invented sampler audio");
+        // Drum-kit voicings and custom kits now survive export too.
+        auto drums = std::make_unique<sonora::ExportJob>();
+        drums->project = fixture();
+        drums->project.tracks[0].melodies[0] = {};
+        drums->project.songMode = false;
+        const auto starter = sonora::OfflineExport::render(*drums);
+        drums->project.tracks[1].kitVariant = 4; // Boom
+        const auto boom = sonora::OfflineExport::render(*drums);
+        require(starter.ok() && boom.ok(), "drum export failed");
+        double difference = 0.0;
+        for (int i = 0; i < starter.audio.getNumSamples(); ++i)
+            difference += std::abs(starter.audio.getSample(0, i) - boom.audio.getSample(0, i));
+        require(difference > 1.0, "export ignored the drum kit voicing");
+    }
+    require(dir.deleteRecursively(), "sampler test cleanup failed");
 }
 
 // Pulse and Noise oscillators. Kept out of testSynthEngine on purpose: a
@@ -3037,7 +4257,7 @@ void testSynthEngine()
     saved.tracks[0].synth = sonora::synthPatches()[3].params;
     const auto json = sonora::ProjectIO::encode(saved);
     sonora::ProjectState loaded;
-    require(json.contains("\"version\": 21"), "synth projects must save as v21");
+    require(json.contains("\"version\": 22"), "synth projects must save as v22");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "synth round-trip failed");
     auto legacy = juce::JSON::parse(json);
     legacy.getDynamicObject()->setProperty("version", 10);
@@ -3194,7 +4414,7 @@ void testKnobs()
     saved.tracks[0].fx.chorus = { 0.4f, 1.2f, 0.8f, false };
     const auto json = sonora::ProjectIO::encode(saved);
     sonora::ProjectState loaded;
-    require(json.contains("\"version\": 21"), "fx projects must save as v21");
+    require(json.contains("\"version\": 22"), "fx projects must save as v22");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "drive/chorus round-trip failed");
     auto legacy = juce::JSON::parse(json);
     legacy.getDynamicObject()->setProperty("version", 11);
@@ -3583,7 +4803,7 @@ void testSongComposition()
     saved.song.insertSection(pop.sections, 0);
     const auto json = sonora::ProjectIO::encode(saved);
     sonora::ProjectState loaded;
-    require(json.contains("\"version\": 21"), "song projects must save as v21");
+    require(json.contains("\"version\": 22"), "song projects must save as v22");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "song parts round-trip failed");
     auto big = project;
     big.song.sections = sonora::maxSections;
@@ -3622,7 +4842,7 @@ void testSongComposition()
     missingSwing.getDynamicObject()->getProperty("tracks").getArray()->getReference(0)
         .getDynamicObject()->removeProperty("swing");
     loaded = swung;
-    require(sonora::ProjectIO::decode(juce::JSON::toString(missingSwing), loaded).failed(), "v21 without swing accepted");
+    require(sonora::ProjectIO::decode(juce::JSON::toString(missingSwing), loaded).failed(), "v22 without swing accepted");
     auto invalidSwing = swung;
     invalidSwing.tracks[0].swing = -0.5f;
     require(!invalidSwing.valid(), "negative swing validated");
@@ -3654,7 +4874,7 @@ void testSongComposition()
     auto missingKey = juce::JSON::parse(keyJson);
     missingKey.getDynamicObject()->removeProperty("musicKey");
     loaded = keyed;
-    require(sonora::ProjectIO::decode(juce::JSON::toString(missingKey), loaded).failed(), "v21 without key accepted");
+    require(sonora::ProjectIO::decode(juce::JSON::toString(missingKey), loaded).failed(), "v22 without key accepted");
     auto invalidKey = keyed;
     invalidKey.musicKey = -1;
     require(!invalidKey.valid(), "negative key validated");
@@ -3695,7 +4915,7 @@ void testSongComposition()
         .getDynamicObject()->removeProperty("liveArpRate");
     loaded = lively;
     require(sonora::ProjectIO::decode(juce::JSON::toString(missingArp), loaded).failed(),
-            "v21 without arp rate accepted");
+            "v22 without arp rate accepted");
     auto invalidLive = lively;
     invalidLive.tracks[0].liveFx.octaves = 4;
     require(!invalidLive.valid(), "arp octave validated");
@@ -3730,7 +4950,7 @@ void testSongComposition()
     missingChords.getDynamicObject()->getProperty("song").getDynamicObject()->removeProperty("chords");
     loaded = chorded;
     require(sonora::ProjectIO::decode(juce::JSON::toString(missingChords), loaded).failed(),
-            "v21 without chords accepted");
+            "v22 without chords accepted");
 
     // v19 persists pan/sends and the return buses; older files mix dry.
     auto mixed = project;
@@ -3775,7 +4995,7 @@ void testSongComposition()
         .getDynamicObject()->removeProperty("sendReverb");
     loaded = mixed;
     require(sonora::ProjectIO::decode(juce::JSON::toString(missingPan), loaded).failed(),
-            "v21 without sends accepted");
+            "v22 without sends accepted");
 
     // v20 persists automation lanes; older files play the knob values.
     auto curved = project;
@@ -3826,7 +5046,7 @@ void testSongComposition()
         .getDynamicObject()->removeProperty("automation");
     loaded = curved;
     require(sonora::ProjectIO::decode(juce::JSON::toString(missingAutomation), loaded).failed(),
-            "v21 without automation accepted");
+            "v22 without automation accepted");
 
     // v21 persists take stretch; older files play at speed.
     auto speedy = project;
@@ -3859,7 +5079,7 @@ void testSongComposition()
         .getDynamicObject()->removeProperty("stretch");
     loaded = speedy;
     require(sonora::ProjectIO::decode(juce::JSON::toString(missingStretch), loaded).failed(),
-            "v21 without stretch accepted");
+            "v22 without stretch accepted");
     auto invalidStretch = speedy;
     invalidStretch.takes[0].stretch = 3.0f;
     require(!invalidStretch.valid(), "triple-speed take validated");
@@ -4261,6 +5481,10 @@ int main()
         testInstruments(); std::cout << "PASS sampled instruments, panic, FX isolation, export, v10 presets\n";
         testSynthEngine(); std::cout << "PASS synth patches, waves, filter, envelopes, chorus, live edits, v11\n";
         testSynthOscillators(); std::cout << "PASS pulse and noise oscillators\n";
+        testAgentActions(); std::cout << "PASS agent: parameters, parsing, tracks, patterns, song, automation, effects\n";
+        testAgentPipeline(); std::cout << "PASS agent: schema/prompt/executor agree, context, parsing, end-to-end\n";
+        testInstrumentSearch(); std::cout << "PASS instrument picker: search ranking, favorites, persistence\n";
+        testSampler(); std::cout << "PASS sampler: loader, pitch, loop, one-shot, trim, library, v22, export\n";
         testKnobs(); std::cout << "PASS MiniLab knob maps, CC sets, drive/chorus DSP, v12 fx\n";
         testAiMelody(); std::cout << "PASS AI melody sandbox, context, parsing, sanitizing, fake CLI\n";
         testMiniLabDisplay(); std::cout << "PASS MiniLab 3 screen/pad SysEx, replies, screen text\n";

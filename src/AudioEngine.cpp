@@ -39,6 +39,13 @@ const SampleBank* AudioEngine::retirePadBank(int track, const SampleBank* next)
     return units[static_cast<std::size_t>(track)].drums.requestBank(next);
 }
 
+const SampleData* AudioEngine::retireSampleData(int track, const SampleData* next)
+{
+    if (track < 0 || track >= maxTracks)
+        return nullptr;
+    return units[static_cast<std::size_t>(track)].sampler.requestSample(next);
+}
+
 bool AudioEngine::auditionDrum(int track, int pad, int velocity)
 {
     if (track < 0 || track >= maxTracks || pad < 0 || pad >= drumPads || velocity <= 0 || velocity > 127)
@@ -64,6 +71,7 @@ void AudioEngine::prepare(double sampleRate)
     {
         unit.synth.setCurrentPlaybackSampleRate(rate);
         unit.sampled.prepare(rate);
+        unit.sampler.prepare(rate);
         unit.chorus.prepare(rate);
         unit.drums.prepare(rate);
         unit.chain.prepare(rate);
@@ -164,6 +172,7 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
             {
                 units[static_cast<std::size_t>(track)].synth.allNotesOff(0, true);
                 units[static_cast<std::size_t>(track)].sampled.stop();
+                units[static_cast<std::size_t>(track)].sampler.stop();
             }
         activeLoopMask = loopMask;
     }
@@ -173,6 +182,7 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
         {
             unit.synth.allNotesOff(0, false);
             unit.sampled.stop();
+            unit.sampler.stop();
         }
     if (reset || panicNow || running != wasPlaying || audibilityChanged || songToggled)
         for (auto& unit : units)
@@ -478,10 +488,16 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
             renderEvents.addEvents(unit.events, start, count, -start);
             if (kind == TrackKind::Synth)
             {
-                if (active.tracks[static_cast<std::size_t>(track)].instrumentPreset == 0)
+                const int preset = active.tracks[static_cast<std::size_t>(track)].instrumentPreset;
+                if (preset == 0)
                 {
                     unit.synth.renderNextBlock(trackBuffer, renderEvents, 0, count);
                     unit.chorus.process(trackBuffer, count, unit.voiceParams.chorus);
+                }
+                else if (isSamplerInstrument(preset))
+                {
+                    unit.sampler.setParams(active.tracks[static_cast<std::size_t>(track)].sampler);
+                    unit.sampler.render(trackBuffer, 0, count, renderEvents);
                 }
                 else
                     unit.sampled.render(trackBuffer, 0, count, renderEvents);
@@ -605,6 +621,7 @@ void AudioEngine::release()
     {
         unit.synth.allNotesOff(0, false);
         unit.sampled.stop();
+        unit.sampler.stop();
         unit.drums.stop();
         unit.chain.reset();
     }

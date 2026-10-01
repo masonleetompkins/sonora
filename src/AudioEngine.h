@@ -1,5 +1,6 @@
 #pragma once
 #include "SampledInstrument.h"
+#include "Sampler.h"
 #include "Synth.h"
 #include "DrumSampler.h"
 #include "Fx.h"
@@ -19,6 +20,7 @@ struct TrackUnit
 {
     juce::Synthesiser synth;
     SampledInstrument sampled;
+    SamplerInstrument sampler;
     // Shared by this track's voices; written only by the audio thread
     // between blocks, so voices never see a half-updated patch.
     SynthParams voiceParams;
@@ -58,6 +60,8 @@ public:
     }
     // Same RCU protocol per drum track. Null restores built-ins.
     const SampleBank* retirePadBank(int track, const SampleBank* next);
+    // Same RCU protocol for the Sampler instrument's audio. Null unloads.
+    const SampleData* retireSampleData(int track, const SampleData* next);
     bool auditionDrum(int track, int pad, int velocity = 100);
     // When a MiniLab is connected, channel-10 notes follow the Arturia pad
     // map (banks A/B); otherwise the fixed Sonora drum-note list applies.

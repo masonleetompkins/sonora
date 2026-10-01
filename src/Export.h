@@ -13,6 +13,9 @@ struct ExportJob
 {
     ProjectState project;
     juce::File mediaDir;
+    // Where to look for sampler and custom drum-pad audio, in order: the
+    // project's media folder, the session folder, the sample library.
+    std::vector<juce::File> sampleDirs;
     double sampleRate = 48000.0;
     int bitDepth = 16;
     bool songRange = false;

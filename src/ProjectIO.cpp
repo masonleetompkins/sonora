@@ -352,6 +352,27 @@ std::unique_ptr<juce::DynamicObject> encodeTrackState(const Track& track)
     object->setProperty("pan", static_cast<double>(track.mix.pan));
     object->setProperty("sendDelay", static_cast<double>(track.mix.sendDelay));
     object->setProperty("sendReverb", static_cast<double>(track.mix.sendReverb));
+    {
+        auto* sampler = new juce::DynamicObject();
+        const auto& s = track.sampler;
+        sampler->setProperty("file", track.samplerFileName());
+        sampler->setProperty("root", s.rootNote);
+        sampler->setProperty("tune", static_cast<double>(s.tune));
+        sampler->setProperty("start", static_cast<double>(s.start));
+        sampler->setProperty("end", static_cast<double>(s.end));
+        sampler->setProperty("loopStart", static_cast<double>(s.loopStart));
+        sampler->setProperty("loopEnd", static_cast<double>(s.loopEnd));
+        sampler->setProperty("loop", s.loop);
+        sampler->setProperty("oneShot", s.oneShot);
+        sampler->setProperty("reverse", s.reverse);
+        sampler->setProperty("keyTrack", s.keyTrack);
+        sampler->setProperty("attack", static_cast<double>(s.attack));
+        sampler->setProperty("decay", static_cast<double>(s.decay));
+        sampler->setProperty("sustain", static_cast<double>(s.sustain));
+        sampler->setProperty("release", static_cast<double>(s.release));
+        sampler->setProperty("gain", static_cast<double>(s.gain));
+        object->setProperty("sampler", juce::var(sampler));
+    }
     juce::Array<juce::var> automation;
     for (int slot = 0; slot < numPatterns; ++slot)
         for (int t = 0; t < static_cast<int>(AutomationTarget::numTargets); ++t)
@@ -411,7 +432,7 @@ std::unique_ptr<juce::DynamicObject> encodeTrackState(const Track& track)
 
 juce::Result decodeTrackState(const juce::var& value, Track& track, bool requirePreset, bool requireSynth,
                               bool requireExtendedFx, bool requireGroove, bool requireLiveFx,
-                              bool requireMix, bool requireAutomation)
+                              bool requireMix, bool requireAutomation, bool requireSampler)
 {
     const auto* object = value.getDynamicObject();
     if (object == nullptr)
@@ -475,6 +496,47 @@ juce::Result decodeTrackState(const juce::var& value, Track& track, bool require
     if (!mix.valid())
         return juce::Result::fail("Track mix out of range.");
     candidate.mix = mix;
+    if (requireSampler)
+    {
+        const auto* sampler = object->getProperty("sampler").getDynamicObject();
+        if (sampler == nullptr)
+            return juce::Result::fail("Invalid track sampler.");
+        const auto file = sampler->getProperty("file").toString();
+        if (file.length() > samplerFileCapacity - 1)
+            return juce::Result::fail("Sampler file name too long.");
+        if (file.isNotEmpty() && !isSafeSampleName(file.toRawUTF8()))
+            return juce::Result::fail("Unsafe sampler file name.");
+        auto numberField = [&](const char* key, float& out) {
+            const auto v = sampler->getProperty(key);
+            if (!number(v))
+                return false;
+            out = static_cast<float>(v);
+            return true;
+        };
+        auto boolField = [&](const char* key, bool& out) {
+            const auto v = sampler->getProperty(key);
+            if (!v.isBool())
+                return false;
+            out = static_cast<bool>(v);
+            return true;
+        };
+        SamplerParams s;
+        const auto root = sampler->getProperty("root");
+        if (!integer(root) || static_cast<juce::int64>(root) < 0 || static_cast<juce::int64>(root) > 127
+            || !numberField("tune", s.tune) || !numberField("start", s.start) || !numberField("end", s.end)
+            || !numberField("loopStart", s.loopStart) || !numberField("loopEnd", s.loopEnd)
+            || !boolField("loop", s.loop) || !boolField("oneShot", s.oneShot)
+            || !boolField("reverse", s.reverse) || !boolField("keyTrack", s.keyTrack)
+            || !numberField("attack", s.attack) || !numberField("decay", s.decay)
+            || !numberField("sustain", s.sustain) || !numberField("release", s.release)
+            || !numberField("gain", s.gain))
+            return juce::Result::fail("Invalid sampler field.");
+        s.rootNote = static_cast<int>(root);
+        if (!s.valid())
+            return juce::Result::fail("Sampler settings out of range.");
+        candidate.sampler = s;
+        candidate.setSamplerFileName(file);
+    }
     if (requireAutomation)
     {
         const auto* automation = object->getProperty("automation").getArray();
@@ -590,7 +652,7 @@ juce::String ProjectIO::encode(const ProjectState& state)
 {
     auto root = std::make_unique<juce::DynamicObject>();
     root->setProperty("format", "sonora-project");
-    root->setProperty("version", 21);
+    root->setProperty("version", 22);
     root->setProperty("bpm", state.bpm);
     root->setProperty("musicKey", state.musicKey);
     root->setProperty("musicScale", static_cast<int>(state.musicScale));
@@ -864,7 +926,7 @@ juce::Result ProjectIO::decode(const juce::String& json, ProjectState& destinati
     if (!integer(version))
         return juce::Result::fail("Unsupported project version.");
     const auto versionNumber = static_cast<juce::int64>(version);
-    if (versionNumber < 1 || versionNumber > 21)
+    if (versionNumber < 1 || versionNumber > 22)
         return juce::Result::fail("Unsupported project version.");
     if (!integer(root->getProperty("ticksPerQuarter")) || !integer(root->getProperty("lengthTicks"))
         || static_cast<juce::int64>(root->getProperty("ticksPerQuarter")) != ticksPerQuarter
@@ -977,7 +1039,8 @@ juce::Result ProjectIO::decode(const juce::String& json, ProjectState& destinati
         {
             result = decodeTrackState((*tracks)[track], candidate.tracks[static_cast<std::size_t>(track)],
                                       versionNumber >= 10, versionNumber >= 11, versionNumber >= 12, versionNumber >= 14,
-                                      versionNumber >= 16, versionNumber >= 19, versionNumber >= 20);
+                                      versionNumber >= 16, versionNumber >= 19, versionNumber >= 20,
+                                      versionNumber >= 22);
             if (result.failed())
                 return result;
         }

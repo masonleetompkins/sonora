@@ -58,7 +58,7 @@ endif()
 
 foreach(target Sonora SonoraTests)
     if(TARGET ${target})
-        target_sources(${target} PRIVATE src/SampledInstrument.cpp src/AiMelody.cpp src/IdeaCapture.cpp src/AiDictation.cpp)
+        target_sources(${target} PRIVATE src/SampledInstrument.cpp src/Sampler.cpp src/AgentActions.cpp src/AiAgent.cpp src/AiMelody.cpp src/IdeaCapture.cpp src/AiDictation.cpp)
         target_include_directories(${target} SYSTEM PRIVATE third_party)
         target_compile_definitions(${target} PRIVATE
             SONORA_SOUNDFONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/assets/GeneralUser-GS.sf2")

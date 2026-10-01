@@ -15,7 +15,9 @@ public:
         juce::String text;
     };
 
-    enum class Mode { Melody, Drums, Song };
+    // Agent: one conversation that can operate the whole app. The older
+    // per-track and whole-song modes remain for reference and tests.
+    enum class Mode { Melody, Drums, Song, Agent };
     std::function<void(const juce::String&)> onSend;
     std::function<void()> onCancel, onClose, onNewChat, onVoice;
 

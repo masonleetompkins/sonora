@@ -136,18 +136,22 @@ a fallback or for direct hardware access.
 - Take time-stretch: the Stretch slider under a selected take changes its
   length without changing its pitch (Rubber Band), from half to double
   speed. Stretched takes play, export, and tune like any other take.
-- AI assistant sidebar (AI assistant button or Ctrl+I): chat with Claude on
-  the right while you work. It writes or edits the selected track's melody
-  or drum beat, sees the whole song structure and the other tracks in the
-  part you're working on (silent tracks included), and remembers the
-  conversation so you can say "simpler" or "add a fill in bar 4". Each
-  change replaces the current loop in one undoable step. Docks beside the
-  editor on wide windows and floats over it on narrow ones. In Song view it
-  becomes a song composer: it sees every track's loops and the arrangement,
-  composes the whole song (section order, which tracks play where), and
-  writes new variation loops (fills, half-time grooves, lifted final-chorus
-  melodies) into empty loop slots only, never rewriting your loops. One Undo
-  restores the previous song. See "AI melody and privacy" below.
+- AI agent sidebar (AI assistant button or Ctrl+I): one conversation with
+  Claude that can operate the whole app, whatever view is showing. It sees
+  every track, loop, setting, the arrangement, automation, takes, and your
+  sample library, and answers with actions that Sonora applies as ONE undo
+  step. It can write melodies and beats (for example "write four melodies on
+  this track"), add, rename, reorder and remove tracks, pick or design
+  instruments (any of 84 instruments, 26 synth patches, any of your
+  samples, every synth and sampler knob), set the tempo and key, mix
+  (faders, pan, sends, returns, master), add and tune effects, draw
+  automation, set live arp and chords, arrange the entire song (sections,
+  parts, chords, templates), edit takes, and control the app (play, stop,
+  switch views, save, export). Asking "undo that" works too. It reads
+  parameters from the same table the app uses, so every value is range
+  checked; bad or unknown actions are skipped and listed, never half-applied.
+  Docks beside the editor on wide windows and floats over it on narrow ones.
+  See "AI melody and privacy" below.
 - **Idea REC**, separate from normal audio-take REC: on a selected instrument
   or drum track, press Idea REC or MiniLab 3 Shift+Record (Shift+Pad 7), play
   an idea, then press Idea REC or Shift+Stop (Shift+Pad 5). Keys and pads are
@@ -165,6 +169,22 @@ a fallback or for direct hardware access.
   (pads, leads, basses, plucks, brass, bells, keys, organ, chip, string
   machine, riser, wind and noise hits). Edits play instantly on held notes
   and are undoable; synth, FX, and volume tweaks never cut sounding notes.
+- Sampler: any sound can be an instrument. Choose "Sampler" (or any sound in
+  your library) for an instrument track, then play it chromatically on the
+  keys, the piano roll, the arp, and the AI. Add sounds with "Add sounds..."
+  (WAV, AIFF, FLAC, OGG, MP3, or a whole folder): they go into one library
+  (`~/.local/share/sonora/samples`) that every project can use, and projects
+  copy the sounds they use into their media folder on save. The editor shows
+  the waveform with draggable trim and loop markers, plus root key (with
+  "Detect root" from the sample's pitch), tune, loop, one-shot, reverse, key
+  tracking on/off, and an amp envelope. Any recorded take becomes an
+  instrument with "Play as instrument" on the Audio tab. Sampler sounds are
+  included in exports.
+- Instrument picker with search and favorites: the instrument button opens a
+  searchable list of every sound (sampled instruments, synth patches, your
+  library) grouped by family. Type to filter (every word must match), use
+  Up/Down and Enter, click a star to keep favorites at the top. Favorites
+  are saved in your config folder.
 - Per-track instrument selector, grouped by family: the editable synth plus
   84 sampled instruments from the bundled GM bank. Piano (grand, bright,
   electric, honky-tonk, FM, harpsichord, clavinet), mallets (celesta, bells,
@@ -323,8 +343,9 @@ through), v17 adds per-take solos (older projects open unsoloed),
 and v18 adds the per-section chord track (older projects play as written).
 Format v19 adds per-track pan/sends and the return buses (older projects
 open centered and dry), v20 adds automation lanes (older projects
-follow the knob values), and v21 adds per-take stretch (older projects
-play at speed). It contains tempo, timing metadata, two
+follow the knob values), v21 adds per-take stretch (older projects
+play at speed), and v22 adds each track's sampler settings and sound name
+(older projects open with an empty sampler). It contains tempo, timing metadata, two
 stable track IDs/instrument identifiers, track mix settings, per-track effect
 chains, master limiter settings, four melody patterns and four drum patterns
 per track, per-pad custom sample filenames, the factory kit variant, audio take
@@ -414,10 +435,20 @@ reads, stores, or transmits credentials. Each request:
   can only reply with text;
 - removes `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` from the child's
   environment so a stray key is never billed or exposed;
-- shares only the tempo, song structure, track names, instruments, notes/drum
-  steps of the section you're working on, and the recent conversation;
-- treats the reply as untrusted data: schema-constrained, then clamped and
-  validated into notes (pitches folded into range, overlaps trimmed, capped).
+- shares only project text: tempo, key, track names and settings, the notes
+  and drum steps in each loop, the arrangement, automation, take lengths,
+  the names of files in your sample library, and the recent conversation.
+  It never receives audio, file contents, or file paths;
+- treats the reply as untrusted data: schema-constrained, then every action
+  is parsed, clamped to the app's own ranges, and validated before it
+  touches the project (pitches folded into range, overlaps trimmed, counts
+  capped, parameters limited to their documented ranges). The whole reply
+  lands as one undo step, and a result that would not validate is rolled
+  back entirely;
+- cannot import or read files, run commands, or reach the network. The only
+  app-level requests it can make (play, stop, save, export, record, new or
+  open project) go through the same buttons and confirmation prompts you
+  use; "new project" and "open" always ask before discarding unsaved work.
 
 Sonora looks for `claude` via `SONORA_CLAUDE_PATH` (absolute path), then
 absolute `PATH` entries, then common per-user install locations.

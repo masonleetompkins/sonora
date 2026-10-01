@@ -1,5 +1,7 @@
 #include "Export.h"
 #include "AudioTakes.h"
+#include "KitSamples.h"
+#include "Sampler.h"
 
 namespace sonora
 {
@@ -47,6 +49,42 @@ ExportResult OfflineExport::render(const ExportJob& job, std::function<bool(doub
     auto takes = loadTakes(project.takes, project.takeCount, job.mediaDir, job.sampleRate);
     if (takes != nullptr)
         engine.retireTakeSet(takes.get());
+    // Sampler tracks and customized drum kits load into the private engine
+    // the same way the live app does. Default kits keep the built-in path.
+    std::vector<juce::File> searchDirs = job.sampleDirs;
+    searchDirs.insert(searchDirs.begin(), job.mediaDir);
+    std::vector<std::unique_ptr<SampleData>> samples;
+    std::vector<std::unique_ptr<SampleBank>> banks;
+    for (int index = 0; index < maxTracks; ++index)
+    {
+        const auto& track = project.tracks[static_cast<std::size_t>(index)];
+        if (track.kind == TrackKind::Synth && isSamplerInstrument(track.instrumentPreset)
+            && track.samplerFile[0] != '\0')
+        {
+            const auto file = resolveSampleFile(track.samplerFileName(), searchDirs);
+            if (auto data = loadSampleData(file))
+            {
+                engine.retireSampleData(index, data.get());
+                samples.push_back(std::move(data));
+            }
+        }
+        if (track.kind == TrackKind::Drums)
+        {
+            std::array<juce::String, drumPads> files {};
+            bool custom = track.kitVariant != 0;
+            for (int pad = 0; pad < drumPads; ++pad)
+            {
+                files[static_cast<std::size_t>(pad)] = padSampleName(track.padSamples[static_cast<std::size_t>(pad)]);
+                custom = custom || files[static_cast<std::size_t>(pad)].isNotEmpty();
+            }
+            if (custom)
+                if (auto bank = loadSampleBank(files, job.mediaDir, job.sampleRate, track.kitVariant))
+                {
+                    engine.retirePadBank(index, bank.get());
+                    banks.push_back(std::move(bank));
+                }
+        }
+    }
     engine.setPlaying(true);
     result.audio.setSize(2, total, false, true, false);
     juce::AudioBuffer<float> scratch(2, 1024);
