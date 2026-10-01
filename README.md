@@ -197,7 +197,9 @@ a fallback or for direct hardware access.
 - Vocal/instrument recording: stereo inputs, Input 1/2/Stereo source select,
   software monitoring, live input meter, punch-in/out, up to 8 takes with mute,
   waveform inspection, and automatic input-latency compensation. Takes play in
-  SONG mode and are included in exports.
+  SONG mode and are included in exports. The Audio tab shows every take as a
+  waveform lane: Solo auditions lanes while the song plays (winning over
+  mute), and Keep mutes everything but one take as the comp choice.
 - Vocal pitch correction: offline monophonic analysis (YIN detector), key/scale
   snapping (chromatic/major/minor), correction amount and retune speed, detected
   vs. target pitch display over the waveform, and nondestructive tuned-take
@@ -297,7 +299,7 @@ per-track swing; older projects open
 with Sine Keys and the default sine patch. Format v15 adds the song-wide
 key and scale (older projects open in C major), and v16 adds per-track
 live arp/chord settings (older projects play MiniLab notes straight
-through). It contains tempo, timing metadata, two
+through), and v17 adds per-take solos (older projects open unsoloed). It contains tempo, timing metadata, two
 stable track IDs/instrument identifiers, track mix settings, per-track effect
 chains, master limiter settings, four melody patterns and four drum patterns
 per track, per-pad custom sample filenames, the factory kit variant, audio take

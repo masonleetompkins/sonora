@@ -474,7 +474,7 @@ juce::String ProjectIO::encode(const ProjectState& state)
 {
     auto root = std::make_unique<juce::DynamicObject>();
     root->setProperty("format", "sonora-project");
-    root->setProperty("version", 16);
+    root->setProperty("version", 17);
     root->setProperty("bpm", state.bpm);
     root->setProperty("musicKey", state.musicKey);
     root->setProperty("musicScale", static_cast<int>(state.musicScale));
@@ -518,6 +518,7 @@ juce::String ProjectIO::encode(const ProjectState& state)
         object->setProperty("frames", take.frames);
         object->setProperty("gain", static_cast<double>(take.gain));
         object->setProperty("mute", take.mute);
+        object->setProperty("solo", take.solo);
         object->setProperty("channels", take.channels);
         takes.add(juce::var(object));
     }
@@ -736,7 +737,7 @@ juce::Result ProjectIO::decode(const juce::String& json, ProjectState& destinati
     if (!integer(version))
         return juce::Result::fail("Unsupported project version.");
     const auto versionNumber = static_cast<juce::int64>(version);
-    if (versionNumber < 1 || versionNumber > 16)
+    if (versionNumber < 1 || versionNumber > 17)
         return juce::Result::fail("Unsupported project version.");
     if (!integer(root->getProperty("ticksPerQuarter")) || !integer(root->getProperty("lengthTicks"))
         || static_cast<juce::int64>(root->getProperty("ticksPerQuarter")) != ticksPerQuarter
@@ -855,10 +856,12 @@ juce::Result ProjectIO::decode(const juce::String& json, ProjectState& destinati
             const auto frames = object->getProperty("frames");
             const auto gain = object->getProperty("gain");
             const auto mute = object->getProperty("mute");
+            const auto solo = object->getProperty("solo");
             const auto channels = object->getProperty("channels");
             if (!integer(id) || file.isEmpty() || file.length() > takeFileCapacity - 1
                 || !integer(startTick) || !integer(frames) || !number(gain)
-                || !mute.isBool() || !integer(channels))
+                || !mute.isBool() || !integer(channels)
+                || (versionNumber >= 17 && !solo.isBool()))
                 return juce::Result::fail("Invalid take field.");
             take.id = static_cast<std::uint32_t>(static_cast<juce::int64>(id));
             take.setFileName(file);
@@ -866,6 +869,7 @@ juce::Result ProjectIO::decode(const juce::String& json, ProjectState& destinati
             take.frames = static_cast<int>(frames);
             take.gain = static_cast<float>(gain);
             take.mute = static_cast<bool>(mute);
+            take.solo = versionNumber >= 17 && static_cast<bool>(solo);
             take.channels = static_cast<int>(channels);
             if (!take.valid())
                 return juce::Result::fail("Take parameters out of range.");

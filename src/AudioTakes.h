@@ -24,6 +24,7 @@ struct AudioTakeMeta
     int frames = 0;
     float gain = 1.0f;
     bool mute = false;
+    bool solo = false; // comping: when any take is soloed, only solos play.
     int channels = 1;
     bool offline = false;
     bool valid() const

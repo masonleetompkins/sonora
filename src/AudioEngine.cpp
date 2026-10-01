@@ -450,9 +450,30 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
         {
             const auto position = blockStartPosition;
             const int numChannels = block.buffer->getNumChannels();
+            // Comping: mute/solo follow the editor state (instant on submit),
+            // not the preloaded set (rebuilt async). Any solo wins over mute.
+            bool anySolo = false;
+            for (int i = 0; i < active.takeCount; ++i)
+                if (active.takes[static_cast<std::size_t>(i)].solo)
+                {
+                    anySolo = true;
+                    break;
+                }
             for (const auto& take : set->takes)
             {
-                if (take.mute || take.audio.getNumSamples() <= 0)
+                if (take.audio.getNumSamples() <= 0)
+                    continue;
+                bool solo = false, mute = take.mute;
+                for (int i = 0; i < active.takeCount; ++i)
+                {
+                    const auto& meta = active.takes[static_cast<std::size_t>(i)];
+                    if (meta.id != take.id)
+                        continue;
+                    solo = meta.solo;
+                    mute = meta.mute;
+                    break;
+                }
+                if (anySolo ? !solo : mute)
                     continue;
                 const auto takeStart = scheduler.framesForTick(take.startTick);
                 const auto offset = takeStart - position;

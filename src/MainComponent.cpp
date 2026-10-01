@@ -1196,14 +1196,52 @@ void MainComponent::bankLoadFinished(int track, std::unique_ptr<SampleBank> bank
 
 struct MainComponent::AudioView final : public juce::Component
 {
+    // Miniature lane overview for comping: peaks for one take, brighter when
+    // selected, cyan-edged while soloed.
+    struct WaveStrip : public juce::Component
+    {
+        void setWave(std::vector<float> values, bool isSelected, bool isSolo)
+        {
+            peaks = std::move(values);
+            selected = isSelected;
+            solo = isSolo;
+            repaint();
+        }
+        void paint(juce::Graphics& g) override
+        {
+            g.setColour(ui::raised);
+            g.fillRoundedRectangle(getLocalBounds().toFloat(), 3.0f);
+            if (peaks.empty())
+                return;
+            g.setColour((selected ? ui::text : ui::blue).withAlpha(selected ? 0.85f : 0.55f));
+            const int buckets = static_cast<int>(peaks.size());
+            for (int x = 0; x < getWidth(); ++x)
+            {
+                const auto peak = peaks[static_cast<std::size_t>(x * buckets / getWidth())];
+                const auto h = std::max(1.0f, peak * (getHeight() / 2 - 1));
+                const auto cy = getHeight() / 2;
+                g.fillRect(x, cy - static_cast<int>(h), 1, static_cast<int>(h) * 2);
+            }
+            if (solo)
+            {
+                g.setColour(ui::cyan);
+                g.drawRoundedRectangle(getLocalBounds().toFloat().reduced(0.5f, 0.5f), 3.0f, 1.5f);
+            }
+        }
+        std::vector<float> peaks;
+        bool selected = false, solo = false;
+    };
+
     AudioView(std::function<void(int)> inputModeCb, std::function<void(bool)> monitorCb,
               std::function<void(std::uint32_t)> muteCb, std::function<void(std::uint32_t)> deleteCb,
               std::function<void(std::uint32_t)> selectCb, std::function<void()> pitchChangedCb,
-              std::function<void()> analyzeCb, std::function<void()> applyCb)
+              std::function<void()> analyzeCb, std::function<void()> applyCb,
+              std::function<void(std::uint32_t)> soloCb, std::function<void(std::uint32_t)> keepCb)
         : onInputMode(std::move(inputModeCb)), onMonitor(std::move(monitorCb)),
           onMuteTake(std::move(muteCb)), onDeleteTake(std::move(deleteCb)),
           onSelectTake(std::move(selectCb)), onPitchChanged(std::move(pitchChangedCb)),
-          onAnalyze(std::move(analyzeCb)), onApply(std::move(applyCb))
+          onAnalyze(std::move(analyzeCb)), onApply(std::move(applyCb)),
+          onSoloTake(std::move(soloCb)), onKeepTake(std::move(keepCb))
     {
         setWantsKeyboardFocus(true);
         inputMode.addItem("Input 1 (mono)", 1);
@@ -1290,8 +1328,8 @@ struct MainComponent::AudioView final : public juce::Component
         for (int i = 0; i < project.takeCount; ++i)
         {
             const auto& take = project.takes[static_cast<std::size_t>(i)];
-            signature += juce::String(take.id) + (take.mute ? "m" : "") + (take.offline ? "x" : "")
-                + juce::String(take.startTick) + ";";
+            signature += juce::String(take.id) + (take.mute ? "m" : "") + (take.solo ? "s" : "")
+                + (take.offline ? "x" : "") + juce::String(take.startTick) + ";";
         }
         signature += juce::String(selected) + (isRecording ? "R" : "");
         if (signature != lastSignature)
@@ -1303,6 +1341,8 @@ struct MainComponent::AudioView final : public juce::Component
                 const auto& take = project.takes[static_cast<std::size_t>(i)];
                 Row row;
                 row.id = take.id;
+                row.isSelected = take.id == selected;
+                row.isSolo = take.solo;
                 row.name = std::make_unique<juce::Label>();
                 row.name->setFont(ui::font(12.0f, true));
                 row.name->setColour(juce::Label::textColourId,
@@ -1310,9 +1350,23 @@ struct MainComponent::AudioView final : public juce::Component
                 const auto bars = juce::String(take.startTick / 3840 + 1) + "." + juce::String((take.startTick / 960) % 4 + 1);
                 const auto seconds = juce::String(take.frames / 48000.0, 1);
                 row.name->setText("Take " + juce::String(take.id) + "   @ bar " + bars + "   " + seconds + " s   "
-                    + (take.channels == 2 ? "stereo" : "mono") + (take.offline ? "   (file missing)" : ""),
+                    + (take.channels == 2 ? "stereo" : "mono") + (take.offline ? "   (file missing)" : "")
+                    + (take.solo ? "   SOLO" : ""),
                     juce::dontSendNotification);
                 addAndMakeVisible(row.name.get());
+                row.solo = std::make_unique<juce::TextButton>("Solo");
+                row.solo->setClickingTogglesState(true);
+                row.solo->setToggleState(take.solo, juce::dontSendNotification);
+                row.solo->setWantsKeyboardFocus(false);
+                row.solo->setColour(juce::TextButton::buttonOnColourId, ui::cyan);
+                row.solo->setTooltip("Solo this take in SONG mode. Combines with other solos; wins over mute.");
+                addAndMakeVisible(row.solo.get());
+                row.solo->onClick = [this, id = take.id] { if (onSoloTake) onSoloTake(id); };
+                row.keep = std::make_unique<juce::TextButton>("Keep");
+                row.keep->setWantsKeyboardFocus(false);
+                row.keep->setTooltip("Comp choice: keep only this take, mute the rest (undoable).");
+                addAndMakeVisible(row.keep.get());
+                row.keep->onClick = [this, id = take.id] { if (onKeepTake) onKeepTake(id); };
                 row.mute = std::make_unique<juce::TextButton>(take.mute ? "Muted" : "Mute");
                 row.mute->setClickingTogglesState(true);
                 row.mute->setToggleState(take.mute, juce::dontSendNotification);
@@ -1325,8 +1379,13 @@ struct MainComponent::AudioView final : public juce::Component
                 row.remove->setColour(juce::TextButton::buttonOnColourId, ui::danger);
                 addAndMakeVisible(row.remove.get());
                 row.remove->onClick = [this, id = take.id] { if (onDeleteTake) onDeleteTake(id); };
+                row.wave = std::make_unique<WaveStrip>();
+                addAndMakeVisible(row.wave.get());
+                if (const auto* found = findLane(row.id))
+                    row.wave->setWave(*found, row.isSelected, row.isSolo);
                 takeRows.push_back(std::move(row));
             }
+            applyTakeWaves();
             resized();
         }
         juce::String info;
@@ -1343,7 +1402,7 @@ struct MainComponent::AudioView final : public juce::Component
         takeHint.setText(project.takeCount == 0
             ? (isRecording ? "Recording... press Stop to finish the take."
                            : "Press REC to record from the song start. Takes play back in SONG mode.")
-            : "Click a take to inspect its waveform. Delete key removes the selected take.",
+            : "Click a take to inspect it. Solo auditions lanes (wins over mute); Keep mutes the rest. Delete key removes the selected take.",
             juce::dontSendNotification);
         repaint();
     }
@@ -1378,10 +1437,12 @@ struct MainComponent::AudioView final : public juce::Component
     void mouseDown(const juce::MouseEvent& event) override
     {
         grabKeyboardFocus();
-        // Clicking a row selects its take for waveform inspection.
+        // Clicking a row (label or lane strip) selects its take.
         for (const auto& row : takeRows)
         {
-            if (row.name != nullptr && row.name->getBounds().contains(event.getPosition()))
+            const bool onLabel = row.name != nullptr && row.name->getBounds().contains(event.getPosition());
+            const bool onStrip = row.wave != nullptr && row.wave->getBounds().contains(event.getPosition());
+            if (onLabel || onStrip)
             {
                 if (onSelectTake)
                     onSelectTake(row.id);
@@ -1397,7 +1458,7 @@ struct MainComponent::AudioView final : public juce::Component
 
     juce::Rectangle<int> meterArea() const
     {
-        return { getWidth() - 40, 48, 24, takeRows.empty() ? 60 : static_cast<int>(takeRows.size()) * 28 + 24 };
+        return { getWidth() - 40, 48, 24, takeRows.empty() ? 60 : static_cast<int>(takeRows.size()) * 50 + 24 };
     }
 
     void resized() override
@@ -1408,10 +1469,13 @@ struct MainComponent::AudioView final : public juce::Component
         int y = 52;
         for (auto& row : takeRows)
         {
-            row.name->setBounds(12, y, getWidth() - 220, 24);
-            row.mute->setBounds(getWidth() - 196, y, 80, 24);
-            row.remove->setBounds(getWidth() - 108, y, 80, 24);
-            y += 28;
+            row.name->setBounds(12, y, getWidth() - 352, 24);
+            row.solo->setBounds(getWidth() - 328, y, 64, 24);
+            row.keep->setBounds(getWidth() - 258, y, 60, 24);
+            row.mute->setBounds(getWidth() - 192, y, 76, 24);
+            row.remove->setBounds(getWidth() - 110, y, 82, 24);
+            row.wave->setBounds(12, y + 26, getWidth() - 40, 20);
+            y += 50;
         }
         takeHint.setBounds(12, y + 2, getWidth() - 200, 22);
         y += 26;
@@ -1503,11 +1567,40 @@ struct MainComponent::AudioView final : public juce::Component
         drawContour(pitchTarget, ui::violet);
     }
 
+    void setTakeWaves(std::vector<std::uint32_t> ids, std::vector<std::vector<float>> peaks)
+    {
+        laneIds = std::move(ids);
+        lanePeaks = std::move(peaks);
+        applyTakeWaves();
+    }
+
+    const std::vector<float>* findLane(std::uint32_t id) const
+    {
+        for (std::size_t i = 0; i < laneIds.size() && i < lanePeaks.size(); ++i)
+            if (laneIds[i] == id)
+                return &lanePeaks[i];
+        return nullptr;
+    }
+
+    void applyTakeWaves()
+    {
+        for (auto& row : takeRows)
+        {
+            if (row.wave == nullptr)
+                continue;
+            const auto* found = findLane(row.id);
+            row.wave->setWave(found != nullptr ? *found : std::vector<float> {}, row.isSelected,
+                              row.isSolo);
+        }
+    }
+
     struct Row
     {
         std::uint32_t id = 0;
+        bool isSelected = false, isSolo = false;
         std::unique_ptr<juce::Label> name;
-        std::unique_ptr<juce::TextButton> mute, remove;
+        std::unique_ptr<juce::TextButton> solo, keep, mute, remove;
+        std::unique_ptr<WaveStrip> wave;
     };
     juce::ComboBox inputMode, pitchKey, pitchScale;
     juce::Slider pitchAmount, pitchSpeed;
@@ -1521,10 +1614,13 @@ struct MainComponent::AudioView final : public juce::Component
     std::uint32_t waveTake = 0;
     float inputLevel = 0.0f;
     juce::String lastSignature = "none";
+    std::vector<std::uint32_t> laneIds;
+    std::vector<std::vector<float>> lanePeaks;
     std::function<void(int)> onInputMode;
     std::function<void(bool)> onMonitor;
     std::function<void(std::uint32_t)> onMuteTake, onDeleteTake, onSelectTake;
     std::function<void()> onPitchChanged, onAnalyze, onApply;
+    std::function<void(std::uint32_t)> onSoloTake, onKeepTake;
 };
 
 static int activeInputCount(juce::AudioDeviceManager& manager)
@@ -2380,7 +2476,29 @@ MainComponent::MainComponent()
                 refreshPitchDisplay();
         },
         [this] { analyzeTake(selectedTake); },
-        [this] { applyPitch(); });
+        [this] { applyPitch(); },
+        [this](std::uint32_t id) {
+            beginEdit();
+            for (int i = 0; i < project.takeCount; ++i)
+            {
+                auto& take = project.takes[static_cast<std::size_t>(i)];
+                if (take.id == id)
+                    take.solo = !take.solo;
+            }
+            projectChanged();
+            endEdit();
+        },
+        [this](std::uint32_t id) {
+            beginEdit();
+            for (int i = 0; i < project.takeCount; ++i)
+            {
+                auto& take = project.takes[static_cast<std::size_t>(i)];
+                take.solo = false;
+                take.mute = take.id != id;
+            }
+            projectChanged();
+            endEdit();
+        });
     addAndMakeVisible(audioView.get());
     keyboard.setAvailableRange(lowestPitch, highestPitch);
     keyboard.setLowestVisibleKey(36);
@@ -3996,6 +4114,9 @@ void MainComponent::finalizeTake()
         return;
     }
     beginEdit();
+    // A fresh take joins the mix audibly: any comping solos are spent.
+    for (int i = 0; i < project.takeCount; ++i)
+        project.takes[static_cast<std::size_t>(i)].solo = false;
     AudioTakeMeta meta;
     meta.id = nextTakeId++;
     meta.setFileName(recordFile.getFileName());
@@ -4123,34 +4244,49 @@ void MainComponent::takeLoadFinished(std::unique_ptr<TakeSet> set, const juce::S
 void MainComponent::rebuildWaveCache()
 {
     waveCache = {};
-    if (selectedTake == 0 || takeStorage == nullptr)
+    if (takeStorage == nullptr)
     {
         if (audioView != nullptr)
+        {
             audioView->setWave({}, 0, 0);
+            audioView->setTakeWaves({}, {});
+        }
         return;
     }
+    constexpr int laneBuckets = 96;
     for (const auto& take : takeStorage->takes)
     {
-        if (take.id != selectedTake || take.audio.getNumSamples() <= 0)
+        if (take.audio.getNumSamples() <= 0)
             continue;
-        constexpr int buckets = 256;
-        waveCache.takeId = take.id;
-        waveCache.frames = take.audio.getNumSamples();
-        waveCache.peaks.assign(buckets, 0.0f);
+        const int frames = take.audio.getNumSamples();
         const int channels = take.audio.getNumChannels();
-        for (int b = 0; b < buckets; ++b)
-        {
-            const int from = b * waveCache.frames / buckets;
-            const int to = (b + 1) * waveCache.frames / buckets;
-            float peak = 0.0f;
-            for (int i = from; i < to; i += 7)
-                for (int ch = 0; ch < channels; ++ch)
-                    peak = std::max(peak, std::abs(take.audio.getSample(ch, i)));
-            waveCache.peaks[static_cast<std::size_t>(b)] = peak;
-        }
+        auto fill = [&](std::vector<float>& peaks, int buckets) {
+            peaks.assign(static_cast<std::size_t>(buckets), 0.0f);
+            for (int b = 0; b < buckets; ++b)
+            {
+                const int from = b * frames / buckets;
+                const int to = (b + 1) * frames / buckets;
+                float peak = 0.0f;
+                for (int i = from; i < to; i += 7)
+                    for (int ch = 0; ch < channels; ++ch)
+                        peak = std::max(peak, std::abs(take.audio.getSample(ch, i)));
+                peaks[static_cast<std::size_t>(b)] = peak;
+            }
+        };
+        waveCache.laneIds.push_back(take.id);
+        waveCache.lanePeaks.emplace_back();
+        fill(waveCache.lanePeaks.back(), laneBuckets);
+        if (take.id != selectedTake || selectedTake == 0)
+            continue;
+        waveCache.takeId = take.id;
+        waveCache.frames = frames;
+        fill(waveCache.peaks, 256);
     }
     if (audioView != nullptr)
+    {
         audioView->setWave(waveCache.peaks, waveCache.frames, waveCache.takeId);
+        audioView->setTakeWaves(waveCache.laneIds, waveCache.lanePeaks);
+    }
 }
 
 void MainComponent::collectTakes(const juce::File& destination)

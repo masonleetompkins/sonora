@@ -519,9 +519,9 @@ void testPersistence()
     require(sonora::ProjectIO::decode("{broken json", loaded).failed(), "malformed JSON accepted");
     require(loaded == good, "failed load mutated the project");
     auto json = sonora::ProjectIO::encode(original);
-    require(sonora::ProjectIO::decode(json.replace("\"version\": 16", "\"version\": 17"), loaded).failed(),
+    require(sonora::ProjectIO::decode(json.replace("\"version\": 17", "\"version\": 18"), loaded).failed(),
             "unknown version accepted");
-    require(sonora::ProjectIO::decode(json.replace("\"version\": 16", "\"version\": 4294967297"), loaded).failed(),
+    require(sonora::ProjectIO::decode(json.replace("\"version\": 17", "\"version\": 4294967297"), loaded).failed(),
             "overflowed version accepted");
     require(sonora::ProjectIO::decode(json.replace("\"velocity\": 100", "\"velocity\": 0"), loaded).failed(),
             "zero velocity accepted");
@@ -1243,7 +1243,7 @@ void testFxPersistence()
     original.master.releaseMs = 120.0f;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 16"), "projects must save as v16");
+    require(json.contains("\"version\": 17"), "projects must save as v17");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "fx round-trip changed parameters");
 
@@ -1318,7 +1318,7 @@ void testTakePersistence()
     original.takes[1].mute = true;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 16"), "take projects must save as v16");
+    require(json.contains("\"version\": 17"), "take projects must save as v17");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "take round-trip changed metadata");
 
@@ -1470,6 +1470,61 @@ void testTakePlayback()
     engine.setPlaying(true);
     engine.process({ &buffer, 0, 512 });
     require(buffer.getMagnitude(0, 512) < 1.0e-5f, "take leaks into loop mode");
+    engine.retireTakeSet(nullptr);
+    delete set;
+}
+
+void testTakeSolo()
+{
+    // Opposing DC takes cancel when both play; soloing one isolates it, and
+    // solo wins over mute. Gating follows the submitted project, not the set.
+    auto project = fixture();
+    project.tracks[0].melodies[0] = {};
+    project.tracks[1].drumPatterns[0] = {};
+    project.song.sections = 1;
+    project.songMode = true;
+    project.takeCount = 2;
+    for (int t = 0; t < 2; ++t)
+    {
+        project.takes[static_cast<std::size_t>(t)].id = static_cast<std::uint32_t>(t + 1);
+        project.takes[static_cast<std::size_t>(t)].setFileName("take" + juce::String(t + 1) + ".wav");
+        project.takes[static_cast<std::size_t>(t)].frames = 48000;
+    }
+    sonora::AudioEngine engine;
+    engine.prepare(48000.0);
+    auto* set = new sonora::TakeSet();
+    for (int t = 0; t < 2; ++t)
+    {
+        sonora::PreloadedTake take;
+        take.id = static_cast<std::uint32_t>(t + 1);
+        take.audio.setSize(1, 48000);
+        for (int i = 0; i < 48000; ++i)
+            take.audio.setSample(0, i, t == 0 ? 0.4f : -0.4f);
+        set->takes.push_back(std::move(take));
+    }
+    require(engine.submit(project), "comp project rejected");
+    engine.retireTakeSet(set);
+    engine.setPlaying(true);
+    juce::AudioBuffer<float> buffer(2, 512);
+    auto level = [&] {
+        engine.process({ &buffer, 0, 512 });
+        return buffer.getSample(0, 256);
+    };
+    for (int i = 0; i < 4; ++i)
+        level();
+    require(std::abs(level()) < 0.03f, "takes did not cancel");
+    project.takes[1].solo = true;
+    require(engine.submit(project), "solo submit rejected");
+    require(std::abs(level() + 0.4f) < 0.03f, "solo did not isolate take 2");
+    project.takes[1].mute = true;
+    require(engine.submit(project), "solo+mute submit rejected");
+    require(std::abs(level() + 0.4f) < 0.03f, "mute overrode solo");
+    project.takes[1].solo = false;
+    require(engine.submit(project), "unsolo submit rejected");
+    require(std::abs(level() - 0.4f) < 0.03f, "mute ignored after unsolo");
+    project.takes[1].mute = false;
+    require(engine.submit(project), "unmute submit rejected");
+    require(std::abs(level()) < 0.03f, "takes did not cancel again");
     engine.retireTakeSet(nullptr);
     delete set;
 }
@@ -1744,7 +1799,7 @@ void testVariations()
     original.song.sections = 4;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 16"), "variation projects must save as v16");
+    require(json.contains("\"version\": 17"), "variation projects must save as v17");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "variation round-trip changed slots or indices");
 
@@ -2009,7 +2064,7 @@ void testKitPersistence()
     original.tracks[1].kitVariant = 1;
     sonora::ProjectState loaded;
     const auto json = sonora::ProjectIO::encode(original);
-    require(json.contains("\"version\": 16"), "kit projects must save as v16");
+    require(json.contains("\"version\": 17"), "kit projects must save as v17");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == original,
             "kit round-trip changed pad samples");
     // Version 6 documents migrate to the built-in kit.
@@ -2375,7 +2430,7 @@ void testInstruments()
     saved.tracks[2].instrumentPreset = 16;
     const auto json = sonora::ProjectIO::encode(saved);
     sonora::ProjectState loaded;
-    require(json.contains("\"version\": 16"), "instrument projects must save as v16");
+    require(json.contains("\"version\": 17"), "instrument projects must save as v17");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "instrument round-trip failed");
     auto legacy = juce::JSON::parse(json);
     legacy.getDynamicObject()->setProperty("version", 9);
@@ -2532,7 +2587,7 @@ void testSynthEngine()
     saved.tracks[0].synth = sonora::synthPatches()[3].params;
     const auto json = sonora::ProjectIO::encode(saved);
     sonora::ProjectState loaded;
-    require(json.contains("\"version\": 16"), "synth projects must save as v16");
+    require(json.contains("\"version\": 17"), "synth projects must save as v17");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "synth round-trip failed");
     auto legacy = juce::JSON::parse(json);
     legacy.getDynamicObject()->setProperty("version", 10);
@@ -2688,7 +2743,7 @@ void testKnobs()
     saved.tracks[0].fx.chorus = { 0.4f, 1.2f, 0.8f, false };
     const auto json = sonora::ProjectIO::encode(saved);
     sonora::ProjectState loaded;
-    require(json.contains("\"version\": 16"), "fx projects must save as v16");
+    require(json.contains("\"version\": 17"), "fx projects must save as v17");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "drive/chorus round-trip failed");
     auto legacy = juce::JSON::parse(json);
     legacy.getDynamicObject()->setProperty("version", 11);
@@ -3077,7 +3132,7 @@ void testSongComposition()
     saved.song.insertSection(pop.sections, 0);
     const auto json = sonora::ProjectIO::encode(saved);
     sonora::ProjectState loaded;
-    require(json.contains("\"version\": 16"), "song projects must save as v16");
+    require(json.contains("\"version\": 17"), "song projects must save as v17");
     require(sonora::ProjectIO::decode(json, loaded).wasOk() && loaded == saved, "song parts round-trip failed");
     auto big = project;
     big.song.sections = sonora::maxSections;
@@ -3116,7 +3171,7 @@ void testSongComposition()
     missingSwing.getDynamicObject()->getProperty("tracks").getArray()->getReference(0)
         .getDynamicObject()->removeProperty("swing");
     loaded = swung;
-    require(sonora::ProjectIO::decode(juce::JSON::toString(missingSwing), loaded).failed(), "v16 without swing accepted");
+    require(sonora::ProjectIO::decode(juce::JSON::toString(missingSwing), loaded).failed(), "v17 without swing accepted");
     auto invalidSwing = swung;
     invalidSwing.tracks[0].swing = -0.5f;
     require(!invalidSwing.valid(), "negative swing validated");
@@ -3148,7 +3203,7 @@ void testSongComposition()
     auto missingKey = juce::JSON::parse(keyJson);
     missingKey.getDynamicObject()->removeProperty("musicKey");
     loaded = keyed;
-    require(sonora::ProjectIO::decode(juce::JSON::toString(missingKey), loaded).failed(), "v15 without key accepted");
+    require(sonora::ProjectIO::decode(juce::JSON::toString(missingKey), loaded).failed(), "v17 without key accepted");
     auto invalidKey = keyed;
     invalidKey.musicKey = -1;
     require(!invalidKey.valid(), "negative key validated");
@@ -3189,10 +3244,40 @@ void testSongComposition()
         .getDynamicObject()->removeProperty("liveArpRate");
     loaded = lively;
     require(sonora::ProjectIO::decode(juce::JSON::toString(missingArp), loaded).failed(),
-            "v16 without arp rate accepted");
+            "v17 without arp rate accepted");
     auto invalidLive = lively;
     invalidLive.tracks[0].liveFx.octaves = 4;
     require(!invalidLive.valid(), "arp octave validated");
+
+    // v17 persists take solos; older files open with solos off.
+    auto comped = project;
+    comped.takeCount = 2;
+    comped.takes[0].id = 7;
+    comped.takes[0].setFileName("take7.wav");
+    comped.takes[0].frames = 4800;
+    comped.takes[0].solo = true;
+    comped.takes[1].id = 9;
+    comped.takes[1].setFileName("take9.wav");
+    comped.takes[1].frames = 4800;
+    require(comped.valid(), "solo fixture rejected");
+    const auto compJson = sonora::ProjectIO::encode(comped);
+    require(sonora::ProjectIO::decode(compJson, loaded).wasOk() && loaded == comped
+            && loaded.takes[0].solo && !loaded.takes[1].solo,
+            "take solo round-trip failed");
+    auto legacyComp = juce::JSON::parse(compJson);
+    legacyComp.getDynamicObject()->setProperty("version", 16);
+    legacyComp.getDynamicObject()->getProperty("takes").getArray()->getReference(0)
+        .getDynamicObject()->removeProperty("solo");
+    require(sonora::ProjectIO::decode(juce::JSON::toString(legacyComp), loaded).wasOk()
+            && !loaded.takes[0].solo && !loaded.takes[1].solo,
+            "v16 did not open with solos off");
+    auto badSolo = juce::JSON::parse(compJson);
+    badSolo.getDynamicObject()->getProperty("takes").getArray()->getReference(0)
+        .getDynamicObject()->setProperty("solo", "yes");
+    loaded = comped;
+    require(sonora::ProjectIO::decode(juce::JSON::toString(badSolo), loaded).failed(),
+            "non-bool take solo accepted");
+    require(loaded == comped, "bad solo destroyed current state");
 
     // Play from a part: only part 3 has the melody switched on.
     auto songProject = project;
@@ -3529,6 +3614,7 @@ int main()
         testTakePersistence(); std::cout << "PASS v5 take round-trip, v4 migration, malformed takes, latency math\n";
         testRecorder(); std::cout << "PASS FIFO recorder write/read integrity, overruns, validation\n";
         testTakePlayback(); std::cout << "PASS song-mode take offset/level, mute, loop-mode silence\n";
+        testTakeSolo(); std::cout << "PASS take solo comping\n";
         testVariations(); std::cout << "PASS pattern library round-trip, v5 migration, malformed slots\n";
         testInstances(); std::cout << "PASS make-unique detach, full-library refusal, sharing queries\n";
         testOmarchyTheme(); std::cout << "PASS theme parse, palette map, fallbacks, live load\n";

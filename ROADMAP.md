@@ -9,6 +9,8 @@ Build 1-8, skip the rest.
 3. **Arpeggiator + chord MIDI FX** for live MiniLab playing.
    DONE (per-track arp/chord FX at song tempo, format v16).
 4. **Take comping UI** (takes model already exists).
+   DONE lanes (waveform lanes, solo audition, keep-as-comp, format v17).
+   Section-swipe comping is a follow-up.
 5. **Global chord track** feeding AI composer + transposition.
 6. **Sends/returns + mixer view**.
 7. **Automation lanes** (volume/pan/FX; format bump).

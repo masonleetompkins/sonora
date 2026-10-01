@@ -155,6 +155,9 @@ private:
         std::uint32_t takeId = 0;
         std::vector<float> peaks;
         int frames = 0;
+        // Per-take lane overviews for comping (parallel arrays).
+        std::vector<std::uint32_t> laneIds;
+        std::vector<std::vector<float>> lanePeaks;
     };
     std::unique_ptr<ExportWorker> exportWorker;
     std::unique_ptr<ExportPanel> exportPanel;
