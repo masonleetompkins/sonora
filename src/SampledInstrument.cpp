@@ -18,6 +18,8 @@ struct Bank
     {
         const auto executable = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
         const juce::File paths[] {
+            // macOS .app bundle: Contents/Resources (wired by CMake).
+            executable.getParentDirectory().getParentDirectory().getChildFile("Resources/GeneralUser-GS.sf2"),
             executable.getParentDirectory().getChildFile("GeneralUser-GS.sf2"),
             executable.getParentDirectory().getParentDirectory().getChildFile("share/sonora/GeneralUser-GS.sf2"),
             juce::File(SONORA_SOUNDFONT_PATH)

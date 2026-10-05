@@ -21,13 +21,19 @@ juce_add_gui_app(Sonora PRODUCT_NAME "Sonora" COMPANY_NAME "Sonora"
 target_sources(Sonora PRIVATE src/Main.cpp src/MainComponent.cpp src/AudioEngine.cpp
     src/PianoRoll.cpp src/ProjectIO.cpp src/DrumSampler.cpp src/DrumSequencer.cpp src/Export.cpp src/Fx.cpp src/AudioTakes.cpp src/PitchCorrect.cpp src/KitSamples.cpp src/ArrangementView.cpp src/AiSidebar.cpp src/TimeStretch.cpp)
 target_link_libraries(Sonora PRIVATE rubberband)
+# JACK is a Linux dependency (PipeWire); macOS uses CoreAudio/CoreMIDI.
+if(APPLE)
+    set(SONORA_JACK 0)
+else()
+    set(SONORA_JACK 1)
+endif()
 target_compile_definitions(Sonora PRIVATE
-    JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_JACK=1
+    JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_JACK=${SONORA_JACK}
     JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:Sonora,JUCE_PRODUCT_NAME>"
     JUCE_APPLICATION_VERSION_STRING="${PROJECT_VERSION}")
 target_link_libraries(Sonora PRIVATE juce::juce_audio_utils
     PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
-install(TARGETS Sonora RUNTIME DESTINATION bin)
+install(TARGETS Sonora BUNDLE DESTINATION bin RUNTIME DESTINATION bin)
 install(FILES packaging/sonora.desktop DESTINATION share/applications)
 install(FILES assets/sonora.svg DESTINATION share/icons/hicolor/scalable/apps)
 install(FILES packaging/org.sonora.Sonora.metainfo.xml DESTINATION share/metainfo)
@@ -42,7 +48,7 @@ if(BUILD_TESTING)
     target_sources(SonoraTests PRIVATE tests/CoreTests.cpp src/ProjectIO.cpp src/AudioEngine.cpp src/DrumSampler.cpp src/Export.cpp src/Fx.cpp src/AudioTakes.cpp src/PitchCorrect.cpp src/KitSamples.cpp src/TimeStretch.cpp)
     target_link_libraries(SonoraTests PRIVATE rubberband)
     target_include_directories(SonoraTests PRIVATE src)
-    target_compile_definitions(SonoraTests PRIVATE JUCE_USE_CURL=0 JUCE_JACK=1)
+    target_compile_definitions(SonoraTests PRIVATE JUCE_USE_CURL=0 JUCE_JACK=${SONORA_JACK})
     target_link_libraries(SonoraTests PRIVATE juce::juce_audio_devices juce::juce_audio_formats
         juce::juce_recommended_config_flags)
     # Offscreen UI renders for visual review (not run by ctest).
@@ -64,3 +70,11 @@ foreach(target Sonora SonoraTests)
             SONORA_SOUNDFONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/assets/GeneralUser-GS.sf2")
     endif()
 endforeach()
+
+if(APPLE)
+    # Ship the SoundFont inside the .app bundle; the executable looks in
+    # Contents/Resources first (see SampledInstrument.cpp).
+    add_custom_command(TARGET Sonora POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:Sonora>/../Resources"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/assets/GeneralUser-GS.sf2" "$<TARGET_FILE_DIR:Sonora>/../Resources/GeneralUser-GS.sf2")
+endif()

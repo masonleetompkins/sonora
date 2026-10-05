@@ -137,6 +137,21 @@ juce::StringArray sanitizedEnvironment(const juce::StringArray& parentEnvironmen
     return result;
 }
 
+// pipe2() only exists in recent macOS SDKs, so use the portable
+// pipe()+FD_CLOEXEC there (no spawn-thread race: the fds stay local).
+bool makeCloexecPipe(int fds[2])
+{
+#if defined(__APPLE__)
+    if (::pipe(fds) != 0)
+        return false;
+    ::fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+    ::fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+    return true;
+#else
+    return ::pipe2(fds, O_CLOEXEC) == 0;
+#endif
+}
+
 ProcessResult runProcess(const juce::File& executable, const juce::StringArray& arguments,
                          const juce::String& input, const juce::File& workDir,
                          const juce::StringArray& environment, int timeoutMs,
@@ -149,7 +164,7 @@ ProcessResult runProcess(const juce::File& executable, const juce::StringArray& 
         return result;
     }
     int inPipe[2] = { -1, -1 }, outPipe[2] = { -1, -1 }, errPipe[2] = { -1, -1 };
-    if (::pipe2(inPipe, O_CLOEXEC) != 0 || ::pipe2(outPipe, O_CLOEXEC) != 0 || ::pipe2(errPipe, O_CLOEXEC) != 0)
+    if (!makeCloexecPipe(inPipe) || !makeCloexecPipe(outPipe) || !makeCloexecPipe(errPipe))
     {
         for (int fd : { inPipe[0], inPipe[1], outPipe[0], outPipe[1], errPipe[0], errPipe[1] })
             if (fd >= 0)
@@ -166,7 +181,12 @@ ProcessResult runProcess(const juce::File& executable, const juce::StringArray& 
 #if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 34))
     posix_spawn_file_actions_addclosefrom_np(&actions, 3); // no inherited app descriptors
 #endif
+#if defined(__APPLE__)
+    // Standardised name; the _np spelling is deprecated in newer macOS SDKs.
+    posix_spawn_file_actions_addchdir(&actions, workDir.getFullPathName().toRawUTF8());
+#else
     posix_spawn_file_actions_addchdir_np(&actions, workDir.getFullPathName().toRawUTF8());
+#endif
 
     posix_spawnattr_t attributes;
     posix_spawnattr_init(&attributes);
@@ -308,8 +328,21 @@ ProcessResult runProcess(const juce::File& executable, const juce::StringArray& 
     }
     else
         ::waitpid(pid, &status, 0);
+#if defined(__APPLE__)
+    // No sigtimedwait on macOS: consume a pending SIGPIPE with sigwait,
+    // which returns immediately for an already-pending blocked signal.
+    sigset_t pending;
+    // NOTE: no :: prefix here; on macOS sigismember is a function-like macro.
+    while (sigpending(&pending) == 0 && sigismember(&pending, SIGPIPE) == 1)
+    {
+        int caught = 0;
+        if (sigwait(&pipeSet, &caught) != 0)
+            break;
+    }
+#else
     const timespec zero { 0, 0 };
     while (sigtimedwait(&pipeSet, nullptr, &zero) > 0) {}
+#endif
     pthread_sigmask(SIG_SETMASK, &previousMask, nullptr);
 
     result.exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;

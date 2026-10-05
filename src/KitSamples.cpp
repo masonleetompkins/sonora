@@ -1,4 +1,5 @@
 #include "KitSamples.h"
+#include "SonoraPaths.h"
 
 namespace sonora
 {
@@ -79,11 +80,15 @@ std::unique_ptr<SampleBank> loadSampleBank(const std::array<juce::String, drumPa
 
 juce::File kitsDir()
 {
+#if defined(__APPLE__)
+    return sonora::sonoraSupportDir().getChildFile("kits");
+#else
     auto root = juce::SystemStats::getEnvironmentVariable("XDG_DATA_HOME", {});
     if (root.isEmpty() || !juce::File::isAbsolutePath(root))
         root = juce::File::getSpecialLocation(juce::File::userHomeDirectory)
                    .getChildFile(".local/share").getFullPathName();
     return juce::File(root).getChildFile("sonora/kits");
+#endif
 }
 
 juce::String sanitizePresetName(const juce::String& name)

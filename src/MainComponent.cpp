@@ -1,4 +1,5 @@
 #include "MainComponent.h"
+#include "SonoraPaths.h"
 
 namespace sonora
 {
@@ -3605,11 +3606,15 @@ MainComponent::MainComponent()
     keyboard.setLowestVisibleKey(36);
     keyboard.setKeyWidth(34.0f);
     refreshKeyboardColours();
+#if defined(__APPLE__)
+    recoveryFile = sonora::sonoraSupportDir().getChildFile("recovery.sonora.json");
+#else
     auto stateRoot = juce::SystemStats::getEnvironmentVariable("XDG_STATE_HOME", {});
     if (stateRoot.isEmpty() || !juce::File::isAbsolutePath(stateRoot))
         stateRoot = juce::File::getSpecialLocation(juce::File::userHomeDirectory)
                         .getChildFile(".local/state").getFullPathName();
     recoveryFile = juce::File(stateRoot).getChildFile("sonora/recovery.sonora.json");
+#endif
     setSize(1440, 900);
     loadUiSettings();
     applyOmarchyTheme(true); // theme first paint matches the desktop
@@ -4103,11 +4108,15 @@ void MainComponent::audioDeviceError(const juce::String& message)
 
 juce::File MainComponent::audioSettingsFile()
 {
+#if defined(__APPLE__)
+    return sonora::sonoraSupportDir().getChildFile("audio.xml");
+#else
     auto root = juce::SystemStats::getEnvironmentVariable("XDG_CONFIG_HOME", {});
     if (root.isEmpty() || !juce::File::isAbsolutePath(root))
         root = juce::File::getSpecialLocation(juce::File::userHomeDirectory)
                    .getChildFile(".config").getFullPathName();
     return juce::File(root).getChildFile("sonora/audio.xml");
+#endif
 }
 
 juce::File MainComponent::uiSettingsFile()
