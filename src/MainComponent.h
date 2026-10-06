@@ -67,6 +67,8 @@ public:
     void paint(juce::Graphics&) override;
     void resized() override;
     bool keyPressed(const juce::KeyPress&) override;
+    bool keyStateChanged(bool) override;
+    void focusLost(juce::Component::FocusChangeType) override;
     void changeListenerCallback(juce::ChangeBroadcaster*) override;
     void requestClose(std::function<void()> callback);
 
@@ -393,7 +395,15 @@ private:
     bool knobGesture = false;
     juce::uint32 knobIdleUntil = 0, knobHighlightUntil = 0;
     int lastKnob = -1;
+    int selectedKnob = 0;
+    std::map<int, int> heldKeys; // computer-key keyCode -> live MIDI pitch
     void applyKnobChanges();
+    void announceKnobTurn(Track& track, int turned);
+    void selectKnob(int knob);
+    void nudgeKnob(int direction);
+    static int pianoPitchForKey(int keyCode);
+    void releaseDeadKeys();
+    void releaseAllKeys();
     void paintKnobStrip(juce::Graphics& g);
     juce::Rectangle<int> knobStripArea() const;
     // On-screen dragging of the knob strip (same geometry as the paint code).

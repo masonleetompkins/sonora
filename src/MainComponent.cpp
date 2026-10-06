@@ -3871,6 +3871,12 @@ void MainComponent::applyKnobChanges()
     }
     if (turned < 0)
         return;
+    announceKnobTurn(track, turned);
+}
+
+void MainComponent::announceKnobTurn(Track& track, int turned)
+{
+    const auto map = knobMapFor(track);
     const auto now = juce::Time::getMillisecondCounter();
     knobIdleUntil = now + 600;
     knobHighlightUntil = now + 1500;
@@ -3885,6 +3891,46 @@ void MainComponent::applyKnobChanges()
                    + knobValueText(track, map[static_cast<std::size_t>(turned)].target),
                    juce::dontSendNotification);
     repaint(knobStripArea());
+}
+
+void MainComponent::selectKnob(int knob)
+{
+    selectedKnob = std::clamp(knob, 0, 7);
+    const auto t = static_cast<std::size_t>(std::clamp(selectedTrack, 0, maxTracks - 1));
+    auto& track = project.tracks[t];
+    if (track.kind == TrackKind::None)
+    {
+        status.setText("Knob " + juce::String(selectedKnob + 1) + "  /  no track", juce::dontSendNotification);
+        repaint(knobStripArea());
+        return;
+    }
+    const auto map = knobMapFor(track);
+    lastKnob = selectedKnob;
+    knobHighlightUntil = juce::Time::getMillisecondCounter() + 1500;
+    status.setText("Knob " + juce::String(selectedKnob + 1) + "  /  " + track.trackName() + "  /  "
+                   + map[static_cast<std::size_t>(selectedKnob)].label + " "
+                   + knobValueText(track, map[static_cast<std::size_t>(selectedKnob)].target),
+                   juce::dontSendNotification);
+    repaint(knobStripArea());
+}
+
+void MainComponent::nudgeKnob(int direction)
+{
+    const auto t = static_cast<std::size_t>(std::clamp(selectedTrack, 0, maxTracks - 1));
+    auto& track = project.tracks[t];
+    if (track.kind == TrackKind::None)
+        return;
+    const auto map = knobMapFor(track);
+    const auto target = map[static_cast<std::size_t>(selectedKnob)].target;
+    const float stepped = juce::jlimit(0.0f, 1.0f,
+        knobPosition(track, target) + 0.04f * static_cast<float>(direction));
+    if (!knobGesture && !editing)
+    {
+        beginEdit();
+        knobGesture = true;
+    }
+    applyKnob(track, target, stepped);
+    announceKnobTurn(track, selectedKnob);
 }
 
 juce::Rectangle<int> MainComponent::knobStripArea() const
@@ -3921,6 +3967,11 @@ void MainComponent::paintKnobStrip(juce::Graphics& g)
             ui::glow(g, cell, accent, 5.0f, 0.30f);
         g.setColour((hot ? accent.withAlpha(0.18f) : ui::raised.withAlpha(0.6f)));
         g.fillRoundedRectangle(cell, 5.0f);
+        if (knob == selectedKnob)
+        {
+            g.setColour(accent.withAlpha(0.9f));
+            g.drawRoundedRectangle(cell, 5.0f, 1.5f);
+        }
         const float knobAt = juce::jlimit(0.0f, 1.0f, knobPosition(track, slot.target));
         g.setColour(accent.withAlpha(hot ? 0.95f : 0.55f));
         g.fillRoundedRectangle(cell.getX() + 4.0f, cell.getBottom() - 4.0f, (cell.getWidth() - 8.0f) * knobAt, 2.0f, 1.0f);
@@ -6395,10 +6446,24 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
             return true;
         }
     }
-    else if (!key.getModifiers().isAltDown() && !audioSelected
+    else if (key.getModifiers().isAltDown() && !audioSelected
              && key.getKeyCode() >= '1' && key.getKeyCode() <= '8')
     {
         selectTrackIndex(key.getKeyCode() - '1');
+        return true;
+    }
+    else if (!key.getModifiers().isAltDown() && !key.getModifiers().isCommandDown()
+             && !key.getModifiers().isCtrlDown() && !audioSelected
+             && key.getKeyCode() >= '1' && key.getKeyCode() <= '8')
+    {
+        selectKnob(key.getKeyCode() - '1');
+        return true;
+    }
+    else if (!key.getModifiers().isCommandDown() && !key.getModifiers().isCtrlDown()
+             && !key.getModifiers().isAltDown()
+             && (key.getKeyCode() == juce::KeyPress::upKey || key.getKeyCode() == juce::KeyPress::downKey))
+    {
+        nudgeKnob(key.getKeyCode() == juce::KeyPress::upKey ? 1 : -1);
         return true;
     }
     else if (drumsSelected && !key.getModifiers().isAltDown())
@@ -6410,7 +6475,73 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
             return true;
         }
     }
+    else if (!drumsSelected && !key.getModifiers().isCommandDown()
+             && !key.getModifiers().isCtrlDown() && !key.getModifiers().isAltDown())
+    {
+        // Computer-key piano: home row plays white keys from C4, Q row plays
+        // the black keys above, piano-style. Live voices, same as the
+        // on-screen keyboard (channel 1).
+        const int pitch = pianoPitchForKey(key.getKeyCode());
+        if (pitch >= 0 && heldKeys.find(key.getKeyCode()) == heldKeys.end())
+        {
+            heldKeys[key.getKeyCode()] = pitch;
+            engine.keyboardState.noteOn(1, pitch, 0.8f);
+            return true;
+        }
+    }
     return false;
+}
+
+bool MainComponent::keyStateChanged(bool)
+{
+    const auto before = heldKeys.size();
+    releaseDeadKeys();
+    return heldKeys.size() != before;
+}
+
+void MainComponent::focusLost(juce::Component::FocusChangeType)
+{
+    releaseAllKeys();
+}
+
+int MainComponent::pianoPitchForKey(int keyCode)
+{
+    int code = keyCode;
+    if (code >= 'a' && code <= 'z')
+        code -= ('a' - 'A');
+    switch (code)
+    {
+        case 'A': return 60; case 'S': return 62; case 'D': return 64;
+        case 'F': return 65; case 'G': return 67; case 'H': return 69;
+        case 'J': return 71; case 'K': return 72; case 'L': return 74;
+        case ';': return 76;
+        case 'W': return 61; case 'E': return 63; case 'T': return 66;
+        case 'Y': return 68; case 'U': return 70; case 'O': return 73;
+        case 'P': return 75;
+        default: return -1;
+    }
+}
+
+void MainComponent::releaseDeadKeys()
+{
+    for (auto it = heldKeys.begin(); it != heldKeys.end();)
+    {
+        if (juce::KeyPress::isKeyCurrentlyDown(it->first))
+            ++it;
+        else
+        {
+            engine.keyboardState.noteOff(1, it->second, 0.0f);
+            it = heldKeys.erase(it);
+        }
+    }
+}
+
+void MainComponent::releaseAllKeys()
+{
+    if (heldKeys.empty())
+        return;
+    engine.keyboardState.allNotesOff(1);
+    heldKeys.clear();
 }
 
 void MainComponent::paint(juce::Graphics& g)
