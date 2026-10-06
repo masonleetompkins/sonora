@@ -3627,8 +3627,28 @@ MainComponent::MainComponent()
     std::unique_ptr<juce::XmlElement> savedAudio;
     if (audioSettingsFile().existsAsFile())
         savedAudio = juce::XmlDocument::parse(audioSettingsFile());
+#if defined(__APPLE__)
+    // macOS: never restore an input at launch. A saved input on a different
+    // device than the output (hearing aids out + MacBook mic in) makes JUCE run
+    // both through its device combiner: ~300 ms of extra FIFO latency, plus
+    // clock drift between the two devices that garbles playback. A same-device
+    // input on Bluetooth hearing aids forces the 8 kHz headset profile instead.
+    // Inputs still open on demand (Audio tab, monitoring, REC).
+    if (savedAudio != nullptr)
+    {
+        if (savedAudio->hasAttribute("audioDeviceName"))
+        {
+            savedAudio->setAttribute("audioOutputDeviceName", savedAudio->getStringAttribute("audioDeviceName"));
+            savedAudio->removeAttribute("audioDeviceName");
+        }
+        savedAudio->removeAttribute("audioInputDeviceName");
+        savedAudio->removeAttribute("audioDeviceInChans");
+        deviceManager.initialise(0, 2, savedAudio.get(), true);
+    }
+#else
     if (savedAudio != nullptr)
         deviceManager.initialise(2, 2, savedAudio.get(), true);
+#endif
     deviceManager.addChangeListener(this);
     // Output-only by default: requesting inputs at startup would wake
     // Bluetooth headset mics (hearing aids) and force the whole system into a
