@@ -37,6 +37,10 @@ public:
     {
         if (onOpen)
             onOpen();
+        // Our searchable browser replaces the popup menu, so nothing ever calls
+        // hidePopup(): reset the flag here, or ComboBox believes the menu is
+        // still open and ignores every click after the first.
+        hidePopup();
     }
 };
 
