@@ -1,4 +1,5 @@
 #include "Fx.h"
+#include <algorithm>
 
 namespace sonora
 {
@@ -18,12 +19,21 @@ void ThreeBandEq::updateFilters()
     const auto lowGain = juce::Decibels::decibelsToGain(current.low);
     const auto midGain = juce::Decibels::decibelsToGain(current.mid);
     const auto highGain = juce::Decibels::decibelsToGain(current.high);
-    lowL.setCoefficients(juce::IIRCoefficients::makeLowShelf(rate, 220.0, 0.7, lowGain));
-    lowR.setCoefficients(juce::IIRCoefficients::makeLowShelf(rate, 220.0, 0.7, lowGain));
-    midL.setCoefficients(juce::IIRCoefficients::makePeakFilter(rate, current.midFreq, 1.0, midGain));
-    midR.setCoefficients(juce::IIRCoefficients::makePeakFilter(rate, current.midFreq, 1.0, midGain));
-    highL.setCoefficients(juce::IIRCoefficients::makeHighShelf(rate, 5200.0, 0.7, highGain));
-    highR.setCoefficients(juce::IIRCoefficients::makeHighShelf(rate, 5200.0, 0.7, highGain));
+    // Clamp band frequencies below Nyquist: on low-rate devices (e.g. an 8kHz
+    // hearing-aid output) the fixed 5.2kHz high shelf sits above Nyquist and
+    // JUCE's bilinear design blows up to NaN/inf coefficients, poisoning the
+    // whole mix. Same guard for the user-swept mid band (up to 8kHz).
+    const double nyquist = rate * 0.5;
+    const double limit = std::max(10.0, nyquist * 0.98);
+    const double lowFreq = std::min(220.0, limit);
+    const double midFreq = std::min(static_cast<double>(current.midFreq), limit);
+    const double highFreq = std::min(5200.0, limit);
+    lowL.setCoefficients(juce::IIRCoefficients::makeLowShelf(rate, lowFreq, 0.7, lowGain));
+    lowR.setCoefficients(juce::IIRCoefficients::makeLowShelf(rate, lowFreq, 0.7, lowGain));
+    midL.setCoefficients(juce::IIRCoefficients::makePeakFilter(rate, midFreq, 1.0, midGain));
+    midR.setCoefficients(juce::IIRCoefficients::makePeakFilter(rate, midFreq, 1.0, midGain));
+    highL.setCoefficients(juce::IIRCoefficients::makeHighShelf(rate, highFreq, 0.7, highGain));
+    highR.setCoefficients(juce::IIRCoefficients::makeHighShelf(rate, highFreq, 0.7, highGain));
 }
 
 void ThreeBandEq::process(float* left, float* right, int count)

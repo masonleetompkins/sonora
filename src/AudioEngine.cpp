@@ -609,6 +609,16 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
     if (block.buffer->getNumChannels() >= 2)
         master.process(block.buffer->getWritePointer(0, block.startSample),
                        block.buffer->getWritePointer(1, block.startSample), block.numSamples);
+    // Defense in depth: stamp out any nonfinite sample before it can poison
+    // meters, UI geometry, or hardware (a single NaN peak crashes AppKit layout
+    // via a NaN view bound, and NaN to a DAC reads as silence or worse).
+    for (int channel = 0; channel < block.buffer->getNumChannels(); ++channel)
+    {
+        auto* data = block.buffer->getWritePointer(channel, block.startSample);
+        for (int i = 0; i < block.numSamples; ++i)
+            if (!std::isfinite(data[i]))
+                data[i] = 0.0f;
+    }
     masterReductionDb.store(master.getReductionDb());
     outputPeak.store(block.buffer->getMagnitude(block.startSample, block.numSamples));
     wasPlaying = running;
