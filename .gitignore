@@ -2,3 +2,6 @@
 /build-release/
 /.tools/
 .cache/
+build-mac/
+build-mac-test/
+build-mac-asan/
