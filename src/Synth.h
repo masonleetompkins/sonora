@@ -45,7 +45,7 @@ public:
         lfoIncrement = juce::MathConstants<double>::twoPi * 5.5 / rate;
         noteHz = juce::MidiMessage::getMidiNoteInHertz(note);
         increment = juce::MathConstants<double>::twoPi * noteHz / rate;
-        amplitude = velocity * 0.12f;
+        amplitude = velocity * 0.35f;
         envelope.setSampleRate(rate);
         filterEnvelope.setSampleRate(rate);
         updateEnvelopes();
