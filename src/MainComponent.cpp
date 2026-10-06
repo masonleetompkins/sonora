@@ -5911,8 +5911,12 @@ void MainComponent::applyOmarchyTheme(bool force)
     // a SONORA_UI_SCALE override for personal preference. Checked on every
     // theme pass so docking/changing displays updates the whole UI.
     float scale = 1.0f;
+#if !defined(__APPLE__)
+    // On macOS display->scale is the Retina backing factor (2.0), which the OS
+    // already applies; using it here doubled every font and broke the layout.
     if (const auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
         scale = static_cast<float>(display->scale);
+#endif
     const auto override = juce::SystemStats::getEnvironmentVariable("SONORA_UI_SCALE", {});
     if (override.getDoubleValue() > 0.0)
         scale = static_cast<float>(override.getDoubleValue());
