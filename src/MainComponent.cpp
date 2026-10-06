@@ -1091,6 +1091,8 @@ void MainComponent::toggleAiSidebar()
         aiSidebar->toFront(false);
         aiSidebar->focusInput();
     }
+    else
+        grabKeyboardFocus(); // keys must reach the main view again, not a hidden editor
 }
 
 void MainComponent::refreshAiSidebar()
@@ -6375,6 +6377,7 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
     if (key == juce::KeyPress::escapeKey && exportPanel != nullptr && exportPanel->isVisible())
     {
         exportPanel->setVisible(false);
+        grabKeyboardFocus();
         return true;
     }
     if (key == juce::KeyPress::escapeKey && sidebarOpen())
@@ -6390,11 +6393,13 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
     if (key == juce::KeyPress::escapeKey && synthPanel != nullptr && synthPanel->isVisible())
     {
         synthPanel->setVisible(false);
+        grabKeyboardFocus();
         return true;
     }
     if (key == juce::KeyPress::escapeKey && kitPanel != nullptr && kitPanel->isVisible())
     {
         kitPanel->setVisible(false);
+        grabKeyboardFocus();
         return true;
     }
     if (key == juce::KeyPress::spaceKey)
