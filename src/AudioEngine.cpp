@@ -250,6 +250,13 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
 
     midi.clear();
     midiCollector.removeNextBlockOfMessages(midi, block.numSamples);
+    // Notes played on the on-screen keyboard or computer keys are queued in
+    // keyboardState itself; pull them out here and route them like hardware
+    // MIDI. (Injecting them only into the display buffer below lit the roll
+    // but never reached the synth.)
+    uiMidi.clear();
+    keyboardState.processNextMidiBuffer(uiMidi, 0, block.numSamples, true);
+    midi.addEvents(uiMidi, 0, block.numSamples, 0);
     // keyboardState is fed below from the FX-shaped buffer so the on-screen
     // keyboard and roll highlight show what is actually heard.
     if (panicNow || reset)
@@ -377,7 +384,7 @@ void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
                     fxMessage, block.startSample + e.offset);
         }
     }
-    keyboardState.processNextMidiBuffer(fxUi, 0, block.numSamples, true);
+    keyboardState.processNextMidiBuffer(fxUi, 0, block.numSamples, false);
     liveFxPosition += block.numSamples;
 
     std::int64_t blockStartPosition = scheduler.samplePosition();

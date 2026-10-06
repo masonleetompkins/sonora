@@ -5440,11 +5440,38 @@ void testAiDictation()
     require(!result.ok() && result.error.isNotEmpty(), "missing dictation WAV accepted");
 }
 
+// Keys played on the on-screen/computer keyboard (queued in keyboardState)
+// must reach the synth, not just the display.
+static void testUiKeysAudible()
+{
+    auto engineStorage = std::make_unique<sonora::AudioEngine>();
+    auto& engine = *engineStorage;
+    engine.prepare(48000);
+    require(engine.submit(sonora::defaultProject()), "default project rejected");
+    juce::AudioBuffer<float> buffer(2, 256);
+    engine.process({ &buffer, 0, 256 });
+    require(buffer.getMagnitude(0, 256) == 0.0f, "idle engine not silent");
+    engine.keyboardState.noteOn(1, 60, 0.8f);
+    float peak = 0.0f;
+    for (int i = 0; i < 8; ++i)
+    {
+        engine.process({ &buffer, 0, 256 });
+        peak = std::max(peak, buffer.getMagnitude(0, 256));
+    }
+    require(peak > 0.001f, "UI-played key was silent");
+    require(engine.keyboardState.isNoteOn(1, 60), "UI-played key not shown as held");
+    engine.keyboardState.noteOff(1, 60, 0.0f);
+    for (int i = 0; i < 4; ++i)
+        engine.process({ &buffer, 0, 256 });
+    require(!engine.keyboardState.isNoteOn(1, 60), "released key still shown as held");
+}
+
 int main()
 {
     try
     {
         testTiming(); std::cout << "PASS sample-accurate looping, boundaries, chase, tempo\n";
+        testUiKeysAudible(); std::cout << "PASS on-screen/computer keys reach the synth\n";
         testGroove(); std::cout << "PASS swing timing, quantize, humanize, engine groove\n";
         testKeyTools(); std::cout << "PASS scales, snap, chords, velocity ramp\n";
         testLiveFx(); std::cout << "PASS live arp and chord FX\n";

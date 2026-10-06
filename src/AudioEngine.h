@@ -77,6 +77,7 @@ public:
     void release();
     juce::MidiKeyboardState keyboardState;
     juce::MidiMessageCollector midiCollector;
+    juce::MidiBuffer uiMidi; // audio thread only: UI-played notes for this block
 
 private:
     bool audible(int track, const ProjectState& state) const;
