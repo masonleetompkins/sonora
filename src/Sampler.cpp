@@ -1,4 +1,5 @@
 #include "Sampler.h"
+#include "SonoraPaths.h"
 #include "PitchCorrect.h"
 #include <algorithm>
 #include <cmath>
@@ -93,6 +94,9 @@ bool isSampleFile(const juce::File& file)
 
 juce::File sampleLibraryDir()
 {
+#if defined(__APPLE__)
+    return sonora::sonoraSupportDir().getChildFile("samples");
+#endif
     auto root = juce::SystemStats::getEnvironmentVariable("XDG_DATA_HOME", {});
     if (root.isEmpty() || !juce::File::isAbsolutePath(root))
         root = juce::File::getSpecialLocation(juce::File::userHomeDirectory)
