@@ -3742,8 +3742,14 @@ void MainComponent::audioDeviceIOCallbackWithContext(const float* const* inputCh
 {
     if (outputChannelData == nullptr || numOutputChannels <= 0 || numSamples <= 0)
         return;
-    // The player's callback runs first and leaves the engine mix in the
-    // outputs; this tap only observes inputs and optionally adds monitoring.
+    // AudioDeviceManager gives every callback after the first its own scratch
+    // buffer and SUMS it into the device output. That scratch is never cleared,
+    // so this tap must write it fully: zero it, then add monitoring below.
+    // (Leaving it untouched mixed stale heap memory into the output: a loud,
+    // continuous buzz whenever that memory was not already zero.)
+    for (int channel = 0; channel < numOutputChannels; ++channel)
+        if (outputChannelData[channel] != nullptr)
+            juce::FloatVectorOperations::clear(outputChannelData[channel], numSamples);
     const float* sources[2] = { nullptr, nullptr };
     int mapped = 0;
     if (inputChannelData != nullptr && numInputChannels > 0

@@ -1,5 +1,5 @@
 diff --git a/modules/juce_audio_devices/native/juce_CoreAudio_mac.cpp b/modules/juce_audio_devices/native/juce_CoreAudio_mac.cpp
-index 143d626a7..d20b1fc31 100644
+index 143d626a7..af9a06a9a 100644
 --- a/modules/juce_audio_devices/native/juce_CoreAudio_mac.cpp
 +++ b/modules/juce_audio_devices/native/juce_CoreAudio_mac.cpp
 @@ -354,6 +354,7 @@ public:
@@ -63,7 +63,7 @@ index 143d626a7..d20b1fc31 100644
                      {
                          *dest++ = *src;
                          src += stride;
-@@ -812,7 +837,7 @@ public:
+@@ -812,9 +837,26 @@ public:
  
              callback->audioDeviceIOCallbackWithContext (getTempBuffers (inStream),  numInputChans,
                                                          getTempBuffers (outStream), numOutputChans,
@@ -71,8 +71,27 @@ index 143d626a7..d20b1fc31 100644
 +                                                        numFrames,
                                                          context);
  
++            // Sonora hearing-safety guard: a mix that left the limiter can never
++            // exceed a few units or be non-finite. If any output sample does,
++            // the block is garbage (uninitialised memory, a DSP blow-up), so
++            // send silence instead of full-scale noise to the listener's ears.
++            {
++                bool garbage = false;
++                for (int i = numOutputChans; --i >= 0 && ! garbage;)
++                    for (int j = 0; j < numFrames; ++j)
++                    {
++                        const float x = outStream->tempBuffers[i][j];
++                        if (! (std::abs (x) <= 4.0f)) { garbage = true; break; }
++                    }
++                if (garbage)
++                    for (int i = numOutputChans; --i >= 0;)
++                        zeromem (outStream->tempBuffers[i], sizeof (float) * (size_t) numFrames);
++            }
++
              for (int i = numOutputChans; --i >= 0;)
-@@ -824,7 +849,7 @@ public:
+             {
+                 auto& info = outStream->channelInfo.getReference (i);
+@@ -824,7 +866,7 @@ public:
  
                  if (stride != 0) // if this is zero, info is invalid
                  {
@@ -81,7 +100,7 @@ index 143d626a7..d20b1fc31 100644
                      {
                          *dest = *src++;
                          dest += stride;
-@@ -841,7 +866,23 @@ public:
+@@ -841,7 +883,23 @@ public:
  
          for (auto* stream : getStreams())
              if (stream != nullptr)
@@ -106,7 +125,7 @@ index 143d626a7..d20b1fc31 100644
      }
  
      // called by callbacks (possibly off the main thread)
-@@ -1111,6 +1152,7 @@ private:
+@@ -1111,6 +1169,7 @@ private:
      std::atomic<bool> playing { false };
      double sampleRate = 0;
      int bufferSize = 0;
