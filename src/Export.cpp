@@ -1,4 +1,5 @@
 #include "Export.h"
+#include <memory>
 #include "AudioTakes.h"
 #include "KitSamples.h"
 #include "Sampler.h"
@@ -24,7 +25,10 @@ ExportResult OfflineExport::render(const ExportJob& job, std::function<bool(doub
         return result;
     }
     // Loop range reuses the pattern directly; song range keeps the arrangement.
-    ProjectState project = job.project;
+    // Heap copy (~250 KB): render() runs on a worker thread, and macOS gives
+    // secondary threads a 512 KB stack.
+    auto projectStorage = std::make_unique<ProjectState>(job.project);
+    auto& project = *projectStorage;
     project.songMode = job.songRange;
     if (!project.valid())
     {
@@ -37,7 +41,10 @@ ExportResult OfflineExport::render(const ExportJob& job, std::function<bool(doub
         result.error = "Export length is out of range.";
         return result;
     }
-    AudioEngine engine;
+    // ~2.7 MB: heap, not stack. Export runs on a worker thread, and macOS
+    // secondary threads get a 512 KB stack (Linux defaults to 8 MB).
+    auto engineStorage = std::make_unique<AudioEngine>();
+    auto& engine = *engineStorage;
     engine.prepare(job.sampleRate);
     if (!engine.submit(project))
     {

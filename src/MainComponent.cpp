@@ -726,11 +726,15 @@ void MainComponent::applySynthPatch(int patch)
 
 // Runs one AI request off the message thread. The job posts its own result
 // back to the message thread (callAsync) when it finishes.
+// Linux-sized worker stacks: macOS defaults secondary threads to 512 KB, and
+// these jobs hold ProjectState (~250 KB) copies on the stack.
+static constexpr size_t workerStackBytes = 16 * 1024 * 1024;
+
 struct MainComponent::BackgroundWorker final : public juce::Thread
 {
     explicit BackgroundWorker(std::function<void(const std::atomic<bool>*)> jobIn,
                               const char* name = "Sonora background job")
-        : juce::Thread(name), job(std::move(jobIn))
+        : juce::Thread(name, workerStackBytes), job(std::move(jobIn))
     {
     }
     void run() override { job(&cancel); }

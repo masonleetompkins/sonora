@@ -51,6 +51,10 @@ if(BUILD_TESTING)
     juce_add_console_app(SonoraTests PRODUCT_NAME "Sonora Core Tests")
     target_sources(SonoraTests PRIVATE tests/CoreTests.cpp src/ProjectIO.cpp src/AudioEngine.cpp src/DrumSampler.cpp src/Export.cpp src/Fx.cpp src/AudioTakes.cpp src/PitchCorrect.cpp src/KitSamples.cpp src/TimeStretch.cpp)
     target_link_libraries(SonoraTests PRIVATE rubberband)
+    if(APPLE)
+        # Tests keep several ~250 KB ProjectStates as stack locals.
+        target_link_options(SonoraTests PRIVATE "LINKER:-stack_size,0x4000000")
+    endif()
     target_include_directories(SonoraTests PRIVATE src)
     target_compile_definitions(SonoraTests PRIVATE JUCE_USE_CURL=0 JUCE_JACK=${SONORA_JACK})
     target_link_libraries(SonoraTests PRIVATE juce::juce_audio_devices juce::juce_audio_formats
