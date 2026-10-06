@@ -7,7 +7,11 @@ include(FetchContent)
 FetchContent_Declare(JUCE
     GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
     GIT_TAG 8.0.6
-    GIT_SHALLOW TRUE)
+    GIT_SHALLOW TRUE
+    # macOS: CoreAudio temp buffers overrun when a device (e.g. Bluetooth
+    # hearing aids at 8 kHz) reports a different frame size than requested.
+    # Idempotent: skipped if already applied.
+    PATCH_COMMAND sh -c "git apply --reverse --check '${CMAKE_CURRENT_SOURCE_DIR}/packaging/juce-8.0.6-coreaudio-buffer-size.patch' 2>/dev/null || git apply '${CMAKE_CURRENT_SOURCE_DIR}/packaging/juce-8.0.6-coreaudio-buffer-size.patch'")
 FetchContent_MakeAvailable(JUCE)
 
 # Vendored Rubber Band (single-file build, built-in FFT, no threading):

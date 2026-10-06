@@ -1,0 +1,116 @@
+diff --git a/modules/juce_audio_devices/native/juce_CoreAudio_mac.cpp b/modules/juce_audio_devices/native/juce_CoreAudio_mac.cpp
+index 143d626a7..d20b1fc31 100644
+--- a/modules/juce_audio_devices/native/juce_CoreAudio_mac.cpp
++++ b/modules/juce_audio_devices/native/juce_CoreAudio_mac.cpp
+@@ -354,6 +354,7 @@ public:
+     void allocateTempBuffers()
+     {
+         auto tempBufSize = bufferSize + 4;
++        tempBufferCapacity = bufferSize;
+ 
+         auto streams = getStreams();
+         const auto total = std::accumulate (streams.begin(), streams.end(), 0,
+@@ -671,8 +672,15 @@ public:
+         // after calling updateDetailsFromDevice, we need to manually bodge these values
+         // to make sure we're using the correct numbers..
+         updateDetailsFromDevice (ins, outs);
+-        sampleRate = newSampleRate;
+-        bufferSize = bufferSizeSamples;
++
++        {
++            // Sonora: temp buffers were sized from the device-reported frame size;
++            // resize them to the bodged size or the IO callback overruns them.
++            const ScopedLock sl (callbackLock);
++            sampleRate = newSampleRate;
++            bufferSize = bufferSizeSamples;
++            allocateTempBuffers();
++        }
+ 
+         if (sampleRates.size() == 0)
+             return "Device has no available sample-rates";
+@@ -779,7 +787,24 @@ public:
+         const auto numInputChans  = getChannels (inStream);
+         const auto numOutputChans = getChannels (outStream);
+ 
+-        if (callback != nullptr)
++        // Sonora: clamp to what CoreAudio delivered and what the temp buffers hold.
++        auto numFrames = jmin (bufferSize, tempBufferCapacity);
++
++        if (numInputChans > 0)
++            numFrames = framesInBufferList (inInputData, numFrames);
++
++        if (numOutputChans > 0)
++        {
++            const auto outFrames = framesInBufferList (outOutputData, numFrames);
++
++            if (outFrames < numFrames || numFrames < bufferSize)
++                for (UInt32 i = 0; i < outOutputData->mNumberBuffers; ++i)
++                    zeromem (outOutputData->mBuffers[i].mData, outOutputData->mBuffers[i].mDataByteSize);
++
++            numFrames = outFrames;
++        }
++
++        if (callback != nullptr && numFrames > 0)
+         {
+             for (int i = numInputChans; --i >= 0;)
+             {
+@@ -790,7 +815,7 @@ public:
+ 
+                 if (stride != 0) // if this is zero, info is invalid
+                 {
+-                    for (int j = bufferSize; --j >= 0;)
++                    for (int j = numFrames; --j >= 0;)
+                     {
+                         *dest++ = *src;
+                         src += stride;
+@@ -812,7 +837,7 @@ public:
+ 
+             callback->audioDeviceIOCallbackWithContext (getTempBuffers (inStream),  numInputChans,
+                                                         getTempBuffers (outStream), numOutputChans,
+-                                                        bufferSize,
++                                                        numFrames,
+                                                         context);
+ 
+             for (int i = numOutputChans; --i >= 0;)
+@@ -824,7 +849,7 @@ public:
+ 
+                 if (stride != 0) // if this is zero, info is invalid
+                 {
+-                    for (int j = bufferSize; --j >= 0;)
++                    for (int j = numFrames; --j >= 0;)
+                     {
+                         *dest = *src++;
+                         dest += stride;
+@@ -841,7 +866,23 @@ public:
+ 
+         for (auto* stream : getStreams())
+             if (stream != nullptr)
+-                stream->previousSampleTime += static_cast<Float64> (bufferSize);
++                stream->previousSampleTime += static_cast<Float64> (numFrames > 0 ? numFrames : bufferSize);
++    }
++
++    static int framesInBufferList (const AudioBufferList* list, int limit) noexcept
++    {
++        if (list == nullptr)
++            return 0;
++
++        for (UInt32 i = 0; i < list->mNumberBuffers; ++i)
++        {
++            const auto& b = list->mBuffers[i];
++
++            if (b.mData != nullptr && b.mNumberChannels > 0)
++                limit = jmin (limit, (int) (b.mDataByteSize / (b.mNumberChannels * sizeof (float))));
++        }
++
++        return limit;
+     }
+ 
+     // called by callbacks (possibly off the main thread)
+@@ -1111,6 +1152,7 @@ private:
+     std::atomic<bool> playing { false };
+     double sampleRate = 0;
+     int bufferSize = 0;
++    int tempBufferCapacity = 0;
+     HeapBlock<float> audioBuffer;
+     Atomic<int> callbacksAllowed { 1 };
+ 
