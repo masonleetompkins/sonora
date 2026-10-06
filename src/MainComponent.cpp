@@ -6487,10 +6487,15 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
         // the black keys above, piano-style. Live voices, same as the
         // on-screen keyboard (channel 1).
         const int pitch = pianoPitchForKey(key.getKeyCode());
-        if (pitch >= 0 && heldKeys.find(key.getKeyCode()) == heldKeys.end())
+        if (pitch >= 0)
         {
-            heldKeys[key.getKeyCode()] = pitch;
-            engine.keyboardState.noteOn(1, pitch, 0.8f);
+            // Always consume piano keys, including OS auto-repeat while held:
+            // an unhandled repeat makes macOS play its alert blip over the note.
+            if (heldKeys.find(key.getKeyCode()) == heldKeys.end())
+            {
+                heldKeys[key.getKeyCode()] = pitch;
+                engine.keyboardState.noteOn(1, pitch, 0.8f);
+            }
             return true;
         }
     }
