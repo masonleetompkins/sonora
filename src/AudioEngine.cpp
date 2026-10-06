@@ -117,6 +117,10 @@ void AudioEngine::prepare(double sampleRate)
 
 void AudioEngine::process(const juce::AudioSourceChannelInfo& block)
 {
+    // Flush denormals to zero. Decaying filter/reverb state otherwise settles
+    // on subnormal floats (~1e-44): inaudible, but slow on Apple Silicon and
+    // never exactly silent. x86 Linux builds mostly flush already.
+    const juce::ScopedNoDenormals noDenormals;
     block.clearActiveBufferRegion();
     if (block.numSamples <= 0)
         return;
